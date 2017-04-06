@@ -1,6 +1,5 @@
 .. -*- rst -*-
 
-==================
 Consistency groups
 ==================
 
@@ -16,7 +15,7 @@ to limit roles.
 
 
 List consistency groups
-=======================
+~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  GET /v2/{tenant_id}/consistencygroups
 
@@ -55,7 +54,7 @@ Response Example
 
 
 Create consistency group
-========================
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  POST /v2/{tenant_id}/consistencygroups
 
@@ -69,6 +68,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
+   - tenant_id: tenant_id
    - description: description_6
    - availability_zone: availability_zone
    - volume_types: volume_types_2
@@ -100,7 +100,7 @@ Response Example
    :language: javascript
 
 Show consistency group details
-==============================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  GET /v2/{tenant_id}/consistencygroups/{consistencygroup_id}
 
@@ -122,7 +122,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_1
    - description: description
    - availability_zone: availability_zone
    - created_at: created_at
@@ -138,7 +138,7 @@ Response Example
 
 
 Create consistency group from source
-====================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  POST /v2/{tenant_id}/consistencygroups/create_from_src
 
@@ -152,7 +152,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_1
    - user_id: user_id
    - description: description
    - cgsnapshot_id: cgsnapshot_id
@@ -169,7 +169,7 @@ Request Example
 
 
 Delete consistency group
-========================
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  POST /v2/{tenant_id}/consistencygroups/{consistencygroup_id}/delete
 
@@ -195,7 +195,7 @@ Request Example
 
 
 List consistency groups with details
-====================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  GET /v2/{tenant_id}/consistencygroups/detail
 
@@ -223,7 +223,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_1
    - description: description
    - availability_zone: availability_zone
    - created_at: created_at
@@ -239,7 +239,7 @@ Response Example
 
 
 Update consistency group
-========================
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  PUT /v2/{tenant_id}/consistencygroups/{consistencygroup_id}/update
 

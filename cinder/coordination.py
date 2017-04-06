@@ -26,12 +26,13 @@ from eventlet import tpool
 import itertools
 from oslo_config import cfg
 from oslo_log import log
+from oslo_utils import timeutils
 import six
 from tooz import coordination
 from tooz import locking
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 
 LOG = log.getLogger(__name__)
 
@@ -93,9 +94,9 @@ class Coordinator(object):
                     self._ev = eventlet.spawn(
                         lambda: tpool.execute(self.heartbeat))
             except coordination.ToozError:
-                LOG.exception(_LE('Error starting coordination backend.'))
+                LOG.exception('Error starting coordination backend.')
                 raise
-            LOG.info(_LI('Coordination backend started successfully.'))
+            LOG.info('Coordination backend started successfully.')
 
     def stop(self):
         """Disconnect from coordination backend and stop heartbeat."""
@@ -153,17 +154,17 @@ class Coordinator(object):
             self.coordinator.heartbeat()
             return True
         except coordination.ToozConnectionError:
-            LOG.exception(_LE('Connection error while sending a heartbeat '
-                              'to coordination backend.'))
+            LOG.exception('Connection error while sending a heartbeat '
+                          'to coordination backend.')
             raise
         except coordination.ToozError:
-            LOG.exception(_LE('Error sending a heartbeat to coordination '
-                              'backend.'))
+            LOG.exception('Error sending a heartbeat to coordination '
+                          'backend.')
         return False
 
     def _reconnect(self):
         """Reconnect with jittered exponential backoff increase."""
-        LOG.info(_LI('Reconnecting to coordination backend.'))
+        LOG.info('Reconnecting to coordination backend.')
         cap = cfg.CONF.coordination.max_reconnect_backoff
         backoff = base = cfg.CONF.coordination.initial_reconnect_backoff
         for attempt in itertools.count(1):
@@ -172,11 +173,11 @@ class Coordinator(object):
                 break
             except coordination.ToozError:
                 backoff = min(cap, random.uniform(base, backoff * 3))
-                msg = _LW('Reconnect attempt %(attempt)s failed. '
-                          'Next try in %(backoff).2fs.')
+                msg = ('Reconnect attempt %(attempt)s failed. '
+                       'Next try in %(backoff).2fs.')
                 LOG.warning(msg, {'attempt': attempt, 'backoff': backoff})
                 self._dead.wait(backoff)
-        LOG.info(_LI('Reconnected to coordination backend.'))
+        LOG.info('Reconnected to coordination backend.')
 
 
 COORDINATOR = Coordinator(prefix='cinder-')
@@ -212,7 +213,12 @@ class Lock(locking.Lock):
     def _prepare_lock(self, lock_name, lock_data):
         if not isinstance(lock_name, six.string_types):
             raise ValueError(_('Not a valid string: %s') % lock_name)
-        return self.coordinator.get_lock(lock_name.format(**lock_data))
+        self._name = lock_name.format(**lock_data)
+        return self.coordinator.get_lock(self._name)
+
+    @property
+    def name(self):
+        return self._name
 
     def acquire(self, blocking=None):
         """Attempts to acquire lock.
@@ -282,6 +288,27 @@ def synchronized(lock_name, blocking=True, coordinator=None):
         call_args = inspect.getcallargs(f, *a, **k)
         call_args['f_name'] = f.__name__
         lock = Lock(lock_name, call_args, coordinator)
-        with lock(blocking):
-            return f(*a, **k)
+        t1 = timeutils.now()
+        t2 = None
+        try:
+            with lock(blocking):
+                t2 = timeutils.now()
+                LOG.debug('Lock "%(name)s" acquired by "%(function)s" :: '
+                          'waited %(wait_secs)0.3fs',
+                          {'name': lock.name,
+                           'function': f.__name__,
+                           'wait_secs': (t2 - t1)})
+                return f(*a, **k)
+        finally:
+            t3 = timeutils.now()
+            if t2 is None:
+                held_secs = "N/A"
+            else:
+                held_secs = "%0.3fs" % (t3 - t2)
+            LOG.debug('Lock "%(name)s" released by "%(function)s" :: held '
+                      '%(held_secs)s',
+                      {'name': lock.name,
+                       'function': f.__name__,
+                       'held_secs': held_secs})
+
     return _synchronized

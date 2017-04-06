@@ -77,7 +77,7 @@ user documentation.
   Added /clusters endpoint to list/show/update clusters.
 
   Show endpoint requires the cluster name and optionally the binary as a URL
-  paramter (default is "cinder-volume").  Returns:
+  parameter (default is "cinder-volume").  Returns:
 
   .. code-block:: json
 
@@ -204,7 +204,7 @@ user documentation.
 3.17
 ----
   os-snapshot-manage and os-volume-manage now support ``cluster`` parameter on
-  listings (summay and detailed).  Both location parameters, ``cluster`` and
+  listings (summary and detailed).  Both location parameters, ``cluster`` and
   ``host`` are exclusive and only one should be provided.
 
 3.18
@@ -218,3 +218,77 @@ user documentation.
 3.20
 ----
   Added reset status actions 'reset_status' to generic volume group.
+
+3.21
+----
+  Show provider_id in detailed view of a volume for admin.
+
+3.22
+----
+  Added support to filter snapshot list based on metadata of snapshot.
+
+3.23
+----
+  Allow passing force parameter to volume delete.
+
+3.24
+----
+  New API endpoint /workers/cleanup allows triggering cleanup for cinder-volume
+  services.  Meant for cleaning ongoing operations from failed nodes.
+
+  The cleanup will be performed by other services belonging to the same
+  cluster, so at least one of them must be up to be able to do the cleanup.
+
+  Cleanup cannot be triggered during a cloud upgrade.
+
+  If no arguments are provided cleanup will try to issue a clean message for
+  all nodes that are down, but we can restrict which nodes we want to be
+  cleaned using parameters ``service_id``, ``cluster_name``, ``host``,
+  ``binary``, and ``disabled``.
+
+  Cleaning specific resources is also possible using ``resource_type`` and
+  ``resource_id`` parameters.
+
+  We can even force cleanup on nodes that are up with ``is_up``, but that's
+  not recommended and should only used if you know what you are doing.  For
+  example if you know a specific cinder-volume is down even though it's still
+  not being reported as down when listing the services and you know the cluster
+  has at least another service to do the cleanup.
+
+  API will return a dictionary with 2 lists, one with services that have been
+  issued a cleanup request (``cleaning`` key) and another list with services
+  that cannot be cleaned right now because there is no alternative service to
+  do the cleanup in that cluster (``unavailable`` key).
+
+  Data returned for each service element in these two lists consist of the
+  ``id``, ``host``, ``binary``, and ``cluster_name``.  These are not the
+  services that will be performing the cleanup, but the services that will be
+  cleaned up or couldn't be cleaned up.
+
+3.25
+----
+  Add ``volumes`` field to group list/detail and group show.
+
+3.26
+----
+  - New ``failover`` action equivalent to ``failover_host``, but accepting
+    ``cluster`` parameter as well as the ``host`` cluster that
+    ``failover_host`` accepts.
+
+  - ``freeze`` and ``thaw`` actions accept ``cluster`` parameter.
+
+  - Cluster listing accepts ``replication_status``, ``frozen`` and
+    ``active_backend_id`` as filters, and returns additional fields for each
+    cluster: ``replication_status``, ``frozen``, ``active_backend_id``.
+
+3.27 (Maximum in Ocata)
+-----------------------
+  Added new attachment API's
+
+3.28
+----
+  Add filters support to get_pools
+
+3.29
+----
+  Add filter, sorter and pagination support in group snapshot.

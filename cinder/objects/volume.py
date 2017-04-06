@@ -281,7 +281,7 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
                 objects.VolumeAttachment,
                 db_volume.get('volume_attachment'))
             volume.volume_attachment = attachments
-        if 'consistencygroup' in expected_attrs:
+        if volume.consistencygroup_id and 'consistencygroup' in expected_attrs:
             consistencygroup = objects.ConsistencyGroup(context)
             consistencygroup._from_db_object(context,
                                              consistencygroup,
@@ -303,7 +303,7 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
                                                 db_cluster)
             else:
                 volume.cluster = None
-        if 'group' in expected_attrs:
+        if volume.group_id and 'group' in expected_attrs:
             group = objects.Group(context)
             group._from_db_object(context,
                                   group,
@@ -340,8 +340,11 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
         updates = self.cinder_obj_get_changes()
         if updates:
             if 'consistencygroup' in updates:
-                raise exception.ObjectActionError(
-                    action='save', reason=_('consistencygroup changed'))
+                # NOTE(xyang): Allow this to pass if 'consistencygroup' is
+                # set to None. This is to support backward compatibility.
+                if updates.get('consistencygroup'):
+                    raise exception.ObjectActionError(
+                        action='save', reason=_('consistencygroup changed'))
             if 'group' in updates:
                 raise exception.ObjectActionError(
                     action='save', reason=_('group changed'))
@@ -423,9 +426,12 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
                 self._context, self.id)
             self.volume_attachment = attachments
         elif attrname == 'consistencygroup':
-            consistencygroup = objects.ConsistencyGroup.get_by_id(
-                self._context, self.consistencygroup_id)
-            self.consistencygroup = consistencygroup
+            if self.consistencygroup_id is None:
+                self.consistencygroup = None
+            else:
+                consistencygroup = objects.ConsistencyGroup.get_by_id(
+                    self._context, self.consistencygroup_id)
+                self.consistencygroup = consistencygroup
         elif attrname == 'snapshots':
             self.snapshots = objects.SnapshotList.get_all_for_volume(
                 self._context, self.id)
@@ -438,9 +444,12 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
             else:
                 self.cluster = None
         elif attrname == 'group':
-            group = objects.Group.get_by_id(
-                self._context, self.group_id)
-            self.group = group
+            if self.group_id is None:
+                self.group = None
+            else:
+                group = objects.Group.get_by_id(
+                    self._context, self.group_id)
+                self.group = group
 
         self.obj_reset_changes(fields=[attrname])
 
@@ -458,14 +467,8 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
         # We swap fields between source (i.e. self) and destination at the
         # end of migration because we want to keep the original volume id
         # in the DB but now pointing to the migrated volume.
-        skip = {'id', 'provider_location', 'glance_metadata'
-                } | set(self.obj_extra_fields)
-
-        # For the migration started by retype, we should swap the
-        # volume type, other circumstances still skip volume type.
-        if self.status != 'retyping':
-            skip.add('volume_type')
-
+        skip = ({'id', 'provider_location', 'glance_metadata',
+                 'volume_type'} | set(self.obj_extra_fields))
         for key in set(dest_volume.fields.keys()) - skip:
             # Only swap attributes that are already set.  We do not want to
             # unexpectedly trigger a lazy-load.
@@ -625,18 +628,13 @@ class VolumeList(base.ObjectListBase, base.CinderObject):
                                   volumes, expected_attrs=expected_attrs)
 
     @classmethod
-    def get_volume_summary_all(cls, context):
-        volumes = db.get_volume_summary_all(context)
+    def get_volume_summary(cls, context, project_only):
+        volumes = db.get_volume_summary(context, project_only)
         return volumes
 
     @classmethod
-    def get_volume_summary_by_project(cls, context, project_id):
-        volumes = db.get_volume_summary_by_project(context, project_id)
-        return volumes
-
-    @classmethod
-    def get_active_by_window(cls, context, begin, end):
-        volumes = db.volume_get_active_by_window(context, begin, end)
+    def get_all_active_by_window(cls, context, begin, end):
+        volumes = db.volume_get_all_active_by_window(context, begin, end)
         expected_attrs = cls._get_expected_attrs(context)
         return base.obj_make_list(context, cls(context), objects.Volume,
                                   volumes, expected_attrs=expected_attrs)

@@ -16,8 +16,14 @@
 
 import argparse
 import os
+import json
 
 from cinder.interface import util
+from cinder import objects
+
+
+# Object loading can cause issues loading drivers, force it up front
+objects.register_all()
 
 
 parser = argparse.ArgumentParser(prog="generate_driver_list")
@@ -76,7 +82,7 @@ def print_drivers(drivers, config_name, output):
         if driver.version:
             output.write('* Version: %s' % driver.version)
         output.write('* %s=%s' % (config_name, driver.class_fqn))
-        if driver.ci_wiki_name:
+        if driver.ci_wiki_name and 'Cinder_Jenkins' not in driver.ci_wiki_name:
             output.write('* CI info: %s%s' % (CI_WIKI_ROOT,
                                               driver.ci_wiki_name))
         output.write('* Description:')
@@ -107,20 +113,21 @@ def collect_driver_info(driver):
             'version': driver.version,
             'fqn': driver.class_fqn,
             'description': driver.desc,
-            'ci_wiki_name': driver.ci_wiki_name}
+            'ci_wiki_name': driver.ci_wiki_name,
+            'supported': driver.supported}
 
     return info
 
 
 def output_dict():
+    """Output the results as a json dict."""
 
-    import pprint
     driver_list = []
     drivers = util.get_volume_drivers()
     for driver in drivers:
         driver_list.append(collect_driver_info(driver))
 
-    pprint.pprint(driver_list)
+    print(json.dumps(driver_list))
 
 
 def main():

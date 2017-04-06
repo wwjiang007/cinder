@@ -32,10 +32,10 @@ from cinder import compute
 from cinder import coordination
 from cinder import db
 from cinder import exception
+from cinder.i18n import _
+from cinder.image import image_utils
 from cinder.objects import fields
 from cinder import utils
-from cinder.i18n import _, _LE, _LI, _LW
-from cinder.image import image_utils
 from cinder.volume import driver
 
 LOG = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ def locked_volume_id_operation(f, external=False):
     return lvo_inner1
 
 
-class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
+class RemoteFSDriver(driver.BaseVD):
     """Common base for drivers that work like NFS."""
 
     driver_volume_type = None
@@ -187,6 +187,8 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
                           self.configuration.nas_secure_file_permissions,
                           'nas_secure_file_operations':
                           self.configuration.nas_secure_file_operations}
+
+        LOG.debug('NAS config: %s', secure_options)
         for opt_name, opt_value in secure_options.items():
             if opt_value not in valid_secure_opts:
                 err_parms = {'name': opt_name, 'value': opt_value}
@@ -205,7 +207,7 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
         for share in self.shares.keys():
             mount_path = self._get_mount_point_for_share(share)
             out, _ = self._execute('du', '--bytes', mount_path,
-                                   run_as_root=True)
+                                   run_as_root=self._execute_as_root)
             provisioned_size += int(out.split()[0])
         return round(provisioned_size / units.Gi, 2)
 
@@ -231,11 +233,13 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
         :param volume: volume reference
         :returns: provider_location update dict for database
         """
+
+        LOG.debug('Creating volume %(vol)s', {'vol': volume.id})
         self._ensure_shares_mounted()
 
         volume.provider_location = self._find_share(volume.size)
 
-        LOG.info(_LI('casted to %s'), volume.provider_location)
+        LOG.info('casted to %s', volume.provider_location)
 
         self._do_create_volume(volume)
 
@@ -250,7 +254,12 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
         volume_size = volume.size
 
         if getattr(self.configuration,
-                   self.driver_prefix + '_sparsed_volumes'):
+                   self.driver_prefix + '_qcow2_volumes', False):
+            # QCOW2 volumes are inherently sparse, so this setting
+            # will override the _sparsed_volumes setting.
+            self._create_qcow2_file(volume_path, volume_size)
+        elif getattr(self.configuration,
+                     self.driver_prefix + '_sparsed_volumes', False):
             self._create_sparsed_file(volume_path, volume_size)
         else:
             self._create_regular_file(volume_path, volume_size)
@@ -270,7 +279,7 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
                 self._ensure_share_mounted(share)
                 mounted_shares.append(share)
             except Exception as exc:
-                LOG.error(_LE('Exception during mounting %s'), exc)
+                LOG.error('Exception during mounting %s', exc)
 
         self._mounted_shares = mounted_shares
 
@@ -282,10 +291,13 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
 
         :param volume: volume reference
         """
+
+        LOG.debug('Deleting volume %(vol)s, provider_location: %(loc)s',
+                  {'vol': volume.id, 'loc': volume.provider_location})
         if not volume.provider_location:
-            LOG.warning(_LW('Volume %s does not have '
-                            'provider_location specified, '
-                            'skipping'), volume.name)
+            LOG.warning('Volume %s does not have '
+                        'provider_location specified, '
+                        'skipping', volume.name)
             return
 
         self._ensure_share_mounted(volume.provider_location)
@@ -342,7 +354,7 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
     def _fallocate(self, path, size):
         """Creates a raw file of given size in GiB using fallocate."""
         self._execute('fallocate', '--length=%sG' % size,
-                      path, run_as_root=True)
+                      path, run_as_root=self._execute_as_root)
 
     def _create_qcow2_file(self, path, size_gb):
         """Creates a QCOW2 file of a given size in GiB."""
@@ -368,8 +380,8 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
                       {'path': path, 'permissions': permissions})
         else:
             permissions = 'ugo+rw'
-            LOG.warning(_LW('%(path)s is being set with open permissions: '
-                            '%(perm)s'), {'path': path, 'perm': permissions})
+            LOG.warning('%(path)s is being set with open permissions: '
+                        '%(perm)s', {'path': path, 'perm': permissions})
 
         self._execute('chmod', permissions, path,
                       run_as_root=self._execute_as_root)
@@ -395,7 +407,6 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
 
     def copy_image_to_volume(self, context, volume, image_service, image_id):
         """Fetch the image from image_service and write it to the volume."""
-        run_as_root = self._execute_as_root
 
         image_utils.fetch_to_raw(context,
                                  image_service,
@@ -403,7 +414,7 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
                                  self.local_path(volume),
                                  self.configuration.volume_dd_blocksize,
                                  size=volume.size,
-                                 run_as_root=run_as_root)
+                                 run_as_root=self._execute_as_root)
 
         # NOTE (leseb): Set the virtual size of the image
         # the raw conversion overwrote the destination file
@@ -413,10 +424,10 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
         # this sets the size to the one asked in the first place by the user
         # and then verify the final virtual size
         image_utils.resize_image(self.local_path(volume), volume.size,
-                                 run_as_root=run_as_root)
+                                 run_as_root=self._execute_as_root)
 
         data = image_utils.qemu_img_info(self.local_path(volume),
-                                         run_as_root=run_as_root)
+                                         run_as_root=self._execute_as_root)
         virt_size = data.virtual_size // units.Gi
         if virt_size != volume.size:
             raise exception.ImageUnacceptable(
@@ -429,7 +440,8 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
         image_utils.upload_volume(context,
                                   image_service,
                                   image_meta,
-                                  self.local_path(volume))
+                                  self.local_path(volume),
+                                  run_as_root=self._execute_as_root)
 
     def _read_config_file(self, config_file):
         # Returns list of lines in file
@@ -483,8 +495,8 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
                     share_opts = share_info[1].strip()
 
                 if not re.match(self.SHARE_FORMAT_REGEX, share_address):
-                    LOG.error(_LE("Share %s ignored due to invalid format. "
-                                  "Must be of form address:/export."),
+                    LOG.error("Share %s ignored due to invalid format. "
+                              "Must be of form address:/export.",
                               share_address)
                     continue
 
@@ -560,20 +572,20 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
         NAS file operations. This base method will set the NAS security
         options to false.
         """
-        doc_html = "http://docs.openstack.org/admin-guide" \
-                   "/blockstorage_nfs_backend.html"
+        doc_html = ("http://docs.openstack.org/admin-guide"
+                    "/blockstorage_nfs_backend.html")
         self.configuration.nas_secure_file_operations = 'false'
-        LOG.warning(_LW("The NAS file operations will be run as root: "
-                        "allowing root level access at the storage backend. "
-                        "This is considered an insecure NAS environment. "
-                        "Please see %s for information on a secure NAS "
-                        "configuration."),
+        LOG.warning("The NAS file operations will be run as root: "
+                    "allowing root level access at the storage backend. "
+                    "This is considered an insecure NAS environment. "
+                    "Please see %s for information on a secure NAS "
+                    "configuration.",
                     doc_html)
         self.configuration.nas_secure_file_permissions = 'false'
-        LOG.warning(_LW("The NAS file permissions mode will be 666 (allowing "
-                        "other/world read & write access). This is considered "
-                        "an insecure NAS environment. Please see %s for "
-                        "information on a secure NFS configuration."),
+        LOG.warning("The NAS file permissions mode will be 666 (allowing "
+                    "other/world read & write access). This is considered "
+                    "an insecure NAS environment. Please see %s for "
+                    "information on a secure NFS configuration.",
                     doc_html)
 
     def _determine_nas_security_option_setting(self, nas_option, mount_point,
@@ -597,8 +609,8 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
             file_path = os.path.join(mount_point, file_name)
             if os.path.isfile(file_path):
                 nas_option = 'true'
-                LOG.info(_LI('Cinder secure environment '
-                             'indicator file exists.'))
+                LOG.info('Cinder secure environment '
+                         'indicator file exists.')
             else:
                 # The indicator file does not exist. If it is a new
                 # installation, set to 'true' and create the indicator file.
@@ -613,12 +625,12 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
                         # Set the permissions on our special marker file to
                         # protect from accidental removal (owner write only).
                         self._execute('chmod', '640', file_path,
-                                      run_as_root=False)
-                        LOG.info(_LI('New Cinder secure environment indicator'
-                                     ' file created at path %s.'), file_path)
+                                      run_as_root=self._execute_as_root)
+                        LOG.info('New Cinder secure environment indicator'
+                                 ' file created at path %s.', file_path)
                     except IOError as err:
-                        LOG.error(_LE('Failed to created Cinder secure '
-                                      'environment indicator file: %s'),
+                        LOG.error('Failed to created Cinder secure '
+                                  'environment indicator file: %s',
                                   err)
                 else:
                     # For existing installs, we default to 'false'. The
@@ -628,7 +640,7 @@ class RemoteFSDriver(driver.LocalVD, driver.TransferVD, driver.BaseVD):
         return nas_option
 
 
-class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
+class RemoteFSSnapDriverBase(RemoteFSDriver):
     """Base class for remotefs drivers implementing qcow2 snapshots.
 
        Driver must implement:
@@ -691,7 +703,8 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         This code expects to deal only with relative filenames.
         """
 
-        info = image_utils.qemu_img_info(path)
+        info = image_utils.qemu_img_info(path,
+                                         run_as_root=self._execute_as_root)
         if info.image:
             info.image = os.path.basename(info.image)
         if info.backing_file:
@@ -722,11 +735,19 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         raise NotImplementedError()
 
     def _img_commit(self, path):
+        # TODO(eharney): this is not using the correct permissions for
+        # NFS snapshots
+        #  It needs to run as root for volumes attached to instances, but
+        #  does not when in secure mode.
         self._execute('qemu-img', 'commit', path,
                       run_as_root=self._execute_as_root)
         self._delete(path)
 
     def _rebase_img(self, image, backing_file, volume_format):
+        # qemu-img create must run as root, because it reads from the
+        # backing file, which will be owned by qemu:qemu if attached to an
+        # instance.
+        # TODO(erlon): Sanity check this.
         self._execute('qemu-img', 'rebase', '-u', '-b', backing_file, image,
                       '-F', volume_format, run_as_root=self._execute_as_root)
 
@@ -880,7 +901,8 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
                 # Convert due to snapshots
                 # or volume data not being stored in raw format
                 #  (upload_volume assumes raw format input)
-                image_utils.convert_image(active_file_path, temp_path, 'raw')
+                image_utils.convert_image(active_file_path, temp_path, 'raw',
+                                          run_as_root=self._execute_as_root)
                 upload_path = temp_path
             else:
                 upload_path = active_file_path
@@ -888,7 +910,8 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
             image_utils.upload_volume(context,
                                       image_service,
                                       image_meta,
-                                      upload_path)
+                                      upload_path,
+                                      run_as_root=self._execute_as_root)
 
     def get_active_image_from_info(self, volume):
         """Returns filename of the active image from the info file."""
@@ -905,12 +928,14 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         return snap_info['active']
 
     def _create_cloned_volume(self, volume, src_vref):
-        LOG.info(_LI('Cloning volume %(src)s to volume %(dst)s'),
+        LOG.info('Cloning volume %(src)s to volume %(dst)s',
                  {'src': src_vref.id,
                   'dst': volume.id})
 
-        if src_vref.status != 'available':
-            msg = _("Volume status must be 'available'.")
+        if src_vref.status not in ['available', 'backing-up']:
+            msg = _("Source volume status must be 'available', or "
+                    "'backing-up' but is: "
+                    "%(status)s.") % {'status': src_vref.status}
             raise exception.InvalidVolume(msg)
 
         volume_name = CONF.volume_name_template % volume.id
@@ -961,7 +986,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         if (snapshot_file == active_file):
             return
 
-        LOG.info(_LI('Deleting stale snapshot: %s'), snapshot.id)
+        LOG.info('Deleting stale snapshot: %s', snapshot.id)
         self._delete(snapshot_path)
         del(snap_info[snapshot.id])
         self._write_info_file(info_path, snap_info)
@@ -981,11 +1006,17 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
 
         """
 
-        LOG.debug('Deleting snapshot %s:', snapshot.id)
+        LOG.debug('Deleting %(type)s snapshot %(snap)s of volume %(vol)s',
+                  {'snap': snapshot.id, 'vol': snapshot.volume.id,
+                   'type': ('online' if snapshot.volume.status == 'in-use'
+                            else 'offline')})
 
         volume_status = snapshot.volume.status
-        if volume_status not in ['available', 'in-use']:
-            msg = _('Volume status must be "available" or "in-use".')
+        if volume_status not in ['available', 'in-use', 'backing-up']:
+            msg = _("Volume status must be 'available', 'in-use' or "
+                    "'backing-up' but is: "
+                    "%(status)s.") % {'status': volume_status}
+
             raise exception.InvalidVolume(msg)
 
         vol_path = self._local_volume_dir(snapshot.volume)
@@ -1001,8 +1032,8 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
             # exist, do not attempt to delete.
             # (This happens, for example, if snapshot_create failed due to lack
             # of permission to write to the share.)
-            LOG.info(_LI('Snapshot record for %s is not present, allowing '
-                         'snapshot_delete to proceed.'), snapshot.id)
+            LOG.info('Snapshot record for %s is not present, allowing '
+                     'snapshot_delete to proceed.', snapshot.id)
             return
 
         snapshot_file = snap_info[snapshot.id]
@@ -1019,8 +1050,8 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         if base_file is None:
             # There should always be at least the original volume
             # file as base.
-            LOG.warning(_LW('No backing file found for %s, allowing '
-                            'snapshot to be deleted.'), snapshot_path)
+            LOG.warning('No backing file found for %s, allowing '
+                        'snapshot to be deleted.', snapshot_path)
 
             # Snapshot may be stale, so just delete it and update the
             # info file instead of blocking
@@ -1111,8 +1142,13 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         Snapshot must not be the active snapshot. (offline)
         """
 
+        LOG.debug('Creating volume %(vol)s from snapshot %(snap)s',
+                  {'vol': volume.id, 'snap': snapshot.id})
+
         if snapshot.status != 'available':
-            msg = _('Snapshot status must be "available" to clone.')
+            msg = _('Snapshot status must be "available" to clone. '
+                    'But is: %(status)s') % {'status': snapshot.status}
+
             raise exception.InvalidSnapshot(msg)
 
         self._ensure_shares_mounted()
@@ -1142,6 +1178,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         backing_path_full_path = os.path.join(
             self._local_volume_dir(snapshot.volume),
             backing_filename)
+
         info = self._qemu_img_info(backing_path_full_path,
                                    snapshot.volume.name)
         backing_fmt = info.file_format
@@ -1157,9 +1194,23 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
                    '-b', backing_filename,
                    '-F', backing_fmt,
                    new_snap_path]
+
+        # qemu-img rebase must run as root for the same reasons as above
         self._execute(*command, run_as_root=self._execute_as_root)
 
         self._set_rw_permissions(new_snap_path)
+
+        # if in secure mode, chown new file
+        if self.secure_file_operations_enabled():
+            ref_file = backing_path_full_path
+            log_msg = 'Setting permissions: %(file)s -> %(user)s:%(group)s' % {
+                'file': ref_file, 'user': os.stat(ref_file).st_uid,
+                'group': os.stat(ref_file).st_gid}
+            LOG.debug(log_msg)
+            command = ['chown',
+                       '--reference=%s' % ref_file,
+                       new_snap_path]
+            self._execute(*command, run_as_root=self._execute_as_root)
 
     def _create_snapshot(self, snapshot):
         """Create a snapshot.
@@ -1265,10 +1316,17 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
               info file: { 'active': 'volume-1234' }  (* changed!)
         """
 
+        LOG.debug('Creating %(type)s snapshot %(snap)s of volume %(vol)s',
+                  {'snap': snapshot.id, 'vol': snapshot.volume.id,
+                   'type': ('online' if snapshot.volume.status == 'in-use'
+                            else 'offline')})
+
         status = snapshot.volume.status
-        if status not in ['available', 'in-use']:
-            msg = _('Volume status must be "available" or "in-use"'
-                    ' for snapshot. (is %s)') % status
+        if status not in ['available', 'in-use', 'backing-up']:
+            msg = _("Volume status must be 'available', 'in-use' or "
+                    "'backing-up' but is: "
+                    "%(status)s.") % {'status': status}
+
             raise exception.InvalidVolume(msg)
 
         info_path = self._local_path_volume_info(snapshot.volume)
@@ -1312,7 +1370,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
                 connection_info)
             LOG.debug('nova call result: %s', result)
         except Exception:
-            LOG.exception(_LE('Call to Nova to create snapshot failed'))
+            LOG.exception('Call to Nova to create snapshot failed')
             raise
 
         # Loop and wait for result
@@ -1405,7 +1463,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
                 snapshot.id,
                 delete_info)
         except Exception:
-            LOG.exception(_LE('Call to Nova delete snapshot failed'))
+            LOG.exception('Call to Nova delete snapshot failed')
             raise
 
         # Loop and wait for result
@@ -1451,7 +1509,8 @@ class RemoteFSSnapDriverBase(RemoteFSDriver, driver.SnapshotVD):
         # Delete stale file
         path_to_delete = os.path.join(
             self._local_volume_dir(snapshot.volume), file_to_delete)
-        self._execute('rm', '-f', path_to_delete, run_as_root=True)
+        self._execute('rm', '-f', path_to_delete,
+                      run_as_root=self._execute_as_root)
 
 
 class RemoteFSSnapDriver(RemoteFSSnapDriverBase):

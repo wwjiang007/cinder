@@ -39,10 +39,11 @@ from cinder.brick.local_dev import lvm as brick_lvm
 from cinder import context
 from cinder import db
 from cinder import exception
-from cinder.i18n import _, _LI, _LW, _LE
+from cinder.i18n import _
 from cinder import objects
 from cinder import rpc
 from cinder import utils
+from cinder.volume import group_types
 from cinder.volume import throttling
 from cinder.volume import volume_types
 
@@ -122,6 +123,7 @@ def _usage_from_backup(backup, **kw):
     return usage_info
 
 
+@utils.if_notifications_enabled
 def notify_about_volume_usage(context, volume, event_suffix,
                               extra_usage_info=None, host=None):
     if not host:
@@ -136,6 +138,7 @@ def notify_about_volume_usage(context, volume, event_suffix,
                                           usage_info)
 
 
+@utils.if_notifications_enabled
 def notify_about_backup_usage(context, backup, event_suffix,
                               extra_usage_info=None,
                               host=None):
@@ -151,23 +154,17 @@ def notify_about_backup_usage(context, backup, event_suffix,
                                           usage_info)
 
 
-def _usage_from_snapshot(snapshot, **extra_usage_info):
-    try:
-        az = snapshot.volume['availability_zone']
-    except exception.VolumeNotFound:
-        # (zhiteng) Snapshot's source volume could have been deleted
-        # (which means snapshot has been deleted as well),
-        # lazy-loading volume would raise VolumeNotFound exception.
-        # In that case, not going any further by abusing low level
-        # DB API to fetch deleted volume but simply return empty
-        # string for snapshot's AZ info.
-        az = ''
-        LOG.debug("Source volume %s deleted", snapshot.volume_id)
-
+def _usage_from_snapshot(snapshot, context, **extra_usage_info):
+    # (niedbalski) a snapshot might be related to a deleted
+    # volume, if that's the case, the volume information is still
+    # required for filling the usage_info, so we enforce to read
+    # the volume data even if the volume has been deleted.
+    context.read_deleted = "yes"
+    volume = db.volume_get(context, snapshot.volume_id)
     usage_info = {
         'tenant_id': snapshot.project_id,
         'user_id': snapshot.user_id,
-        'availability_zone': az,
+        'availability_zone': volume['availability_zone'],
         'volume_id': snapshot.volume_id,
         'volume_size': snapshot.volume_size,
         'snapshot_id': snapshot.id,
@@ -182,6 +179,7 @@ def _usage_from_snapshot(snapshot, **extra_usage_info):
     return usage_info
 
 
+@utils.if_notifications_enabled
 def notify_about_snapshot_usage(context, snapshot, event_suffix,
                                 extra_usage_info=None, host=None):
     if not host:
@@ -190,7 +188,7 @@ def notify_about_snapshot_usage(context, snapshot, event_suffix,
     if not extra_usage_info:
         extra_usage_info = {}
 
-    usage_info = _usage_from_snapshot(snapshot, **extra_usage_info)
+    usage_info = _usage_from_snapshot(snapshot, context, **extra_usage_info)
 
     rpc.get_notifier('snapshot', host).info(context,
                                             'snapshot.%s' % event_suffix,
@@ -213,6 +211,7 @@ def _usage_from_capacity(capacity, **extra_usage_info):
     return capacity_info
 
 
+@utils.if_notifications_enabled
 def notify_about_capacity_usage(context, capacity, suffix,
                                 extra_usage_info=None, host=None):
     if not host:
@@ -228,6 +227,7 @@ def notify_about_capacity_usage(context, capacity, suffix,
                                             usage_info)
 
 
+@utils.if_notifications_enabled
 def notify_about_replication_usage(context, volume, suffix,
                                    extra_usage_info=None, host=None):
     if not host:
@@ -244,6 +244,7 @@ def notify_about_replication_usage(context, volume, suffix,
                                                usage_info)
 
 
+@utils.if_notifications_enabled
 def notify_about_replication_error(context, volume, suffix,
                                    extra_error_info=None, host=None):
     if not host:
@@ -273,6 +274,7 @@ def _usage_from_consistencygroup(group_ref, **kw):
     return usage_info
 
 
+@utils.if_notifications_enabled
 def notify_about_consistencygroup_usage(context, group, event_suffix,
                                         extra_usage_info=None, host=None):
     if not host:
@@ -304,6 +306,7 @@ def _usage_from_group(group_ref, **kw):
     return usage_info
 
 
+@utils.if_notifications_enabled
 def notify_about_group_usage(context, group, event_suffix,
                              extra_usage_info=None, host=None):
     if not host:
@@ -350,6 +353,7 @@ def _usage_from_group_snapshot(group_snapshot, **kw):
     return usage_info
 
 
+@utils.if_notifications_enabled
 def notify_about_cgsnapshot_usage(context, cgsnapshot, event_suffix,
                                   extra_usage_info=None, host=None):
     if not host:
@@ -367,6 +371,7 @@ def notify_about_cgsnapshot_usage(context, cgsnapshot, event_suffix,
         usage_info)
 
 
+@utils.if_notifications_enabled
 def notify_about_group_snapshot_usage(context, group_snapshot, event_suffix,
                                       extra_usage_info=None, host=None):
     if not host:
@@ -394,9 +399,9 @@ def _check_blocksize(blocksize):
             raise ValueError
         strutils.string_to_bytes('%sB' % blocksize)
     except ValueError:
-        LOG.warning(_LW("Incorrect value error: %(blocksize)s, "
-                        "it may indicate that \'volume_dd_blocksize\' "
-                        "was configured incorrectly. Fall back to default."),
+        LOG.warning("Incorrect value error: %(blocksize)s, "
+                    "it may indicate that \'volume_dd_blocksize\' "
+                    "was configured incorrectly. Fall back to default.",
                     {'blocksize': blocksize})
         # Fall back to default blocksize
         CONF.clear_override('volume_dd_blocksize')
@@ -473,7 +478,7 @@ def _copy_volume_with_path(prefix, srcstr, deststr, size_in_m, blocksize,
                "dest": deststr,
                "sz": size_in_m,
                "duration": duration})
-    LOG.info(_LI("Volume copy %(size_in_m).2f MB at %(mbps).2f MB/s"),
+    LOG.info("Volume copy %(size_in_m).2f MB at %(mbps).2f MB/s",
              {'size_in_m': size_in_m, 'mbps': mbps})
 
 
@@ -483,7 +488,7 @@ def _open_volume_with_path(path, mode):
             handle = open(path, mode)
             return handle
     except Exception:
-        LOG.error(_LE("Failed to open volume from %(path)s."), {'path': path})
+        LOG.error("Failed to open volume from %(path)s.", {'path': path})
 
 
 def _transfer_data(src, dest, length, chunk_size):
@@ -546,8 +551,8 @@ def _copy_volume_with_file(src, dest, size_in_m):
         dest_handle.close()
 
     mbps = (size_in_m / duration)
-    LOG.info(_LI("Volume copy completed (%(size_in_m).2f MB at "
-                 "%(mbps).2f MB/s)."),
+    LOG.info("Volume copy completed (%(size_in_m).2f MB at "
+             "%(mbps).2f MB/s).",
              {'size_in_m': size_in_m, 'mbps': mbps})
 
 
@@ -596,7 +601,7 @@ def clear_volume(volume_size, volume_path, volume_clear=None,
     if volume_clear_ionice is None:
         volume_clear_ionice = CONF.volume_clear_ionice
 
-    LOG.info(_LI("Performing secure delete on volume: %s"), volume_path)
+    LOG.info("Performing secure delete on volume: %s", volume_path)
 
     # We pass sparse=False explicitly here so that zero blocks are not
     # skipped in order to clear the volume.
@@ -856,8 +861,8 @@ def convert_config_string_to_dict(config_string):
         st = st.replace(" ", ", ")
         resultant_dict = ast.literal_eval(st)
     except Exception:
-        LOG.warning(_LW("Error encountered translating config_string: "
-                        "%(config_string)s to dict"),
+        LOG.warning("Error encountered translating config_string: "
+                    "%(config_string)s to dict",
                     {'config_string': config_string})
 
     return resultant_dict
@@ -877,3 +882,32 @@ def create_encryption_key(context, key_manager, volume_type_id):
             algorithm=algorithm,
             length=length)
     return encryption_key_id
+
+
+def is_replicated_str(str):
+    spec = (str or '').split()
+    return (len(spec) == 2 and
+            spec[0] == '<is>' and strutils.bool_from_string(spec[1]))
+
+
+def is_replicated_spec(extra_specs):
+    return (extra_specs and
+            is_replicated_str(extra_specs.get('replication_enabled')))
+
+
+def group_get_by_id(group_id):
+    ctxt = context.get_admin_context()
+    group = db.group_get(ctxt, group_id)
+    return group
+
+
+def is_group_a_cg_snapshot_type(group_or_snap):
+    LOG.debug("Checking if %s is a consistent snapshot group",
+              group_or_snap)
+    if group_or_snap["group_type_id"] is not None:
+        spec = group_types.get_group_type_specs(
+            group_or_snap["group_type_id"],
+            key="consistent_group_snapshot_enabled"
+        )
+        return spec == "<is> True"
+    return False

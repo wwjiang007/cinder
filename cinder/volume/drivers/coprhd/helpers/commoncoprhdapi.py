@@ -49,7 +49,7 @@ URI_TASKS_BY_OPID = '/vdc/tasks/{0}'
 def _decode_list(data):
     rv = []
     for item in data:
-        if isinstance(item, unicode):
+        if isinstance(item, six.text_type):
             item = item.encode('utf-8')
         elif isinstance(item, list):
             item = _decode_list(item)
@@ -62,9 +62,9 @@ def _decode_list(data):
 def _decode_dict(data):
     rv = {}
     for key, value in data.items():
-        if isinstance(key, unicode):
+        if isinstance(key, six.text_type):
             key = key.encode('utf-8')
-        if isinstance(value, unicode):
+        if isinstance(value, six.text_type):
             value = value.encode('utf-8')
         elif isinstance(value, list):
             value = _decode_list(value)
@@ -98,7 +98,7 @@ def service_json_request(ip_addr, port, http_method, uri, body,
     :param uri: the request URI
     :param body: the request payload
     :returns: a tuple of two elements: (response body, response headers)
-    :raises: CoprHdError in case of HTTP errors with err_code 3
+    :raises CoprHdError: in case of HTTP errors with err_code 3
     """
 
     SEC_AUTHTOKEN_HEADER = 'X-SDS-AUTH-TOKEN'
@@ -204,7 +204,7 @@ def service_json_request(ip_addr, port, http_method, uri, body,
                               " service your request")
         else:
             error_msg = response.text
-            if isinstance(error_msg, unicode):
+            if isinstance(error_msg, six.text_type):
                 error_msg = error_msg.encode('utf-8')
         raise CoprHdError(CoprHdError.HTTP_ERR,
                           (_("HTTP code: %(status_code)s"

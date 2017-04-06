@@ -15,13 +15,14 @@ from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import timeutils
 from oslo_utils import units
+import six
 import taskflow.engines
 from taskflow.patterns import linear_flow
 from taskflow.types import failure as ft
 
 from cinder import exception
 from cinder import flow_utils
-from cinder.i18n import _, _LE, _LW
+from cinder.i18n import _
 from cinder import objects
 from cinder.objects import fields
 from cinder import policy
@@ -169,7 +170,7 @@ class ExtractVolumeRequestTask(flow_utils.CinderTask):
                 raise exception.InvalidInput(reason=msg)
 
         def validate_int(size):
-            if not isinstance(size, int) or size <= 0:
+            if not isinstance(size, six.integer_types) or size <= 0:
                 msg = _("Volume size '%(size)s' must be an integer and"
                         " greater than 0") % {'size': size}
                 raise exception.InvalidInput(reason=msg)
@@ -259,9 +260,9 @@ class ExtractVolumeRequestTask(flow_utils.CinderTask):
                     context,
                     img_vol_type)
             except exception.VolumeTypeNotFoundByName:
-                LOG.warning(_LW("Failed to retrieve volume_type from image "
-                                "metadata. '%(img_vol_type)s' doesn't match "
-                                "any volume types."),
+                LOG.warning("Failed to retrieve volume_type from image "
+                            "metadata. '%(img_vol_type)s' doesn't match "
+                            "any volume types.",
                             {'img_vol_type': img_vol_type})
                 return None
 
@@ -320,9 +321,9 @@ class ExtractVolumeRequestTask(flow_utils.CinderTask):
                 availability_zone = (
                     CONF.default_availability_zone or
                     CONF.storage_availability_zone)
-                LOG.warning(_LW("Availability zone '%(s_az)s' "
-                                "not found, falling back to "
-                                "'%(s_fallback_az)s'."),
+                LOG.warning("Availability zone '%(s_az)s' "
+                            "not found, falling back to "
+                            "'%(s_fallback_az)s'.",
                             {'s_az': original_az,
                              's_fallback_az': availability_zone})
             else:
@@ -394,9 +395,8 @@ class ExtractVolumeRequestTask(flow_utils.CinderTask):
             if volume_type:
                 current_volume_type_id = volume_type.get('id')
                 if current_volume_type_id != snapshot['volume_type_id']:
-                    msg = _LW("Volume type will be changed to "
-                              "be the same as the source volume.")
-                    LOG.warning(msg)
+                    LOG.warning("Volume type will be changed to "
+                                "be the same as the source volume.")
             return snapshot['volume_type_id']
         else:
             return volume_type.get('id')
@@ -458,9 +458,19 @@ class ExtractVolumeRequestTask(flow_utils.CinderTask):
             qos_specs = volume_types.get_volume_type_qos_specs(volume_type_id)
             if qos_specs['qos_specs']:
                 specs = qos_specs['qos_specs'].get('specs', {})
+
+            # Determine default replication status
+            extra_specs = volume_types.get_volume_type_extra_specs(
+                volume_type_id)
         if not specs:
             # to make sure we don't pass empty dict
             specs = None
+            extra_specs = None
+
+        if vol_utils.is_replicated_spec(extra_specs):
+            replication_status = fields.ReplicationStatus.ENABLED
+        else:
+            replication_status = fields.ReplicationStatus.DISABLED
 
         return {
             'size': size,
@@ -475,6 +485,7 @@ class ExtractVolumeRequestTask(flow_utils.CinderTask):
             'consistencygroup_id': consistencygroup_id,
             'cgsnapshot_id': cgsnapshot_id,
             'group_id': group_id,
+            'replication_status': replication_status,
         }
 
 
@@ -506,6 +517,14 @@ class EntryCreateTask(flow_utils.CinderTask):
         pre-cursor task.
         """
 
+        src_volid = kwargs.get('source_volid')
+        src_vol = None
+        if src_volid is not None:
+            src_vol = objects.Volume.get_by_id(context, src_volid)
+        bootable = False
+        if src_vol is not None:
+            bootable = src_vol.bootable
+
         volume_properties = {
             'size': kwargs.pop('size'),
             'user_id': context.user_id,
@@ -516,8 +535,8 @@ class EntryCreateTask(flow_utils.CinderTask):
             # Rename these to the internal name.
             'display_description': kwargs.pop('description'),
             'display_name': kwargs.pop('name'),
-            'replication_status': 'disabled',
             'multiattach': kwargs.pop('multiattach'),
+            'bootable': bootable,
         }
 
         # Merge in the other required arguments which should provide the rest
@@ -569,7 +588,7 @@ class EntryCreateTask(flow_utils.CinderTask):
             #
             # NOTE(harlowja): Being unable to destroy a volume is pretty
             # bad though!!
-            LOG.exception(_LE("Failed destroying volume entry %s"), volume.id)
+            LOG.exception("Failed destroying volume entry %s", volume.id)
 
 
 class QuotaReserveTask(flow_utils.CinderTask):
@@ -630,8 +649,8 @@ class QuotaReserveTask(flow_utils.CinderTask):
         except exception.CinderException:
             # We are already reverting, therefore we should silence this
             # exception since a second exception being active will be bad.
-            LOG.exception(_LE("Failed rolling back quota for"
-                              " %s reservations"), reservations)
+            LOG.exception("Failed rolling back quota for"
+                          " %s reservations", reservations)
 
 
 class QuotaCommitTask(flow_utils.CinderTask):
@@ -677,8 +696,8 @@ class QuotaCommitTask(flow_utils.CinderTask):
                 QUOTAS.commit(context, reservations,
                               project_id=context.project_id)
         except Exception:
-            LOG.exception(_LE("Failed to update quota for deleting "
-                              "volume: %s"), volume['id'])
+            LOG.exception("Failed to update quota for deleting "
+                          "volume: %s", volume['id'])
 
 
 class VolumeCastTask(flow_utils.CinderTask):
@@ -784,11 +803,11 @@ class VolumeCastTask(flow_utils.CinderTask):
         # Restore the source volume status and set the volume to error status.
         common.restore_source_status(context, self.db, kwargs)
         common.error_out(volume)
-        LOG.error(_LE("Volume %s: create failed"), volume.id)
+        LOG.error("Volume %s: create failed", volume.id)
         exc_info = False
         if all(flow_failures[-1].exc_info):
             exc_info = flow_failures[-1].exc_info
-        LOG.error(_LE('Unexpected build error:'), exc_info=exc_info)
+        LOG.error('Unexpected build error:', exc_info=exc_info)
 
 
 def get_flow(db_api, image_service_api, availability_zones, create_what,

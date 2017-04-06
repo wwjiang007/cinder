@@ -17,6 +17,7 @@ import mock
 from cinder.compute import nova
 from cinder import context
 from cinder import test
+from novaclient import exceptions as nova_exceptions
 
 
 class NovaClientTestCase(test.TestCase):
@@ -35,6 +36,8 @@ class NovaClientTestCase(test.TestCase):
                              'http://novahost:8774/v2/%(project_id)s')
         self.override_config('nova_endpoint_admin_template',
                              'http://novaadmhost:4778/v2/%(project_id)s')
+        self.override_config('nova_catalog_admin_info',
+                             'compute:Compute Service:adminURL')
         self.override_config('os_privileged_user_name', 'adminuser')
         self.override_config('os_privileged_user_password', 'strongpassword')
 
@@ -132,6 +135,13 @@ class NovaClientTestCase(test.TestCase):
             session=p_session.return_value, region_name='farfaraway',
             insecure=False, endpoint_type='publicURL', cacert=None,
             timeout=None, extensions=nova.nova_extensions)
+
+    def test_novaclient_exceptions(self):
+        # This is to prevent regression if exceptions are
+        # removed from novaclient since the service catalog
+        # code does not have thorough tests.
+        self.assertTrue(hasattr(nova_exceptions, 'EndpointNotFound'))
+        self.assertTrue(hasattr(nova_exceptions, 'AmbiguousEndpoints'))
 
 
 class FakeNovaClient(object):

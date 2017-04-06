@@ -150,6 +150,7 @@ mirror_base: &mirror_base
       _type: VNXMirrorImageState
       value: 'SYNCHRONIZED'
 
+
 ###########################################################
 # TestClient
 ###########################################################
@@ -369,6 +370,8 @@ test_cleanup_migration:
   session: &session_cancel
     _properties:
       existed: true
+      dest_lu_id: 2
+
   lun: &lun_cancel_migrate
     _methods:
       cancel_migrate:
@@ -376,6 +379,31 @@ test_cleanup_migration:
     _methods:
       get_migration_session: *session_cancel
       get_lun: *lun_cancel_migrate
+
+test_cleanup_migration_not_migrating:
+  lun: &lun_cancel_migrate_not_migrating
+    _methods:
+      cancel_migrate:
+        _raise:
+          VNXLunNotMigratingError: The LUN is not migrating
+  vnx:
+    _methods:
+      get_migration_session: *session_cancel
+      get_lun: *lun_cancel_migrate_not_migrating
+
+test_cleanup_migration_cancel_failed:
+  lun: &lun_cancel_migrate_cancel_failed
+    _methods:
+      cancel_migrate:
+        _raise:
+          VNXLunSyncCompletedError: The LUN is not migrating
+    _properties:
+      wwn: test
+  vnx:
+    _methods:
+      get_migration_session:
+        _side_effect: [*session_cancel, *session_verify]
+      get_lun: *lun_cancel_migrate_cancel_failed
 
 test_get_lun_by_name:
   lun: &lun_test_get_lun_by_name
@@ -462,6 +490,26 @@ test_delete_lun_exception:
       <<: *vnx_base_prop
     _methods:
       get_lun: *lun_test_delete_lun_exception
+
+test_cleanup_async_lun:
+  lun: &lun_test_cleanup_async_lun
+    _properties:
+      <<: *lun_base_prop
+      name: lun_test_cleanup_async_lun
+      is_snap_mount_point: True
+    _methods:
+      delete:
+      cancel_migrate:
+  snap: &snap_test_cleanup_async_lun
+    _methods:
+      delete:
+  vnx:
+    _properties:
+      <<: *vnx_base_prop
+    _methods:
+      get_lun: *lun_test_cleanup_async_lun
+      get_snap: *snap_test_cleanup_async_lun
+      get_migration_session: *session_migrating
 
 test_create_cg: &test_create_cg
   cg: &cg_for_create
@@ -684,7 +732,7 @@ test_create_sg_name_in_use:
       create_sg:
         _raise:
           VNXStorageGroupNameInUseError: Storage group name is in use.
-      get_sg:
+      get_sg: *sg_base
 
 test_get_storage_group:
   sg: &sg_test_get_storage_group
@@ -1211,6 +1259,29 @@ test_append_volume_stats:
 test_delete_volume_not_force: *test_delete_lun
 test_delete_volume_force: *test_delete_lun
 
+test_delete_async_volume:
+  snap: &snap_test_delete_async_volume
+    _methods:
+      delete:
+  vnx:
+    _methods:
+      get_lun: *lun_test_delete_lun
+      get_snap: *snap_test_delete_async_volume
+
+test_delete_async_volume_migrating:
+  lun: &lun_used_by_feature
+    _properties:
+      is_snap_mount_point: false
+    _methods:
+      cancel_migrate:
+      delete:
+       _raise:
+         VNXLunUsedByFeatureError:
+  vnx:
+    _methods:
+      get_lun: *lun_used_by_feature
+      get_snap: *snap_test_delete_async_volume
+
 test_enable_compression:
   lun:
     _properties:
@@ -1365,7 +1436,9 @@ test_delete_snapshot_adapter: *test_delete_snapshot
 
 test_create_cgsnapshot: *test_create_cg_snapshot
 
-test_delete_cgsnapshot:
+test_do_create_cgsnap: *test_create_cg_snapshot
+
+test_do_delete_cgsnap:
   cg_snap: &cg_snap_delete
     _methods:
       delete:
@@ -1373,7 +1446,7 @@ test_delete_cgsnapshot:
     _methods:
       get_snap: *cg_snap_delete
 
-test_create_cg_from_cgsnapshot:
+test_do_create_cg_from_cgsnap:
   snap: &copied_cg_snap
     _methods:
       copy:
@@ -1400,7 +1473,7 @@ test_create_cg_from_cgsnapshot:
       get_migration_session: *session_verify
       create_cg: *cg_for_create
 
-test_create_cloned_cg:
+test_do_clone_cg:
   vnx:
     _properties:
     _methods:
@@ -1773,6 +1846,8 @@ test_terminate_connection_cleanup_sg_is_not_empty:
 
 test_update_consistencygroup:
 
+test_do_update_cg:
+
 test_update_migrated_volume:
 
 test_update_migrated_volume_smp:
@@ -1784,6 +1859,26 @@ test_normalize_config_iscsi_initiators_none:
 test_normalize_config_iscsi_initiators_empty_str:
 
 test_normalize_config_iscsi_initiators_not_dict:
+
+test_create_group_snap:
+
+test_create_cgsnapshot:
+
+test_create_cloned_cg:
+
+test_create_cloned_group:
+
+test_create_cg_from_cgsnapshot:
+
+test_create_group_from_group_snapshot:
+
+test_create_cgsnapshot:
+
+test_create_group_snapshot:
+
+test_delete_group_snapshot:
+
+test_delete_cgsnapshot:
 
 
 ###########################################################

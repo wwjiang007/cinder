@@ -32,7 +32,7 @@ import webob.exc
 from webob.util import status_generic_reasons
 from webob.util import status_reasons
 
-from cinder.i18n import _, _LE
+from cinder.i18n import _
 
 
 LOG = logging.getLogger(__name__)
@@ -108,9 +108,9 @@ class CinderException(Exception):
                 exc_info = sys.exc_info()
                 # kwargs doesn't match a variable in the message
                 # log the issue and the kwargs
-                LOG.exception(_LE('Exception in string format operation'))
+                LOG.exception('Exception in string format operation')
                 for name, value in kwargs.items():
-                    LOG.error(_LE("%(name)s: %(value)s"),
+                    LOG.error("%(name)s: %(value)s",
                               {'name': name, 'value': value})
                 if CONF.fatal_exception_format_errors:
                     six.reraise(*exc_info)
@@ -223,7 +223,7 @@ class InvalidHost(Invalid):
 # Cannot be templated as the error syntax varies.
 # msg needs to be constructed when raised.
 class InvalidParameterValue(Invalid):
-    message = _("%(err)s")
+    message = "%(err)s"
 
 
 class InvalidAuthKey(Invalid):
@@ -237,6 +237,10 @@ class InvalidConfigurationValue(Invalid):
 
 class ServiceUnavailable(Invalid):
     message = _("Service is unavailable at this time.")
+
+
+class UnavailableDuringUpgrade(Invalid):
+    message = _('Cannot perform %(action)s during system upgrade.')
 
 
 class ImageUnacceptable(Invalid):
@@ -271,6 +275,10 @@ class InvalidGlobalAPIVersion(Invalid):
 
 class MissingRequired(Invalid):
     message = _("Missing required element '%(element)s' in request body.")
+
+
+class ValidationError(Invalid):
+    message = "%(detail)s"
 
 
 class APIException(CinderException):
@@ -418,12 +426,13 @@ class ImageNotFound(NotFound):
 class ServiceNotFound(NotFound):
 
     def __init__(self, message=None, **kwargs):
-        if kwargs.get('host', None):
-            self.message = _("Service %(service_id)s could not be "
-                             "found on host %(host)s.")
-        else:
-            self.message = _("Service %(service_id)s could not be found.")
-        super(ServiceNotFound, self).__init__(None, **kwargs)
+        if not message:
+            if kwargs.get('host', None):
+                self.message = _("Service %(service_id)s could not be "
+                                 "found on host %(host)s.")
+            else:
+                self.message = _("Service %(service_id)s could not be found.")
+        super(ServiceNotFound, self).__init__(message, **kwargs)
 
 
 class ServiceTooOld(Invalid):
@@ -570,10 +579,6 @@ class ParameterNotFound(NotFound):
     message = _("Could not find parameter %(param)s")
 
 
-class PasteAppNotFound(NotFound):
-    message = _("Could not load paste app '%(name)s' from %(path)s")
-
-
 class NoValidBackend(CinderException):
     message = _("No valid backend was found. %(reason)s")
 
@@ -602,8 +607,8 @@ class VolumeSizeExceedsAvailableQuota(QuotaError):
 
 
 class VolumeSizeExceedsLimit(QuotaError):
-    message = _("Requested volume size %(size)d is larger than "
-                "maximum allowed limit %(limit)d.")
+    message = _("Requested volume size %(size)dG is larger than "
+                "maximum allowed limit %(limit)dG.")
 
 
 class VolumeBackupSizeExceedsAvailableQuota(QuotaError):
@@ -876,8 +881,11 @@ ObjectFieldInvalid = obj_exc.ObjectFieldInvalid
 
 
 class CappedVersionUnknown(CinderException):
-    message = _('Unrecoverable Error: Versioned Objects in DB are capped to '
-                'unknown version %(version)s.')
+    message = _("Unrecoverable Error: Versioned Objects in DB are capped to "
+                "unknown version %(version)s. Most likely your environment "
+                "contains only new services and you're trying to start an "
+                "older one. Use `cinder-manage service list` to check that "
+                "and upgrade this service.")
 
 
 class VolumeGroupNotFound(CinderException):
@@ -1149,7 +1157,7 @@ class ISCSITargetDetachFailed(CinderException):
 
 
 class ISCSITargetHelperCommandFailed(CinderException):
-    message = _("%(error_message)s")
+    message = "%(error_message)s"
 
 
 # X-IO driver exception.
@@ -1208,7 +1216,7 @@ class ZadaraInvalidAttachmentInfo(Invalid):
 
 
 class ZadaraVolumeNotFound(VolumeDriverException):
-    message = _("%(reason)s")
+    message = "%(reason)s"
 
 
 # ZFSSA NFS driver exception.
@@ -1243,11 +1251,11 @@ class DotHillInvalidBackend(VolumeDriverException):
 
 
 class DotHillConnectionError(VolumeDriverException):
-    message = _("%(message)s")
+    message = "%(message)s"
 
 
 class DotHillAuthenticationError(VolumeDriverException):
-    message = _("%(message)s")
+    message = "%(message)s"
 
 
 class DotHillNotEnoughSpace(VolumeDriverException):
@@ -1255,7 +1263,7 @@ class DotHillNotEnoughSpace(VolumeDriverException):
 
 
 class DotHillRequestError(VolumeDriverException):
-    message = _("%(message)s")
+    message = "%(message)s"
 
 
 class DotHillNotTargetPortal(VolumeDriverException):
@@ -1286,7 +1294,7 @@ class NotSupportedOperation(Invalid):
 
 # Hitachi HNAS drivers
 class HNASConnError(VolumeDriverException):
-    message = _("%(message)s")
+    message = "%(message)s"
 
 
 # Coho drivers
@@ -1301,7 +1309,7 @@ class TegileAPIException(VolumeBackendAPIException):
 
 # NexentaStor driver exception
 class NexentaException(VolumeDriverException):
-    message = _("%(message)s")
+    message = "%(message)s"
 
 
 # Google Cloud Storage(GCS) backup driver
@@ -1346,3 +1354,38 @@ class RdxAPICommandException(VolumeDriverException):
 
 class RdxAPIConnectionException(VolumeDriverException):
     message = _("Reduxio API Connection Exception")
+
+
+class AttachmentSpecsNotFound(NotFound):
+    message = _("Attachment %(attachment_id)s has no "
+                "key %(specs_key)s.")
+
+
+class InvalidAttachment(Invalid):
+    message = _("Invalid attachment: %(reason)s")
+
+
+# Veritas driver
+class UnableToExecuteHyperScaleCmd(VolumeDriverException):
+    message = _("Failed HyperScale command for '%(message)s'")
+
+
+class UnableToProcessHyperScaleCmdOutput(VolumeDriverException):
+    message = _("Failed processing command output '%(cmd_out)s'"
+                " for HyperScale command")
+
+
+class ErrorInFetchingConfiguration(VolumeDriverException):
+    message = _("Error in fetching configuration for '%(persona)s'")
+
+
+class ErrorInSendingMsg(VolumeDriverException):
+    message = _("Error in sending message '%(cmd_error)s'")
+
+
+class ErrorInHyperScaleVersion(VolumeDriverException):
+    message = _("Error in getting HyperScale version '%(cmd_error)s'")
+
+
+class ErrorInParsingArguments(VolumeDriverException):
+    message = _("Error in parsing message arguments : Invalid Payload")

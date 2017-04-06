@@ -24,7 +24,7 @@ from oslo_utils import importutils
 storops = importutils.try_import('storops')
 
 from cinder import exception
-from cinder.i18n import _, _LW
+from cinder.i18n import _
 from cinder.volume.drivers.dell_emc.vnx import common
 from cinder.volume.drivers.san.san import san_opts
 from cinder.volume import utils as vol_utils
@@ -139,17 +139,17 @@ def wait_until(condition, timeout=None, interval=common.INTERVAL_5_SEC,
 
 def validate_storage_migration(volume, target_host, src_serial, src_protocol):
     if 'location_info' not in target_host['capabilities']:
-        LOG.warning(_LW("Failed to get pool name and "
-                        "serial number. 'location_info' "
-                        "from %s."), target_host['host'])
+        LOG.warning("Failed to get pool name and "
+                    "serial number. 'location_info' "
+                    "from %s.", target_host['host'])
         return False
     info = target_host['capabilities']['location_info']
     LOG.debug("Host for migration is %s.", info)
     try:
         serial_number = info.split('|')[1]
     except AttributeError:
-        LOG.warning(_LW('Error on getting serial number '
-                        'from %s.'), target_host['host'])
+        LOG.warning('Error on getting serial number '
+                    'from %s.', target_host['host'])
         return False
     if serial_number != src_serial:
         LOG.debug('Skip storage-assisted migration because '
@@ -201,7 +201,7 @@ def get_original_status(volume):
 
 def construct_snap_name(volume):
     """Return snapshot name."""
-    if snapcopy_enabled(volume):
+    if is_snapcopy_enabled(volume):
         return 'snap-as-vol-' + six.text_type(volume.name_id)
     else:
         return 'tmp-snap-' + six.text_type(volume.name_id)
@@ -227,9 +227,23 @@ def construct_smp_name(snap_id):
     return 'tmp-smp-' + six.text_type(snap_id)
 
 
-def snapcopy_enabled(volume):
+def is_snapcopy_enabled(volume):
     meta = get_metadata(volume)
     return 'snapcopy' in meta and meta['snapcopy'].lower() == 'true'
+
+
+def is_async_migrate_enabled(volume):
+    extra_specs = common.ExtraSpecs.from_volume(volume)
+    if extra_specs.is_replication_enabled:
+        # For replication-enabled volume, we should not use the async-cloned
+        # volume, or setup replication would fail with
+        # VNXMirrorLunNotAvailableError
+        return False
+    meta = get_metadata(volume)
+    if 'async_migrate' not in meta:
+        # Asynchronous migration is the default behavior now
+        return True
+    return 'async_migrate' in meta and meta['async_migrate'].lower() == 'true'
 
 
 def get_migration_rate(volume):
@@ -239,16 +253,16 @@ def get_migration_rate(volume):
         if rate.lower() in storops.VNXMigrationRate.values():
             return storops.VNXMigrationRate.parse(rate.lower())
         else:
-            LOG.warning(_LW('Unknown migration rate specified, '
-                            'using [high] as migration rate.'))
+            LOG.warning('Unknown migration rate specified, '
+                        'using [high] as migration rate.')
 
             return storops.VNXMigrationRate.HIGH
 
 
 def validate_cg_type(group):
-    if group.get('volume_type_id') is None:
+    if not group.get('volume_type_ids'):
         return
-    for type_id in group['volume_type_id'].split(","):
+    for type_id in group.get('volume_type_ids'):
         if type_id:
             specs = volume_types.get_volume_type_extra_specs(type_id)
             extra_specs = common.ExtraSpecs(specs)
@@ -337,3 +351,12 @@ def truncate_fc_port_wwn(wwn):
 
 def is_volume_smp(volume):
     return 'smp' == extract_provider_location(volume.provider_location, 'type')
+
+
+def require_consistent_group_snapshot_enabled(func):
+    @six.wraps(func)
+    def inner(self, *args, **kwargs):
+        if not self.is_consistent_group_snapshot_enabled():
+            raise NotImplementedError
+        return func(self, *args, **kwargs)
+    return inner

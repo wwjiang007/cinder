@@ -124,6 +124,12 @@ OBJ_VERSIONS.add('1.16', {'BackupDeviceInfo': '1.0'})
 OBJ_VERSIONS.add('1.17', {'VolumeAttachment': '1.1'})
 OBJ_VERSIONS.add('1.18', {'Snapshot': '1.3'})
 OBJ_VERSIONS.add('1.19', {'ConsistencyGroup': '1.4', 'CGSnapshot': '1.1'})
+OBJ_VERSIONS.add('1.20', {'Cluster': '1.1'})
+OBJ_VERSIONS.add('1.21', {'ManageableSnapshot': '1.0',
+                          'ManageableVolume': '1.0',
+                          'ManageableVolumeList': '1.0',
+                          'ManageableSnapshotList': '1.0'})
+OBJ_VERSIONS.add('1.22', {'Snapshot': '1.4'})
 
 
 class CinderObjectRegistry(base.VersionedObjectRegistry):
@@ -463,6 +469,13 @@ class ClusteredObject(object):
     @property
     def is_clustered(self):
         return bool(self.cluster_name)
+
+    def assert_not_frozen(self):
+        ctxt = self._context.elevated()
+        if db.is_backend_frozen(ctxt, self.host, self.cluster_name):
+            msg = _('Modification operations are not allowed on frozen '
+                    'storage backends.')
+            raise exception.InvalidInput(reason=msg)
 
 
 class CinderObjectSerializer(base.VersionedObjectSerializer):

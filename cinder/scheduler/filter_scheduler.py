@@ -25,7 +25,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LW
+from cinder.i18n import _
 from cinder.scheduler import driver
 from cinder.scheduler import scheduler_options
 from cinder.volume import utils
@@ -61,25 +61,6 @@ class FilterScheduler(driver.Scheduler):
         filter_properties['user_id'] = vol.get('user_id')
         filter_properties['metadata'] = vol.get('metadata')
         filter_properties['qos_specs'] = vol.get('qos_specs')
-
-    def schedule_create_consistencygroup(self, context, group,
-                                         request_spec_list,
-                                         filter_properties_list):
-
-        weighed_backend = self._schedule_group(
-            context,
-            request_spec_list,
-            filter_properties_list)
-
-        if not weighed_backend:
-            raise exception.NoValidBackend(reason=_("No weighed backends "
-                                                    "available"))
-
-        backend = weighed_backend.obj
-        updated_group = driver.group_update_db(context, group, backend.host,
-                                               backend.cluster_name)
-
-        self.volume_rpcapi.create_consistencygroup(context, updated_group)
 
     def schedule_create_group(self, context, group,
                               group_spec,
@@ -133,10 +114,14 @@ class FilterScheduler(driver.Scheduler):
         """Check if the specified backend passes the filters."""
         weighed_backends = self._get_weighted_candidates(context, request_spec,
                                                          filter_properties)
+        # If backend has no pool defined we will ignore it in the comparison
+        ignore_pool = not bool(utils.extract_host(backend, 'pool'))
         for weighed_backend in weighed_backends:
-            backend_state = weighed_backend.obj
-            if backend_state.backend_id == backend:
-                return backend_state
+            backend_id = weighed_backend.obj.backend_id
+            if ignore_pool:
+                backend_id = utils.extract_host(backend_id)
+            if backend_id == backend:
+                return weighed_backend.obj
 
         volume_id = request_spec.get('volume_id', '??volume_id missing??')
         raise exception.NoValidBackend(reason=_('Cannot place volume %(id)s '
@@ -195,8 +180,7 @@ class FilterScheduler(driver.Scheduler):
         return top_backend.obj
 
     def get_pools(self, context, filters):
-        # TODO(zhiteng) Add filters support
-        return self.host_manager.get_pools(context)
+        return self.host_manager.get_pools(context, filters)
 
     def _post_select_populate_filter_properties(self, filter_properties,
                                                 backend_state):
@@ -243,8 +227,8 @@ class FilterScheduler(driver.Scheduler):
             return  # no previously attempted hosts, skip
 
         last_backend = backends[-1]
-        LOG.error(_LE("Error scheduling %(volume_id)s from last vol-service: "
-                      "%(last_backend)s : %(exc)s"),
+        LOG.error("Error scheduling %(volume_id)s from last vol-service: "
+                  "%(last_backend)s : %(exc)s",
                   {'volume_id': volume_id,
                    'last_backend': last_backend,
                    'exc': exc})
@@ -345,98 +329,6 @@ class FilterScheduler(driver.Scheduler):
         # backend for the job.
         weighed_backends = self.host_manager.get_weighed_backends(
             backends, filter_properties)
-        return weighed_backends
-
-    def _get_weighted_candidates_group(self, context, request_spec_list,
-                                       filter_properties_list=None):
-        """Finds hosts that supports the consistencygroup.
-
-        Returns a list of hosts that meet the required specs,
-        ordered by their fitness.
-        """
-        elevated = context.elevated()
-
-        weighed_backends = []
-        index = 0
-        for request_spec in request_spec_list:
-            volume_properties = request_spec['volume_properties']
-            # Since Cinder is using mixed filters from Oslo and it's own, which
-            # takes 'resource_XX' and 'volume_XX' as input respectively,
-            # copying 'volume_XX' to 'resource_XX' will make both filters
-            # happy.
-            resource_properties = volume_properties.copy()
-            volume_type = request_spec.get("volume_type", None)
-            resource_type = request_spec.get("volume_type", None)
-            request_spec.update({'resource_properties': resource_properties})
-
-            config_options = self._get_configuration_options()
-
-            filter_properties = {}
-            if filter_properties_list:
-                filter_properties = filter_properties_list[index]
-                if filter_properties is None:
-                    filter_properties = {}
-            self._populate_retry(filter_properties, resource_properties)
-
-            # Add consistencygroup_support in extra_specs if it is not there.
-            # Make sure it is populated in filter_properties
-            if 'consistencygroup_support' not in resource_type.get(
-                    'extra_specs', {}):
-                resource_type['extra_specs'].update(
-                    consistencygroup_support='<is> True')
-
-            filter_properties.update({'context': context,
-                                      'request_spec': request_spec,
-                                      'config_options': config_options,
-                                      'volume_type': volume_type,
-                                      'resource_type': resource_type})
-
-            self.populate_filter_properties(request_spec,
-                                            filter_properties)
-
-            # Find our local list of acceptable backends by filtering and
-            # weighing our options. we virtually consume resources on
-            # it so subsequent selections can adjust accordingly.
-
-            # Note: remember, we are using an iterator here. So only
-            # traverse this list once.
-            all_backends = self.host_manager.get_all_backend_states(elevated)
-            if not all_backends:
-                return []
-
-            # Filter local backends based on requirements ...
-            backends = self.host_manager.get_filtered_backends(
-                all_backends, filter_properties)
-
-            if not backends:
-                return []
-
-            LOG.debug("Filtered %s", backends)
-
-            # weighted_host = WeightedHost() ... the best
-            # host for the job.
-            temp_weighed_backends = self.host_manager.get_weighed_backends(
-                backends,
-                filter_properties)
-            if not temp_weighed_backends:
-                return []
-            if index == 0:
-                weighed_backends = temp_weighed_backends
-            else:
-                new_weighed_backends = []
-                for backend1 in weighed_backends:
-                    for backend2 in temp_weighed_backends:
-                        # Should schedule creation of CG on backend level,
-                        # not pool level.
-                        if (utils.extract_host(backend1.obj.backend_id) ==
-                                utils.extract_host(backend2.obj.backend_id)):
-                            new_weighed_backends.append(backend1)
-                weighed_backends = new_weighed_backends
-                if not weighed_backends:
-                    return []
-
-            index += 1
-
         return weighed_backends
 
     def _get_weighted_candidates_generic_group(
@@ -615,11 +507,8 @@ class FilterScheduler(driver.Scheduler):
         weighed_backends = self._get_weighted_candidates(context, request_spec,
                                                          filter_properties)
         # When we get the weighed_backends, we clear those backends that don't
-        # match the consistencygroup's backend.
-        if request_spec.get('CG_backend'):
-            group_backend = request_spec.get('CG_backend')
-        else:
-            group_backend = request_spec.get('group_backend')
+        # match the group's backend.
+        group_backend = request_spec.get('group_backend')
         if weighed_backends and group_backend:
             # Get host name including host@backend#pool info from
             # weighed_backends.
@@ -628,22 +517,11 @@ class FilterScheduler(driver.Scheduler):
                 if backend_id != group_backend:
                     weighed_backends.remove(backend)
         if not weighed_backends:
-            LOG.warning(_LW('No weighed backend found for volume '
-                            'with properties: %s'),
+            LOG.warning('No weighed backend found for volume '
+                        'with properties: %s',
                         filter_properties['request_spec'].get('volume_type'))
             return None
         return self._choose_top_backend(weighed_backends, request_spec)
-
-    def _schedule_group(self, context, request_spec_list,
-                        filter_properties_list=None):
-        weighed_backends = self._get_weighted_candidates_group(
-            context,
-            request_spec_list,
-            filter_properties_list)
-        if not weighed_backends:
-            return None
-        return self._choose_top_backend_group(weighed_backends,
-                                              request_spec_list)
 
     def _schedule_generic_group(self, context, group_spec, request_spec_list,
                                 group_filter_properties=None,
@@ -664,12 +542,6 @@ class FilterScheduler(driver.Scheduler):
         LOG.debug("Choosing %s", backend_state.backend_id)
         volume_properties = request_spec['volume_properties']
         backend_state.consume_from_volume(volume_properties)
-        return top_backend
-
-    def _choose_top_backend_group(self, weighed_backends, request_spec_list):
-        top_backend = weighed_backends[0]
-        backend_state = top_backend.obj
-        LOG.debug("Choosing %s", backend_state.backend_id)
         return top_backend
 
     def _choose_top_backend_generic_group(self, weighed_backends):

@@ -1,6 +1,5 @@
 .. -*- rst -*-
 
-=====================
 Generic volume groups
 =====================
 
@@ -9,7 +8,7 @@ manage them together.
 
 How is generic volume groups different from consistency groups?
 Currently consistency groups in cinder only support consistent group
-snapshot. It cannot be extended easily to serve other purposes. A tenant
+snapshot. It cannot be extended easily to serve other purposes. A project
 may want to put volumes used in the same application together in a group
 so that it is easier to manage them together, and this group of volumes
 may or may not support consistent group snapshot. Generic volume group
@@ -19,9 +18,9 @@ groups can be extended to support other features in the future.
 
 
 List groups
-===========
+~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/groups
+.. rest_method::  GET /v3/{project_id}/groups
 
 Lists groups.
 
@@ -35,10 +34,11 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
+   - offset: offset
    - marker: marker
 
 
@@ -58,9 +58,9 @@ Response Example
 
 
 Create group
-============
+~~~~~~~~~~~~
 
-.. rest_method::  POST /v3/{tenant_id}/groups
+.. rest_method::  POST /v3/{project_id}/groups
 
 Creates a group.
 
@@ -78,7 +78,7 @@ Request
    - group_type: group_type
    - volume_types: volume_types
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -88,9 +88,9 @@ Request Example
 
 
 Show group details
-==================
+~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/groups/{group_id}
+.. rest_method::  GET /v3/{project_id}/groups/{group_id}
 
 Shows details for a group.
 
@@ -102,7 +102,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - group_id: group_id
 
 Response Parameters
@@ -110,7 +110,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_8
    - description: description
    - availability_zone: availability_zone
    - created_at: created_at
@@ -127,9 +127,9 @@ Response Example
 
 
 Create group from source
-========================
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v3/{tenant_id}/groups/action
+.. rest_method::  POST /v3/{project_id}/groups/action
 
 Creates a group from source.
 
@@ -146,7 +146,7 @@ Request
    - group_snapshot_id: group_snapshot_id
    - source_group_id: source_group_id
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -156,9 +156,9 @@ Request Example
 
 
 Delete group
-============
+~~~~~~~~~~~~
 
-.. rest_method::  POST /v3/{tenant_id}/groups/{group_id}/action
+.. rest_method::  POST /v3/{project_id}/groups/{group_id}/action
 
 Deletes a group.
 
@@ -172,7 +172,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - delete-volumes: delete-volumes
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - group_id: group_id
 
 Request Example
@@ -183,9 +183,9 @@ Request Example
 
 
 List groups with details
-========================
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/groups/detail
+.. rest_method::  GET /v3/{project_id}/groups/detail
 
 Lists groups with details.
 
@@ -199,10 +199,11 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
+   - offset: offset
    - marker: marker
 
 
@@ -211,7 +212,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_8
    - description: description
    - availability_zone: availability_zone
    - created_at: created_at
@@ -228,9 +229,9 @@ Response Example
 
 
 Update group
-============
+~~~~~~~~~~~~
 
-.. rest_method::  PUT /v3/{tenant_id}/groups/{group_id}
+.. rest_method::  PUT /v3/{project_id}/groups/{group_id}
 
 Updates a group.
 
@@ -247,11 +248,39 @@ Request
    - description: description
    - add_volumes: add_volumes
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - group_id: group_id
 
 Request Example
 ---------------
 
 .. literalinclude:: ./samples/group-update-request.json
+   :language: javascript
+
+
+Reset group status
+~~~~~~~~~~~~~~~~~~
+
+.. rest_method::  PUT /v3/{project_id}/groups/{group_id}/action
+
+Resets the status for a group. Specify the ``reset_status`` action in the request body.
+
+Normal response codes: 202
+Error response codes: badRequest(400), itemNotFound(404)
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - reset_status: reset_status
+   - status: status
+   - project_id: project_id
+   - group_id: group_id
+
+Request Example
+---------------
+
+.. literalinclude:: ./samples/group-reset-status-request.json
    :language: javascript

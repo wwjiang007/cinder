@@ -1,20 +1,19 @@
 .. -*- rst -*-
 
-====================================
 Quota sets extension (os-quota-sets)
 ====================================
 
 Administrators only, depending on policy settings.
 
-Shows, updates, and deletes quotas for a tenant.
+Shows, updates, and deletes quotas for a project.
 
 
 Show quotas for a user
-======================
+~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{admin_tenant_id}/os-quota-sets/{tenant_id}/{user_id}
+.. rest_method::  GET /v3/{admin_project_id}/os-quota-sets/{project_id}/{user_id}
 
-Enables an admin user to show quotas for a tenant and user.
+Enables an admin user to show quotas for a project and user.
 
 
 Normal response codes: 200
@@ -25,9 +24,9 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
+   - admin_project_id: admin_project_id
 
 
 Response Parameters
@@ -60,11 +59,11 @@ Response Example
 
 
 Update quotas for a user
-========================
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v3/{admin_tenant_id}/os-quota-sets/{tenant_id}/{user_id}
+.. rest_method::  PUT /v3/{admin_project_id}/os-quota-sets/{project_id}/{user_id}
 
-Updates quotas for a tenant and user.
+Updates quotas for a project and user.
 
 
 Normal response codes: 200
@@ -92,9 +91,9 @@ Request
    - fixed_ips: fixed_ips
    - id: id
    - security_groups: security_groups
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
+   - admin_project_id: admin_project_id
 
 Request Example
 ---------------
@@ -131,9 +130,9 @@ Response Example
    :language: javascript
 
 Delete quotas for a user
-========================
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v3/{admin_tenant_id}/os-quota-sets/{tenant_id}/{user_id}
+.. rest_method::  DELETE /v3/{admin_project_id}/os-quota-sets/{project_id}/{user_id}
 
 Deletes quotas for a user so that the quotas revert to default values.
 
@@ -147,9 +146,9 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
+   - admin_project_id: admin_project_id
 
 Response Example
 ----------------
@@ -158,12 +157,12 @@ Response Example
    :language: javascript
 
 
-Show quotas for a tenant
-========================
+Show quotas for a project
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{admin_tenant_id}/os-quota-sets/{tenant_id}
+.. rest_method::  GET /v3/{admin_project_id}/os-quota-sets/{project_id}
 
-Shows quotas for a tenant.
+Shows quotas for a project.
 
 
 Normal response codes: 200
@@ -175,8 +174,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
-   - admin_tenant_id: admin_tenant_id
+   - project_id: project_id_path
+   - admin_project_id: admin_project_id
    - usage: usage
 
 
@@ -209,12 +208,12 @@ Response Example
 .. literalinclude:: ./samples/quotas-show-response.json
    :language: javascript
 
-Update quotas for a tenant
-==========================
+Update quotas for a project
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v3/{admin_tenant_id}/os-quota-sets/{tenant_id}
+.. rest_method::  PUT /v3/{admin_project_id}/os-quota-sets/{project_id}
 
-Updates quotas for a tenant.
+Updates quotas for a project.
 
 
 Normal response codes: 200
@@ -242,8 +241,8 @@ Request
    - fixed_ips: fixed_ips
    - id: id
    - security_groups: security_groups
-   - tenant_id: tenant_id
-   - admin_tenant_id: admin_tenant_id
+   - project_id: project_id_path
+   - admin_project_id: admin_project_id
 
 Request Example
 ---------------
@@ -280,12 +279,12 @@ Response Example
 .. literalinclude:: ./samples/quotas-update-response.json
    :language: javascript
 
-Delete quotas for a tenant
-==========================
+Delete quotas for a project
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v3/{admin_tenant_id}/os-quota-sets/{tenant_id}
+.. rest_method::  DELETE /v3/{admin_project_id}/os-quota-sets/{project_id}
 
-Deletes quotas for a tenant so the quotas revert to default values.
+Deletes quotas for a project so the quotas revert to default values.
 
 
 Normal response codes: 200
@@ -297,8 +296,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
-   - admin_tenant_id: admin_tenant_id
+   - project_id: project_id_path
+   - admin_project_id: admin_project_id
 
 Response Example
 ----------------
@@ -307,11 +306,11 @@ Response Example
    :language: javascript
 
 Show quota details for a user
-=============================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{admin_tenant_id}/os-quota-sets/{tenant_id}/detail/{user_id}
+.. rest_method::  GET /v3/{admin_project_id}/os-quota-sets/{project_id}/detail/{user_id}
 
-Shows details for quotas for a tenant and user.
+Shows details for quotas for a project and user.
 
 
 Normal response codes: 200
@@ -323,9 +322,9 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
+   - admin_project_id: admin_project_id
 
 
 Response Parameters
@@ -357,12 +356,12 @@ Response Example
    :language: javascript
 
 
-Get default quotas for a tenant
-===============================
+Get default quotas for a project
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/os-quota-sets/defaults
+.. rest_method::  GET /v3/{project_id}/os-quota-sets/defaults
 
-Gets default quotas for a tenant.
+Gets default quotas for a project.
 
 
 Normal response codes: 200
@@ -374,7 +373,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 
 Response Parameters

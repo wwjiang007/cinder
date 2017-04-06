@@ -22,15 +22,15 @@ import collections
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import importutils
+from oslo_utils import strutils
 from oslo_utils import timeutils
 
 from cinder.common import constants
 from cinder import context as cinder_context
 from cinder import exception
 from cinder import objects
-from cinder import utils
-from cinder.i18n import _LI, _LW
 from cinder.scheduler import filters
+from cinder import utils
 from cinder.volume import utils as vol_utils
 
 
@@ -374,7 +374,7 @@ class HostManager(object):
         'reserved_percentage'])
 
     def __init__(self):
-        self.service_states = {}  # { <host>: {<service>: {cap k : v}}}
+        self.service_states = {}  # { <host|cluster>: {<service>: {cap k : v}}}
         self.backend_state_map = {}
         self.filter_handler = filters.BackendFilterHandler('cinder.scheduler.'
                                                            'filters')
@@ -384,7 +384,7 @@ class HostManager(object):
             'cinder.scheduler.weights')
         self.weight_classes = self.weight_handler.get_all_classes()
 
-        self._no_capabilities_hosts = set()  # Services without capabilities
+        self._no_capabilities_backends = set()  # Services without capabilities
         self._update_backend_state_map(cinder_context.get_admin_context())
         self.service_states_last_update = {}
 
@@ -476,9 +476,15 @@ class HostManager(object):
         capab_copy["timestamp"] = timestamp
 
         # Set the default capabilities in case None is set.
-        capab_old = self.service_states.get(host, {"timestamp": 0})
+        backend = cluster_name or host
+        capab_old = self.service_states.get(backend, {"timestamp": 0})
         capab_last_update = self.service_states_last_update.get(
-            host, {"timestamp": 0})
+            backend, {"timestamp": 0})
+
+        # Ignore older updates
+        if capab_old['timestamp'] and timestamp < capab_old['timestamp']:
+            LOG.info('Ignoring old capability report from %s.', backend)
+            return
 
         # If the capabilites are not changed and the timestamp is older,
         # record the capabilities.
@@ -490,9 +496,9 @@ class HostManager(object):
                 (not capab_old.get("timestamp")) or
                 (not capab_last_update.get("timestamp")) or
                 (capab_last_update["timestamp"] < capab_old["timestamp"])):
-            self.service_states_last_update[host] = capab_old
+            self.service_states_last_update[backend] = capab_old
 
-        self.service_states[host] = capab_copy
+        self.service_states[backend] = capab_copy
 
         cluster_msg = (('Cluster: %s - Host: ' % cluster_name) if cluster_name
                        else '')
@@ -502,63 +508,74 @@ class HostManager(object):
                    'cap': capabilities,
                    'cluster': cluster_msg})
 
-        self._no_capabilities_hosts.discard(host)
+        self._no_capabilities_backends.discard(backend)
 
-    def notify_service_capabilities(self, service_name, host, capabilities):
+    def notify_service_capabilities(self, service_name, backend, capabilities,
+                                    timestamp):
         """Notify the ceilometer with updated volume stats"""
-        # TODO(geguileo): Make this work with Active/Active
         if service_name != 'volume':
             return
 
         updated = []
-        capa_new = self.service_states.get(host, {})
-        timestamp = timeutils.utcnow()
+        capa_new = self.service_states.get(backend, {})
+        timestamp = timestamp or timeutils.utcnow()
 
         # Compare the capabilities and timestamps to decide notifying
         if not capa_new:
             updated = self._get_updated_pools(capa_new, capabilities)
         else:
-            if timestamp > self.service_states[host]["timestamp"]:
-                updated = self._get_updated_pools(self.service_states[host],
-                                                  capabilities)
+            if timestamp > self.service_states[backend]["timestamp"]:
+                updated = self._get_updated_pools(
+                    self.service_states[backend], capabilities)
                 if not updated:
                     updated = self._get_updated_pools(
-                        self.service_states_last_update.get(host, {}),
-                        self.service_states.get(host, {}))
+                        self.service_states_last_update.get(backend, {}),
+                        self.service_states.get(backend, {}))
 
         if updated:
             capab_copy = dict(capabilities)
             capab_copy["timestamp"] = timestamp
             # If capabilities changes, notify and record the capabilities.
-            self.service_states_last_update[host] = capab_copy
-            self.get_usage_and_notify(capabilities, updated, host, timestamp)
+            self.service_states_last_update[backend] = capab_copy
+            self.get_usage_and_notify(capabilities, updated, backend,
+                                      timestamp)
 
     def has_all_capabilities(self):
-        return len(self._no_capabilities_hosts) == 0
+        return len(self._no_capabilities_backends) == 0
 
     def _update_backend_state_map(self, context):
 
         # Get resource usage across the available volume nodes:
         topic = constants.VOLUME_TOPIC
-        volume_services = objects.ServiceList.get_all_by_topic(context,
-                                                               topic,
-                                                               disabled=False)
+        volume_services = objects.ServiceList.get_all(context,
+                                                      {'topic': topic,
+                                                       'disabled': False,
+                                                       'frozen': False})
         active_backends = set()
         active_hosts = set()
-        no_capabilities_hosts = set()
+        no_capabilities_backends = set()
         for service in volume_services.objects:
             host = service.host
             if not service.is_up:
-                LOG.warning(_LW("volume service is down. (host: %s)"), host)
+                LOG.warning("volume service is down. (host: %s)", host)
                 continue
 
-            capabilities = self.service_states.get(host, None)
+            backend_key = service.service_topic_queue
+            # We only pay attention to the first up service of a cluster since
+            # they all refer to the same capabilities entry in service_states
+            if backend_key in active_backends:
+                active_hosts.add(host)
+                continue
+
+            # Capabilities may come from the cluster or the host if the service
+            # has just been converted to a cluster service.
+            capabilities = (self.service_states.get(service.cluster_name, None)
+                            or self.service_states.get(service.host, None))
             if capabilities is None:
-                no_capabilities_hosts.add(host)
+                no_capabilities_backends.add(backend_key)
                 continue
 
             # Since the service could have been added or remove from a cluster
-            backend_key = service.service_topic_queue
             backend_state = self.backend_state_map.get(backend_key, None)
             if not backend_state:
                 backend_state = self.backend_state_cls(
@@ -568,18 +585,12 @@ class HostManager(object):
                     service=dict(service))
                 self.backend_state_map[backend_key] = backend_state
 
-            # We may be receiving capability reports out of order from
-            # different volume services in a cluster, so we drop older updates
-            # and only update for newer capability reports.
-            if (backend_state.capabilities['timestamp'] <=
-                    capabilities['timestamp']):
-                # update capabilities and attributes in backend_state
-                backend_state.update_from_volume_capability(
-                    capabilities, service=dict(service))
+            # update capabilities and attributes in backend_state
+            backend_state.update_from_volume_capability(capabilities,
+                                                        service=dict(service))
             active_backends.add(backend_key)
-            active_hosts.add(host)
 
-        self._no_capabilities_hosts = no_capabilities_hosts
+        self._no_capabilities_backends = no_capabilities_backends
 
         # remove non-active keys from backend_state_map
         inactive_backend_keys = set(self.backend_state_map) - active_backends
@@ -588,8 +599,8 @@ class HostManager(object):
             # the map when we are removing it because it has been added to a
             # cluster.
             if backend_key not in active_hosts:
-                LOG.info(_LI("Removing non-active backend: %(backend)s from "
-                             "scheduler cache."), {'backend': backend_key})
+                LOG.info("Removing non-active backend: %(backend)s from "
+                         "scheduler cache.", {'backend': backend_key})
             del self.backend_state_map[backend_key]
 
     def get_all_backend_states(self, context):
@@ -616,20 +627,38 @@ class HostManager(object):
 
         return all_pools.values()
 
-    def get_pools(self, context):
+    def get_pools(self, context, filters=None):
         """Returns a dict of all pools on all hosts HostManager knows about."""
 
         self._update_backend_state_map(context)
 
         all_pools = []
+        name = None
+        if filters:
+            name = filters.pop('name', None)
+
         for backend_key, state in self.backend_state_map.items():
             for key in state.pools:
+                filtered = False
                 pool = state.pools[key]
                 # use backend_key.pool_name to make sure key is unique
                 pool_key = vol_utils.append_host(backend_key, pool.pool_name)
                 new_pool = dict(name=pool_key)
                 new_pool.update(dict(capabilities=pool.capabilities))
-                all_pools.append(new_pool)
+
+                if name and new_pool.get('name') != name:
+                    continue
+
+                if filters:
+                    # filter all other items in capabilities
+                    for (attr, value) in filters.items():
+                        cap = new_pool.get('capabilities').get(attr)
+                        if not self._equal_after_convert(cap, value):
+                            filtered = True
+                            break
+
+                if not filtered:
+                    all_pools.append(new_pool)
 
         return all_pools
 
@@ -749,3 +778,17 @@ class HostManager(object):
                 vol_utils.notify_about_capacity_usage(
                     context, u, u['type'], None, None)
         LOG.debug("Publish storage capacity: %s.", usage)
+
+    def _equal_after_convert(self, capability, value):
+
+        if isinstance(value, type(capability)) or capability is None:
+            return value == capability
+
+        if isinstance(capability, bool):
+            return capability == strutils.bool_from_string(value)
+
+        # We can not check or convert value parameter's type in
+        # anywhere else.
+        # If the capability and value are not in the same type,
+        # we just convert them into string to compare them.
+        return str(value) == str(capability)

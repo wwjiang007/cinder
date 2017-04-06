@@ -21,7 +21,6 @@ import ddt
 import mock
 
 from cinder import context
-from cinder import db
 from cinder import exception
 import cinder.group
 from cinder import objects
@@ -29,6 +28,7 @@ from cinder.objects import fields
 from cinder import quota
 from cinder import test
 from cinder.tests.unit import fake_constants as fake
+from cinder.tests.unit import fake_volume
 from cinder.tests.unit import utils
 
 
@@ -109,6 +109,7 @@ class GroupAPITestCase(test.TestCase):
 
         ret_group.host = "test_host@fakedrv#fakepool"
         ret_group.status = fields.GroupStatus.AVAILABLE
+        ret_group.assert_not_frozen = mock.Mock(return_value=True)
         self.group_api.delete(self.ctxt, ret_group, delete_volumes = True)
         mock_volume_get_all.assert_called_once_with(mock.ANY, ret_group.id)
         mock_volumes_update.assert_called_once_with(self.ctxt, [])
@@ -309,7 +310,7 @@ class GroupAPITestCase(test.TestCase):
 
         if is_admin:
             grp_snaps = self.group_api.get_all_group_snapshots(
-                self.ctxt, search_opts={'all_tenants': True})
+                self.ctxt, filters={'all_tenants': True})
             self.assertEqual(fake_group_snaps, grp_snaps)
         else:
             grp_snaps = self.group_api.get_all_group_snapshots(
@@ -342,6 +343,7 @@ class GroupAPITestCase(test.TestCase):
         description = "fake description"
         mock_group.id = fake.GROUP_ID
         mock_group.group_type_id = fake.GROUP_TYPE_ID
+        mock_group.assert_not_frozen = mock.Mock(return_value=True)
         mock_group.volumes = []
         ret_group_snap = self.group_api.create_group_snapshot(
             self.ctxt, mock_group, name, description)
@@ -363,10 +365,11 @@ class GroupAPITestCase(test.TestCase):
                                                   ret_group_snap.id)
         mock_create_api.assert_called_once_with(self.ctxt, ret_group_snap)
 
+        ret_group_snap.assert_not_frozen = mock.Mock(return_value=True)
         self.group_api.delete_group_snapshot(self.ctxt, ret_group_snap)
         mock_delete_api.assert_called_once_with(mock.ANY, ret_group_snap)
 
-    @mock.patch('cinder.volume.volume_types.get_volume_type')
+    @mock.patch('cinder.objects.VolumeType.get_by_name_or_id')
     @mock.patch('cinder.db.group_volume_type_mapping_create')
     @mock.patch('cinder.volume.api.API.create')
     @mock.patch('cinder.objects.GroupSnapshot.get_by_id')
@@ -379,8 +382,10 @@ class GroupAPITestCase(test.TestCase):
                                     mock_volume_api_create,
                                     mock_mapping_create,
                                     mock_get_volume_type):
-        vol_type = utils.create_volume_type(self.ctxt,
-                                            name = 'fake_volume_type')
+        vol_type = fake_volume.fake_volume_type_obj(
+            self.ctxt,
+            id=fake.VOLUME_TYPE_ID,
+            name='fake_volume_type')
         mock_get_volume_type.return_value = vol_type
 
         grp_snap = utils.create_group_snapshot(
@@ -436,9 +441,8 @@ class GroupAPITestCase(test.TestCase):
         snap.destroy()
         vol1.destroy()
         grp_snap.destroy()
-        db.volume_type_destroy(self.ctxt, vol_type['id'])
 
-    @mock.patch('cinder.volume.volume_types.get_volume_type')
+    @mock.patch('cinder.objects.VolumeType.get_by_name_or_id')
     @mock.patch('cinder.db.group_volume_type_mapping_create')
     @mock.patch('cinder.volume.api.API.create')
     @mock.patch('cinder.objects.Group.get_by_id')
@@ -451,8 +455,10 @@ class GroupAPITestCase(test.TestCase):
                                      mock_volume_api_create,
                                      mock_mapping_create,
                                      mock_get_volume_type):
-        vol_type = utils.create_volume_type(self.ctxt,
-                                            name = 'fake_volume_type')
+        vol_type = fake_volume.fake_volume_type_obj(
+            self.ctxt,
+            id=fake.VOLUME_TYPE_ID,
+            name='fake_volume_type')
         mock_get_volume_type.return_value = vol_type
 
         grp = utils.create_group(self.ctxt, group_type_id = fake.GROUP_TYPE_ID,
@@ -500,7 +506,6 @@ class GroupAPITestCase(test.TestCase):
         grp2.destroy()
         vol.destroy()
         grp.destroy()
-        db.volume_type_destroy(self.ctxt, vol_type['id'])
 
     @mock.patch('cinder.group.api.API._create_group_from_group_snapshot')
     @mock.patch('cinder.group.api.API._create_group_from_source_group')
@@ -575,3 +580,40 @@ class GroupAPITestCase(test.TestCase):
                         'status': fields.GroupSnapshotStatus.ERROR}
         mock_group_snapshot.update.assert_called_once_with(update_field)
         mock_group_snapshot.save.assert_called_once_with()
+
+    def test_create_group_from_src_frozen(self):
+        service = utils.create_service(self.ctxt, {'frozen': True})
+        group = utils.create_group(self.ctxt, host=service.host,
+                                   group_type_id='gt')
+        group_api = cinder.group.api.API()
+        self.assertRaises(exception.InvalidInput,
+                          group_api.create_from_src,
+                          self.ctxt, 'group', 'desc',
+                          group_snapshot_id=None, source_group_id=group.id)
+
+    def test_delete_group_frozen(self):
+        service = utils.create_service(self.ctxt, {'frozen': True})
+        group = utils.create_group(self.ctxt, host=service.host,
+                                   group_type_id='gt')
+        group_api = cinder.group.api.API()
+        self.assertRaises(exception.InvalidInput,
+                          group_api.delete, self.ctxt, group)
+
+    def test_create_group_snapshot_frozen(self):
+        service = utils.create_service(self.ctxt, {'frozen': True})
+        group = utils.create_group(self.ctxt, host=service.host,
+                                   group_type_id='gt')
+        group_api = cinder.group.api.API()
+        self.assertRaises(exception.InvalidInput,
+                          group_api.create_group_snapshot,
+                          self.ctxt, group, 'group_snapshot', 'desc')
+
+    def test_delete_group_snapshot_frozen(self):
+        service = utils.create_service(self.ctxt, {'frozen': True})
+        group = utils.create_group(self.ctxt, host=service.host,
+                                   group_type_id='gt')
+        gsnap = utils.create_group_snapshot(self.ctxt, group.id)
+        group_api = cinder.group.api.API()
+        self.assertRaises(exception.InvalidInput,
+                          group_api.delete_group_snapshot,
+                          self.ctxt, gsnap)

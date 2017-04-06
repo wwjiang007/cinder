@@ -31,17 +31,18 @@ CONF = cfg.CONF
 UNITY_OPTS = [
     cfg.ListOpt('unity_storage_pool_names',
                 default=None,
-                help='A comma-separated list of storage pool names '
-                     'to be used.')]
+                help='A comma-separated list of storage pool names to be '
+                'used.'),
+    cfg.ListOpt('unity_io_ports',
+                default=None,
+                help='A comma-separated list of iSCSI or FC ports to be used. '
+                     'Each port can be Unix-style glob expressions.')]
 
 CONF.register_opts(UNITY_OPTS)
 
 
 @interface.volumedriver
-class UnityDriver(driver.TransferVD,
-                  driver.ManageableVD,
-                  driver.ExtendVD,
-                  driver.SnapshotVD,
+class UnityDriver(driver.ManageableVD,
                   driver.ManageableSnapshotsVD,
                   driver.BaseVD):
     """Unity Driver.
@@ -117,7 +118,7 @@ class UnityDriver(driver.TransferVD,
         """Make sure volume is exported."""
         pass
 
-    @zm_utils.AddFCZone
+    @zm_utils.add_fc_zone
     def initialize_connection(self, volume, connector):
         """Initializes the connection and returns connection info.
 
@@ -155,27 +156,12 @@ class UnityDriver(driver.TransferVD,
                 }
             }
         """
-        LOG.debug("Entering initialize_connection"
-                  " - connector: %(connector)s.",
-                  {'connector': connector})
-        conn_info = self.adapter.initialize_connection(volume,
-                                                       connector)
-        LOG.debug("Exit initialize_connection"
-                  " - Returning connection info: %(conn_info)s.",
-                  {'conn_info': conn_info})
-        return conn_info
+        return self.adapter.initialize_connection(volume, connector)
 
-    @zm_utils.RemoveFCZone
+    @zm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector, **kwargs):
         """Disallow connection from connector."""
-        LOG.debug("Entering terminate_connection"
-                  " - connector: %(connector)s.",
-                  {'connector': connector})
-        conn_info = self.adapter.terminate_connection(volume, connector)
-        LOG.debug("Exit terminate_connection"
-                  " - Returning connection info: %(conn_info)s.",
-                  {'conn_info': conn_info})
-        return conn_info
+        return self.adapter.terminate_connection(volume, connector)
 
     def get_volume_stats(self, refresh=False):
         """Get volume stats.
@@ -214,3 +200,20 @@ class UnityDriver(driver.TransferVD,
     def unmanage(self, volume):
         """Unmanages a volume."""
         pass
+
+    def backup_use_temp_snapshot(self):
+        return True
+
+    def create_export_snapshot(self, context, snapshot, connector):
+        """Creates the snapshot for backup."""
+        return self.adapter.create_snapshot(snapshot)
+
+    def remove_export_snapshot(self, context, snapshot):
+        """Deletes the snapshot for backup."""
+        self.adapter.delete_snapshot(snapshot)
+
+    def initialize_connection_snapshot(self, snapshot, connector, **kwargs):
+        return self.adapter.initialize_connection_snapshot(snapshot, connector)
+
+    def terminate_connection_snapshot(self, snapshot, connector, **kwargs):
+        return self.adapter.terminate_connection_snapshot(snapshot, connector)

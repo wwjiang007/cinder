@@ -114,6 +114,9 @@ class MigrationsMixin(test_migrations.WalkVersionsMixin):
             # NOTE(dulek): 73 drops tables and columns we've stopped using a
             # release ago.
             73,
+            # NOTE(ameade): 87 sets messages.request_id to nullable. This
+            # should be safe for the same reason as migration 66.
+            87,
         ]
 
         # NOTE(dulek): We only started requiring things be additive in
@@ -1062,6 +1065,38 @@ class MigrationsMixin(test_migrations.WalkVersionsMixin):
         ).execute().first()
         self.assertIsNotNone(specs)
         self.assertEqual('<is> True', specs.value)
+
+    def _check_087(self, engine, data):
+        """Test request_id column in messages is nullable."""
+        self.assertTrue(engine.dialect.has_table(engine.connect(),
+                                                 "messages"))
+        messages = db_utils.get_table(engine, 'messages')
+
+        self.assertIsInstance(messages.c.request_id.type,
+                              self.VARCHAR_TYPE)
+        self.assertTrue(messages.c.request_id.nullable)
+
+    def _check_088(self, engine, data):
+        """Test adding replication data to cluster table."""
+        clusters = db_utils.get_table(engine, 'clusters')
+        self.assertIsInstance(clusters.c.replication_status.type,
+                              self.VARCHAR_TYPE)
+        self.assertIsInstance(clusters.c.active_backend_id.type,
+                              self.VARCHAR_TYPE)
+        self.assertIsInstance(clusters.c.frozen.type,
+                              self.BOOL_TYPE)
+
+    def _check_089(self, engine, data):
+        """Test adding cluster_name to image volume cache table."""
+        image_cache = db_utils.get_table(engine, 'image_volume_cache_entries')
+        self.assertIsInstance(image_cache.c.cluster_name.type,
+                              self.VARCHAR_TYPE)
+
+    def _check_090(self, engine, data):
+        """Test adding race_preventer to workers table."""
+        workers = db_utils.get_table(engine, 'workers')
+        self.assertIsInstance(workers.c.race_preventer.type,
+                              self.INTEGER_TYPE)
 
     def test_walk_versions(self):
         self.walk_versions(False, False)

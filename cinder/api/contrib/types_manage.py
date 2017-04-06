@@ -16,9 +16,8 @@
 """The volume types manage extension."""
 
 import six
+from six.moves import http_client
 import webob
-
-from oslo_utils import strutils
 
 from cinder.api import extensions
 from cinder.api.openstack import wsgi
@@ -38,12 +37,14 @@ class VolumeTypesManageController(wsgi.Controller):
 
     _view_builder_class = views_types.ViewBuilder
 
+    @utils.if_notifications_enabled
     def _notify_volume_type_error(self, context, method, err,
                                   volume_type=None, id=None, name=None):
         payload = dict(
             volume_types=volume_type, name=name, id=id, error_message=err)
         rpc.get_notifier('volumeType').error(context, method, payload)
 
+    @utils.if_notifications_enabled
     def _notify_volume_type_info(self, context, method, volume_type):
         payload = dict(volume_types=volume_type)
         rpc.get_notifier('volumeType').info(context, method, payload)
@@ -61,7 +62,8 @@ class VolumeTypesManageController(wsgi.Controller):
         description = vol_type.get('description')
         specs = vol_type.get('extra_specs', {})
         utils.validate_dictionary_string_length(specs)
-        is_public = vol_type.get('os-volume-type-access:is_public', True)
+        is_public = utils.get_bool_param('os-volume-type-access:is_public',
+                                         vol_type, True)
 
         if name is None or len(name.strip()) == 0:
             msg = _("Volume type name can not be empty.")
@@ -73,11 +75,6 @@ class VolumeTypesManageController(wsgi.Controller):
         if description is not None:
             utils.check_string_length(description, 'Type description',
                                       min_length=0, max_length=255)
-
-        if not strutils.is_valid_boolstr(is_public):
-            msg = _("Invalid value '%s' for is_public. Accepted values: "
-                    "True or False.") % is_public
-            raise webob.exc.HTTPBadRequest(explanation=msg)
 
         try:
             volume_types.create(context,
@@ -126,10 +123,8 @@ class VolumeTypesManageController(wsgi.Controller):
                     "a combination thereof.")
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
-        if is_public is not None and not strutils.is_valid_boolstr(is_public):
-            msg = _("Invalid value '%s' for is_public. Accepted values: "
-                    "True or False.") % is_public
-            raise webob.exc.HTTPBadRequest(explanation=msg)
+        if is_public is not None:
+            is_public = utils.get_bool_param('is_public', vol_type)
 
         if name:
             utils.check_string_length(name, 'Type name',
@@ -187,7 +182,7 @@ class VolumeTypesManageController(wsgi.Controller):
             # Not found exception will be handled at the wsgi level
             raise
 
-        return webob.Response(status_int=202)
+        return webob.Response(status_int=http_client.ACCEPTED)
 
 
 class Types_manage(extensions.ExtensionDescriptor):

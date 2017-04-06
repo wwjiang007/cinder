@@ -18,7 +18,7 @@ from oslo_log import log as logging
 from oslo_utils import excutils
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LW
+from cinder.i18n import _
 from cinder import interface
 from cinder.volume import driver
 from cinder.volume.drivers.dell import dell_storagecenter_common
@@ -56,10 +56,15 @@ class DellStorageCenterFCDriver(dell_storagecenter_common.DellCommonDriver,
         3.0.0 - ProviderID utilized.
         3.1.0 - Failback supported.
         3.2.0 - Live Volume support.
+        3.3.0 - Support for a secondary DSM.
+        3.4.0 - Support for excluding a domain.
+        3.5.0 - Support for AFO.
+        3.6.0 - Server type support.
+        3.7.0 - Support for Data Reduction, Group QOS and Volume QOS.
 
     """
 
-    VERSION = '3.2.0'
+    VERSION = '3.7.0'
 
     CI_WIKI_NAME = "Dell_Storage_CI"
 
@@ -69,7 +74,7 @@ class DellStorageCenterFCDriver(dell_storagecenter_common.DellCommonDriver,
             self.configuration.safe_get('volume_backend_name') or 'Dell-FC'
         self.storage_protocol = 'FC'
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     def initialize_connection(self, volume, connector):
         """Initializes the connection and returns connection info.
 
@@ -142,11 +147,11 @@ class DellStorageCenterFCDriver(dell_storagecenter_common.DellCommonDriver,
                                                  'discard': True}}
                                 LOG.debug('Return FC data: %s', data)
                                 return data
-                            LOG.error(_LE('Lun mapping returned null!'))
+                            LOG.error('Lun mapping returned null!')
 
             except Exception:
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE('Failed to initialize connection.'))
+                    LOG.error('Failed to initialize connection.')
 
         # We get here because our mapping is none so blow up.
         raise exception.VolumeBackendAPIException(_('Unable to map volume.'))
@@ -182,13 +187,13 @@ class DellStorageCenterFCDriver(dell_storagecenter_common.DellCommonDriver,
                     sclivevolume['secondaryVolume']['instanceId'])
                 if secondaryvol:
                     return api.find_wwns(secondaryvol, secondary)
-        LOG.warning(_LW('Unable to map live volume secondary volume'
-                        ' %(vol)s to secondary server wwns: %(wwns)r'),
+        LOG.warning('Unable to map live volume secondary volume'
+                    ' %(vol)s to secondary server wwns: %(wwns)r',
                     {'vol': sclivevolume['secondaryVolume']['instanceName'],
                      'wwns': wwns})
         return None, [], {}
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector, force=False, **kwargs):
         # Get our volume name
         volume_name = volume.get('id')
@@ -248,7 +253,7 @@ class DellStorageCenterFCDriver(dell_storagecenter_common.DellCommonDriver,
 
             except Exception:
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE('Failed to terminate connection'))
+                    LOG.error('Failed to terminate connection')
         raise exception.VolumeBackendAPIException(
             _('Terminate connection unable to connect to backend.'))
 

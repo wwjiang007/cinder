@@ -15,6 +15,7 @@
 
 
 import mock
+from six.moves import http_client
 import sys
 
 from cinder import context
@@ -30,7 +31,7 @@ NIMBLE_URLLIB2 = 'cinder.volume.drivers.nimble.requests'
 NIMBLE_RANDOM = 'cinder.volume.drivers.nimble.random'
 NIMBLE_ISCSI_DRIVER = 'cinder.volume.drivers.nimble.NimbleISCSIDriver'
 NIMBLE_FC_DRIVER = 'cinder.volume.drivers.nimble.NimbleFCDriver'
-DRIVER_VERSION = '4.0.0'
+DRIVER_VERSION = '4.0.1'
 nimble.DEFAULT_SLEEP = 0
 
 FAKE_POSITIVE_LOGIN_RESPONSE_1 = '2c20aad78a220ed1dae21dcd6f9446f5'
@@ -72,6 +73,14 @@ FAKE_CREATE_VOLUME_POSITIVE_RESPONSE_PERF_POLICY = {
 FAKE_CREATE_VOLUME_POSITIVE_RESPONSE_MULTI_INITIATOR = {
     'clone': False,
     'name': "testvolume-multi-initiator"}
+
+FAKE_CREATE_VOLUME_POSITIVE_RESPONSE_DEDUPE = {
+    'clone': False,
+    'name': "testvolume-dedupe"}
+
+FAKE_CREATE_VOLUME_POSITIVE_RESPONSE_QOS = {
+    'clone': False,
+    'name': "testvolume-qos"}
 
 FAKE_GET_VOL_INFO_RESPONSE = {'name': 'testvolume',
                               'clone': False,
@@ -145,6 +154,12 @@ FAKE_CREATE_VOLUME_NEGATIVE_ENCRYPTION = exception.VolumeBackendAPIException(
 FAKE_CREATE_VOLUME_NEGATIVE_PERFPOLICY = exception.VolumeBackendAPIException(
     "Volume testvolume-perfpolicy not found")
 
+FAKE_CREATE_VOLUME_NEGATIVE_DEDUPE = exception.VolumeBackendAPIException(
+    "The specified pool is not capable of hosting deduplicated volumes")
+
+FAKE_CREATE_VOLUME_NEGATIVE_QOS = exception.VolumeBackendAPIException(
+    "Please set valid IOPS limitin the range [256, 4294967294]")
+
 FAKE_POSITIVE_GROUP_INFO_RESPONSE = {
     'version_current': '3.0.0.0',
     'group_target_enabled': False,
@@ -201,7 +216,7 @@ class NimbleDriverBaseTestCase(test.TestCase):
                     configuration=configuration)
                 mock_login_response = mock_urllib2.post.return_value
                 mock_login_response = mock.MagicMock()
-                mock_login_response.status_code.return_value = 200
+                mock_login_response.status_code.return_value = http_client.OK
                 mock_login_response.json.return_value = (
                     FAKE_LOGIN_POST_RESPONSE)
                 self.driver.do_setup(context.get_admin_context())
@@ -223,7 +238,7 @@ class NimbleDriverBaseTestCase(test.TestCase):
                     configuration=configuration)
                 mock_login_response = mock_urllib2.post.return_value
                 mock_login_response = mock.MagicMock()
-                mock_login_response.status_code.return_value = 200
+                mock_login_response.status_code.return_value = http_client.OK
                 mock_login_response.json.return_value = (
                     FAKE_LOGIN_POST_RESPONSE)
                 self.driver.do_setup(context.get_admin_context())
@@ -436,6 +451,85 @@ class NimbleDriverVolumeTestCase(NimbleDriverBaseTestCase):
     @mock.patch(NIMBLE_CLIENT)
     @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
                        mock.Mock(return_value=[]))
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs',
+                       mock.Mock(type_id=FAKE_TYPE_ID, return_value={
+                           'nimble:perfpol-name': 'default',
+                           'nimble:encryption': 'no',
+                           'nimble:dedupe': 'true'}))
+    @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
+        'nimble', 'nimble_pass', '10.18.108.55', 'default', '*'))
+    def test_create_volume_dedupe_positive(self):
+        self.mock_client_service._execute_create_vol.return_value = (
+            FAKE_CREATE_VOLUME_POSITIVE_RESPONSE_DEDUPE)
+        self.mock_client_service.get_vol_info.return_value = (
+            FAKE_GET_VOL_INFO_RESPONSE)
+        self.mock_client_service.get_netconfig.return_value = (
+            FAKE_POSITIVE_NETCONFIG_RESPONSE)
+
+        self.assertEqual(
+            {'provider_location': '172.18.108.21:3260 iqn.test',
+             'provider_auth': None},
+            self.driver.create_volume({'name': 'testvolume-dedupe',
+                                       'size': 1,
+                                       'volume_type_id': FAKE_TYPE_ID,
+                                       'display_name': '',
+                                       'display_description': ''}))
+
+        self.mock_client_service.create_vol.assert_called_once_with(
+            {'name': 'testvolume-dedupe',
+             'size': 1,
+             'volume_type_id': FAKE_TYPE_ID,
+             'display_name': '',
+             'display_description': '',
+             },
+            'default',
+            False,
+            'iSCSI',
+            False)
+
+    @mock.patch(NIMBLE_URLLIB2)
+    @mock.patch(NIMBLE_CLIENT)
+    @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
+                       mock.Mock(return_value=[]))
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs',
+                       mock.Mock(type_id=FAKE_TYPE_ID, return_value={
+                           'nimble:perfpol-name': 'default',
+                           'nimble:iops-limit': '1024'}))
+    @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
+        'nimble', 'nimble_pass', '10.18.108.55', 'default', '*'))
+    def test_create_volume_qos_positive(self):
+        self.mock_client_service._execute_create_vol.return_value = (
+            FAKE_CREATE_VOLUME_POSITIVE_RESPONSE_QOS)
+        self.mock_client_service.get_vol_info.return_value = (
+            FAKE_GET_VOL_INFO_RESPONSE)
+        self.mock_client_service.get_netconfig.return_value = (
+            FAKE_POSITIVE_NETCONFIG_RESPONSE)
+
+        self.assertEqual(
+            {'provider_location': '172.18.108.21:3260 iqn.test',
+             'provider_auth': None},
+            self.driver.create_volume({'name': 'testvolume-qos',
+                                       'size': 1,
+                                       'volume_type_id': FAKE_TYPE_ID,
+                                       'display_name': '',
+                                       'display_description': ''}))
+
+        self.mock_client_service.create_vol.assert_called_once_with(
+            {'name': 'testvolume-qos',
+             'size': 1,
+             'volume_type_id': FAKE_TYPE_ID,
+             'display_name': '',
+             'display_description': '',
+             },
+            'default',
+            False,
+            'iSCSI',
+            False)
+
+    @mock.patch(NIMBLE_URLLIB2)
+    @mock.patch(NIMBLE_CLIENT)
+    @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
+                       mock.Mock(return_value=[]))
     @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
         'nimble', 'nimble_pass', '10.18.108.55', 'default', '*'))
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs',
@@ -487,6 +581,46 @@ class NimbleDriverVolumeTestCase(NimbleDriverBaseTestCase):
             exception.VolumeBackendAPIException,
             self.driver.create_volume,
             {'name': 'testvolume-perfpolicy',
+             'size': 1,
+             'volume_type_id': None,
+             'display_name': '',
+             'display_description': ''})
+
+    @mock.patch(NIMBLE_URLLIB2)
+    @mock.patch(NIMBLE_CLIENT)
+    @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
+                       mock.Mock(return_value=[]))
+    @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
+        'nimble', 'nimble_pass', '10.18.108.55', 'default', '*'))
+    def test_create_volume_dedupe_negative(self):
+        self.mock_client_service.get_vol_info.side_effect = (
+            FAKE_CREATE_VOLUME_NEGATIVE_DEDUPE)
+        self.assertRaises(
+            exception.VolumeBackendAPIException,
+            self.driver.create_volume,
+            {'name': 'testvolume-dedupe',
+             'size': 1,
+             'volume_type_id': None,
+             'display_name': '',
+             'display_description': ''})
+
+    @mock.patch(NIMBLE_URLLIB2)
+    @mock.patch(NIMBLE_CLIENT)
+    @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
+                       mock.Mock(return_value=[]))
+    @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
+        'nimble', 'nimble_pass', '10.18.108.55', 'default', '*'))
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs',
+                       mock.Mock(type_id=FAKE_TYPE_ID, return_value={
+                           'nimble:perfpol-name': 'default',
+                           'nimble:iops-limit': '200'}))
+    def test_create_volume_qos_negative(self):
+        self.mock_client_service.get_vol_info.side_effect = (
+            FAKE_CREATE_VOLUME_NEGATIVE_QOS)
+        self.assertRaises(
+            exception.VolumeBackendAPIException,
+            self.driver.create_volume,
+            {'name': 'testvolume-qos',
              'size': 1,
              'volume_type_id': None,
              'display_name': '',
@@ -563,7 +697,8 @@ class NimbleDriverVolumeTestCase(NimbleDriverBaseTestCase):
                                  return_value=
                                  {'nimble:perfpol-name': 'default',
                                   'nimble:encryption': 'yes',
-                                  'nimble:multi-initiator': 'false'}))
+                                  'nimble:multi-initiator': 'false',
+                                  'nimble:iops-limit': '1024'}))
     @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
         'nimble', 'nimble_pass', '10.18.108.55', 'default', '*', False))
     @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host')
@@ -611,7 +746,7 @@ class NimbleDriverVolumeTestCase(NimbleDriverBaseTestCase):
                                  'volume_size': src_volume['size'],
                                  'display_name': volume['display_name'],
                                  'display_description': ''},
-                                True, False, 'iSCSI')]
+                                True, False, 'iSCSI', 'default')]
 
         self.mock_client_service.assert_has_calls(expected_calls)
 
@@ -900,7 +1035,8 @@ class NimbleDriverSnapshotTestCase(NimbleDriverBaseTestCase):
                  'volume_size': 1},
                 False,
                 False,
-                'iSCSI'),
+                'iSCSI',
+                'default'),
             mock.call.edit_vol('clone-testvolume',
                                {'data': {'size': 2048,
                                          'snap_limit': sys.maxsize,
@@ -937,6 +1073,52 @@ class NimbleDriverConnectionTestCase(NimbleDriverBaseTestCase):
                  'provider_location': '12 13',
                  'id': 12},
                 {'initiator': 'test-initiator1'}))
+
+    @mock.patch(NIMBLE_URLLIB2)
+    @mock.patch(NIMBLE_CLIENT)
+    @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
+                       mock.Mock(return_value=[]))
+    @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
+        'nimble', 'nimble_pass', '10.18.108.55', 'default', '*'))
+    def test_initialize_connection_live_migration(self):
+        self.mock_client_service.get_initiator_grp_list.return_value = (
+            FAKE_IGROUP_LIST_RESPONSE)
+        expected_res = {
+            'driver_volume_type': 'iscsi',
+            'data': {
+                'volume_id': 12,
+                'target_iqn': '13',
+                'target_lun': 0,
+                'target_portal': '12'}}
+
+        self.assertEqual(
+            expected_res,
+            self.driver.initialize_connection(
+                {'name': 'test-volume',
+                 'provider_location': '12 13',
+                 'id': 12},
+                {'initiator': 'test-initiator1'}))
+
+        self.driver.initialize_connection(
+            {'name': 'test-volume',
+             'provider_location': '12 13',
+             'id': 12},
+            {'initiator': 'test-initiator1'})
+
+        # 2 or more calls to initialize connection and add_acl for live
+        # migration to work
+        expected_calls = [
+            mock.call.get_initiator_grp_list(),
+            mock.call.add_acl({'name': 'test-volume',
+                               'provider_location': '12 13',
+                               'id': 12},
+                              'test-igrp1'),
+            mock.call.get_initiator_grp_list(),
+            mock.call.add_acl({'name': 'test-volume',
+                               'provider_location': '12 13',
+                               'id': 12},
+                              'test-igrp1')]
+        self.mock_client_service.assert_has_calls(expected_calls)
 
     @mock.patch(NIMBLE_URLLIB2)
     @mock.patch(NIMBLE_CLIENT)
@@ -1021,6 +1203,8 @@ class NimbleDriverConnectionTestCase(NimbleDriverBaseTestCase):
                 'initiator_target_map': {'1000000000000000':
                                          ['1111111111111101']}}}
 
+        self.driver._create_igroup_for_initiator("test-initiator3",
+                                                 [1111111111111101])
         self.assertEqual(
             expected_res,
             self.driver.initialize_connection(
@@ -1029,6 +1213,12 @@ class NimbleDriverConnectionTestCase(NimbleDriverBaseTestCase):
                  'id': 12},
                 {'initiator': 'test-initiator3',
                  'wwpns': ['1000000000000000']}))
+
+        expected_calls = [mock.call.create_initiator_group_fc(
+            'openstack-abcdefghijkl'),
+            mock.call.add_initiator_to_igroup_fc('openstack-abcdefghijkl',
+                                                 1111111111111101)]
+        self.mock_client_service.assert_has_calls(expected_calls)
 
     @mock.patch(NIMBLE_URLLIB2)
     @mock.patch(NIMBLE_CLIENT)

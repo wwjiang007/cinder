@@ -21,6 +21,7 @@ import ddt
 import json
 import mock
 from simplejson import scanner
+from six.moves import http_client
 
 from cinder import exception
 from cinder import test
@@ -48,11 +49,13 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         self.my_client._endpoint = eseries_fake.FAKE_ENDPOINT_HTTP
 
         fake_response = mock.Mock()
-        fake_response.status_code = 200
+        fake_response.status_code = http_client.OK
         self.my_client.invoke_service = mock.Mock(return_value=fake_response)
         self.my_client.api_version = '01.52.9000.1'
 
-    @ddt.data(200, 201, 203, 204)
+    @ddt.data(http_client.OK, http_client.CREATED,
+              http_client.NON_AUTHORITATIVE_INFORMATION,
+              http_client.NO_CONTENT)
     def test_eval_response_success(self, status_code):
         fake_resp = mock.Mock()
         fake_resp.status_code = status_code
@@ -76,7 +79,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
               ('unknown', None))
     @ddt.unpack
     def test_eval_response_422(self, ret_code, exc_regex):
-        status_code = 422
+        status_code = http_client.UNPROCESSABLE_ENTITY
         fake_resp = mock.Mock()
         fake_resp.text = "fakeError"
         fake_resp.json = mock.Mock(return_value={'retcode': ret_code})
@@ -89,7 +92,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
             self.assertEqual(status_code, exc.status_code)
 
     def test_eval_response_424(self):
-        status_code = 424
+        status_code = http_client.FAILED_DEPENDENCY
         fake_resp = mock.Mock()
         fake_resp.status_code = status_code
         fake_resp.text = "Fake Error Message"
@@ -172,8 +175,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         self.assertEqual(group, result)
 
     def test_move_volume_mapping_via_symbol(self):
-        invoke = self.mock_object(self.my_client, '_invoke',
-                                  mock.Mock(return_value='ok'))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value='ok')
         host_ref = 'host'
         cluster_ref = 'cluster'
         lun_id = 10
@@ -191,8 +193,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         self.assertEqual({'lun': lun_id}, result)
 
     def test_move_volume_mapping_via_symbol_fail(self):
-        self.mock_object(self.my_client, '_invoke',
-                         mock.Mock(return_value='failure'))
+        self.mock_object(self.my_client, '_invoke', return_value='failure')
 
         self.assertRaises(
             exception.NetAppDriverException,
@@ -253,8 +254,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         volume_mapping_2 = copy.deepcopy(eseries_fake.VOLUME_MAPPING)
         volume_mapping_2['volumeRef'] = '2'
         self.mock_object(self.my_client, 'get_volume_mappings',
-                         mock.Mock(return_value=[volume_mapping_1,
-                                                 volume_mapping_2]))
+                         return_value=[volume_mapping_1, volume_mapping_2])
 
         mappings = self.my_client.get_volume_mappings_for_volume(
             eseries_fake.VOLUME)
@@ -268,8 +268,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         volume_mapping_2['volumeRef'] = '2'
         volume_mapping_2['mapRef'] = 'hostRef'
         self.mock_object(self.my_client, 'get_volume_mappings',
-                         mock.Mock(return_value=[volume_mapping_1,
-                                                 volume_mapping_2]))
+                         return_value=[volume_mapping_1, volume_mapping_2])
 
         mappings = self.my_client.get_volume_mappings_for_host(
             'hostRef')
@@ -283,8 +282,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         volume_mapping_2['volumeRef'] = '2'
         volume_mapping_2['mapRef'] = 'hostGroupRef'
         self.mock_object(self.my_client, 'get_volume_mappings',
-                         mock.Mock(return_value=[volume_mapping_1,
-                                                 volume_mapping_2]))
+                         return_value=[volume_mapping_1, volume_mapping_2])
 
         mappings = self.my_client.get_volume_mappings_for_host_group(
             'hostGroupRef')
@@ -392,18 +390,16 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
     def test_add_autosupport_data(self):
         self.mock_object(
             client.RestClient, 'get_eseries_api_info',
-            mock.Mock(return_value=(
-                eseries_fake.FAKE_ASUP_DATA['operating-mode'],
-                eseries_fake.FAKE_ABOUT_RESPONSE['version'])))
+            return_value=(eseries_fake.FAKE_ASUP_DATA['operating-mode'],
+                          eseries_fake.FAKE_ABOUT_RESPONSE['version']))
         self.mock_object(
             self.my_client, 'get_asup_info',
-            mock.Mock(return_value=eseries_fake.GET_ASUP_RETURN))
+            return_value=eseries_fake.GET_ASUP_RETURN)
         self.mock_object(
-            self.my_client, 'set_counter',
-            mock.Mock(return_value={'value': 1}))
+            self.my_client, 'set_counter', return_value={'value': 1})
         mock_invoke = self.mock_object(
             self.my_client, '_invoke',
-            mock.Mock(return_value=eseries_fake.FAKE_ASUP_DATA))
+            return_value=eseries_fake.FAKE_ASUP_DATA)
 
         client.RestClient.add_autosupport_data(
             self.my_client,
@@ -423,10 +419,9 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
                                           controllers):
         self.mock_object(
             client.RestClient, 'list_hardware_inventory',
-            mock.Mock(return_value=controllers))
+            return_value=controllers)
         self.mock_object(
-            client.RestClient, 'list_storage_system',
-            mock.Mock(return_value={}))
+            client.RestClient, 'list_storage_system', return_value={})
 
         sn = client.RestClient.get_asup_info(self.my_client)['serial_numbers']
 
@@ -435,10 +430,10 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
     def test_get_asup_info_model_name(self):
         self.mock_object(
             client.RestClient, 'list_hardware_inventory',
-            mock.Mock(return_value=eseries_fake.HARDWARE_INVENTORY))
+            return_value=eseries_fake.HARDWARE_INVENTORY)
         self.mock_object(
             client.RestClient, 'list_storage_system',
-            mock.Mock(return_value=eseries_fake.STORAGE_SYSTEM))
+            return_value=eseries_fake.STORAGE_SYSTEM)
 
         model_name = client.RestClient.get_asup_info(self.my_client)['model']
 
@@ -447,11 +442,9 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
     def test_get_asup_info_model_name_empty_controllers_list(self):
         self.mock_object(
-            client.RestClient, 'list_hardware_inventory',
-            mock.Mock(return_value={}))
+            client.RestClient, 'list_hardware_inventory', return_value={})
         self.mock_object(
-            client.RestClient, 'list_storage_system',
-            mock.Mock(return_value={}))
+            client.RestClient, 'list_storage_system', return_value={})
 
         model_name = client.RestClient.get_asup_info(self.my_client)['model']
 
@@ -463,10 +456,9 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
             return_value=eseries_fake.FAKE_ABOUT_RESPONSE)
         self.mock_object(
             client.RestClient, '_get_resource_url',
-            mock.Mock(return_value=eseries_fake.FAKE_RESOURCE_URL))
+            return_value=eseries_fake.FAKE_RESOURCE_URL)
         self.mock_object(
-            self.my_client, 'invoke_service',
-            mock.Mock(return_value=fake_invoke_service))
+            self.my_client, 'invoke_service', return_value=fake_invoke_service)
 
         eseries_info = client.RestClient.get_eseries_api_info(
             self.my_client, verify=False)
@@ -578,7 +570,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         self.assertEqual(fake_volume, volume)
 
     def test_list_volume_v2_not_found(self):
-        status_code = 404
+        status_code = http_client.NOT_FOUND
         url = client.RestClient.RESOURCE_PATHS['ssc_volume']
         self.my_client.features = mock.Mock()
         self.my_client.features.SSC_API_V2 = na_utils.FeatureState(
@@ -597,7 +589,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
                                                           mock.ANY})
 
     def test_list_volume_v2_failure(self):
-        status_code = 422
+        status_code = http_client.UNPROCESSABLE_ENTITY
         url = client.RestClient.RESOURCE_PATHS['ssc_volume']
         self.my_client.features = mock.Mock()
         self.my_client.features.SSC_API_V2 = na_utils.FeatureState(
@@ -755,8 +747,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
     def test_list_snapshot_group(self):
         grp = copy.deepcopy(eseries_fake.SNAPSHOT_GROUP)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=grp))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=grp)
         fake_ref = 'fake'
 
         result = self.my_client.list_snapshot_group(fake_ref)
@@ -768,8 +759,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
     def test_list_snapshot_groups(self):
         grps = [copy.deepcopy(eseries_fake.SNAPSHOT_GROUP)]
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=grps))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=grps)
 
         result = self.my_client.list_snapshot_groups()
 
@@ -791,8 +781,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
     @ddt.unpack
     def test_create_snapshot_group(self, pool_id, repo, warn, limit, policy):
         vol = copy.deepcopy(eseries_fake.SNAPSHOT_VOLUME)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=vol))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=vol)
         snap_grp = copy.deepcopy(eseries_fake.SNAPSHOT_GROUP)
 
         result = self.my_client.create_snapshot_group(
@@ -809,8 +798,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
     def test_list_snapshot_volumes(self):
         vols = [copy.deepcopy(eseries_fake.SNAPSHOT_VOLUME)]
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=vols))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=vols)
 
         result = self.my_client.list_snapshot_volumes()
 
@@ -832,8 +820,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
     @ddt.unpack
     def test_create_snapshot_volume(self, pool_id, repo, warn, mode):
         vol = copy.deepcopy(eseries_fake.SNAPSHOT_VOLUME)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=vol))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=vol)
 
         result = self.my_client.create_snapshot_volume(
             vol['basePIT'], vol['label'], vol['id'], pool_id,
@@ -849,8 +836,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         label = 'name'
         pct = 99
         vol = copy.deepcopy(eseries_fake.SNAPSHOT_VOLUME)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=vol))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=vol)
 
         result = self.my_client.update_snapshot_volume(snap_id, label, pct)
 
@@ -861,8 +847,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
     def test_create_snapshot_image(self):
         img = copy.deepcopy(eseries_fake.SNAPSHOT_IMAGE)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=img))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=img)
         grp_id = '1'
 
         result = self.my_client.create_snapshot_image(grp_id)
@@ -874,8 +859,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
     def test_list_snapshot_image(self):
         img = copy.deepcopy(eseries_fake.SNAPSHOT_IMAGE)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=img))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=img)
         fake_ref = 'fake'
 
         result = self.my_client.list_snapshot_image(fake_ref)
@@ -887,8 +871,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
     def test_list_snapshot_images(self):
         imgs = [copy.deepcopy(eseries_fake.SNAPSHOT_IMAGE)]
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=imgs))
+        invoke = self.mock_object(self.my_client, '_invoke', return_value=imgs)
 
         result = self.my_client.list_snapshot_images()
 
@@ -999,11 +982,10 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         cg_snap_view = copy.deepcopy(
             eseries_fake.FAKE_CONSISTENCY_GROUP_SNAPSHOT_VOLUME)
         view = copy.deepcopy(eseries_fake.SNAPSHOT_VOLUME)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=cg_snap_view))
+        invoke = self.mock_object(self.my_client, '_invoke',
+                                  return_value=cg_snap_view)
         list_views = self.mock_object(
-            self.my_client, 'list_cg_snapshot_views',
-            mock.Mock(return_value=[view]))
+            self.my_client, 'list_cg_snapshot_views', return_value=[view])
         name = view['name']
         snap_id = view['basePIT']
         path = self.my_client.RESOURCE_PATHS.get('cgroup_cgsnap_views')
@@ -1019,11 +1001,10 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         cg_snap_view = copy.deepcopy(
             eseries_fake.FAKE_CONSISTENCY_GROUP_SNAPSHOT_VOLUME)
         view = copy.deepcopy(eseries_fake.SNAPSHOT_VOLUME)
-        invoke = self.mock_object(self.my_client, '_invoke', mock.Mock(
-            return_value=cg_snap_view))
+        invoke = self.mock_object(self.my_client, '_invoke',
+                                  return_value=cg_snap_view)
         list_views = self.mock_object(
-            self.my_client, 'list_cg_snapshot_views',
-            mock.Mock(return_value=[view]))
+            self.my_client, 'list_cg_snapshot_views', return_value=[view])
         del_view = self.mock_object(self.my_client, 'delete_cg_snapshot_view')
         name = view['name']
         # Ensure we don't get a match on the retrieved views
@@ -1068,7 +1049,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1081,7 +1062,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1093,7 +1074,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1106,7 +1087,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1118,7 +1099,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1131,7 +1112,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1143,7 +1124,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1156,7 +1137,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
 
         self.mock_object(client.RestClient,
                          'get_eseries_api_info',
-                         mock.Mock(return_value=('proxy', api_version)))
+                         return_value=('proxy', api_version))
 
         client.RestClient._init_features(self.my_client)
 
@@ -1167,10 +1148,10 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         fake_response = mock.Mock()
         fake_response.json = mock.Mock(side_effect=scanner.JSONDecodeError(
             '', '{}', 1))
-        fake_response.status_code = 424
+        fake_response.status_code = http_client.FAILED_DEPENDENCY
         fake_response.text = "Fake Response"
         self.mock_object(self.my_client, 'invoke_service',
-                         mock.Mock(return_value=fake_response))
+                         return_value=fake_response)
 
         self.assertRaises(es_exception.WebServiceException,
                           self.my_client._invoke, 'GET',
@@ -1180,8 +1161,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         path = self.my_client.RESOURCE_PATHS.get('persistent-store')
         fake_store = copy.deepcopy(eseries_fake.FAKE_BACKEND_STORE)
         invoke = self.mock_object(
-            self.my_client, '_invoke', mock.Mock(
-                return_value=fake_store))
+            self.my_client, '_invoke', return_value=fake_store)
         expected = json.loads(fake_store.get('value'))
 
         result = self.my_client.list_backend_store('key')
@@ -1193,9 +1173,7 @@ class NetAppEseriesClientDriverTestCase(test.TestCase):
         path = self.my_client.RESOURCE_PATHS.get('persistent-stores')
         fake_store = copy.deepcopy(eseries_fake.FAKE_BACKEND_STORE)
         key = 'key'
-        invoke = self.mock_object(
-            self.my_client, '_invoke',
-            mock.Mock())
+        invoke = self.mock_object(self.my_client, '_invoke')
 
         self.my_client.save_backend_store(key, fake_store)
 
@@ -1234,7 +1212,7 @@ class TestWebserviceClientTestCase(test.TestCase):
         """Tests if invoke_service evaluates the right response"""
         self.webclient._endpoint = eseries_fake.FAKE_ENDPOINT_HTTP
         self.mock_object(self.webclient.conn, 'request',
-                         mock.Mock(return_value=eseries_fake.FAKE_INVOC_MSG))
+                         return_value=eseries_fake.FAKE_INVOC_MSG)
         result = self.webclient.invoke_service()
 
         self.assertIsNotNone(result)

@@ -28,8 +28,10 @@ from oslo_utils import uuidutils
 from cinder import context
 from cinder import db
 from cinder import exception
-from cinder.i18n import _, _LE
+from cinder.i18n import _
 from cinder import quota
+from cinder import rpc
+from cinder import utils
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
@@ -56,7 +58,7 @@ def create(context,
                                               description=description),
                                          projects=projects)
     except db_exc.DBError:
-        LOG.exception(_LE('DB error:'))
+        LOG.exception('DB error:')
         raise exception.VolumeTypeCreateFailed(name=name,
                                                extra_specs=extra_specs)
     return type_ref
@@ -70,11 +72,9 @@ def update(context, id, name, description, is_public=None):
     elevated = context if context.is_admin else context.elevated()
     old_volume_type = get_volume_type(elevated, id)
     try:
-        type_updated = db.volume_type_update(elevated,
-                                             id,
-                                             dict(name=name,
-                                                  description=description,
-                                                  is_public=is_public))
+        db.volume_type_update(elevated, id,
+                              dict(name=name, description=description,
+                                   is_public=is_public))
         # Rename resource in quota if volume type name is changed.
         if name:
             old_type_name = old_volume_type.get('name')
@@ -83,9 +83,8 @@ def update(context, id, name, description, is_public=None):
                                              old_type_name,
                                              name)
     except db_exc.DBError:
-        LOG.exception(_LE('DB error:'))
+        LOG.exception('DB error:')
         raise exception.VolumeTypeUpdateFailed(id=id)
-    return type_updated
 
 
 def destroy(context, id):
@@ -160,8 +159,8 @@ def get_default_volume_type():
             # Couldn't find volume type with the name in default_volume_type
             # flag, record this issue and move on
             # TODO(zhiteng) consider add notification to warn admin
-            LOG.exception(_LE('Default volume type is not found. '
-                          'Please check default_volume_type config:'))
+            LOG.exception('Default volume type is not found. '
+                          'Please check default_volume_type config:')
 
     return vol_type
 
@@ -185,6 +184,32 @@ def is_public_volume_type(context, volume_type_id):
     return volume_type['is_public']
 
 
+@utils.if_notifications_enabled
+def notify_about_volume_type_access_usage(context,
+                                          volume_type_id,
+                                          project_id,
+                                          event_suffix,
+                                          host=None):
+    """Notify about successful usage type-access-(add/remove) command.
+
+    :param context: security context
+    :param volume_type_id: volume type uuid
+    :param project_id: tenant uuid
+    :param event_suffix: name of called operation access-(add/remove)
+    :param host: hostname
+    """
+    notifier_info = {'volume_type_id': volume_type_id,
+                     'project_id': project_id}
+
+    if not host:
+        host = CONF.host
+
+    notifier = rpc.get_notifier("volume_type_project", host)
+    notifier.info(context,
+                  'volume_type_project.%s' % event_suffix,
+                  notifier_info)
+
+
 def add_volume_type_access(context, volume_type_id, project_id):
     """Add access to volume type for project_id."""
     if volume_type_id is None:
@@ -195,7 +220,13 @@ def add_volume_type_access(context, volume_type_id, project_id):
         msg = _("Type access modification is not applicable to public volume "
                 "type.")
         raise exception.InvalidVolumeType(reason=msg)
-    return db.volume_type_access_add(elevated, volume_type_id, project_id)
+
+    db.volume_type_access_add(elevated, volume_type_id, project_id)
+
+    notify_about_volume_type_access_usage(context,
+                                          volume_type_id,
+                                          project_id,
+                                          'access.add')
 
 
 def remove_volume_type_access(context, volume_type_id, project_id):
@@ -208,7 +239,13 @@ def remove_volume_type_access(context, volume_type_id, project_id):
         msg = _("Type access modification is not applicable to public volume "
                 "type.")
         raise exception.InvalidVolumeType(reason=msg)
-    return db.volume_type_access_remove(elevated, volume_type_id, project_id)
+
+    db.volume_type_access_remove(elevated, volume_type_id, project_id)
+
+    notify_about_volume_type_access_usage(context,
+                                          volume_type_id,
+                                          project_id,
+                                          'access.remove')
 
 
 def is_encrypted(context, volume_type_id):

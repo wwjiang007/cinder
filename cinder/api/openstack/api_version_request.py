@@ -70,6 +70,17 @@ REST_API_VERSION_HISTORY = """
     * 3.19 - Add API reset status actions 'reset_status' to group snapshot.
     * 3.20 - Add API reset status actions 'reset_status' to generic
              volume group.
+    * 3.21 - Show provider_id in detailed view of a volume for admin.
+    * 3.22 - Add filtering based on metadata for snapshot listing.
+    * 3.23 - Allow passing force parameter to volume delete.
+    * 3.24 - Add workers/cleanup endpoint.
+    * 3.25 - Add ``volumes`` field to group list/detail and group show.
+    * 3.26 - Add failover action and cluster listings accept new filters and
+             return new data.
+    * 3.27 - Add attachment API
+    * 3.28 - Add filters support to get_pools
+    * 3.29 - Add filter, sorter and pagination support in group snapshot.
+
 """
 
 # The minimum and maximum versions of the API supported
@@ -77,7 +88,7 @@ REST_API_VERSION_HISTORY = """
 # minimum version of the API supported.
 # Explicitly using /v1 or /v2 enpoints will still work
 _MIN_API_VERSION = "3.0"
-_MAX_API_VERSION = "3.20"
+_MAX_API_VERSION = "3.29"
 _LEGACY_API_VERSION1 = "1.0"
 _LEGACY_API_VERSION2 = "2.0"
 
@@ -128,8 +139,10 @@ class APIVersionRequest(utils.ComparableMixin):
         return ("API Version Request Major: %(major)s, Minor: %(minor)s"
                 % {'major': self._ver_major, 'minor': self._ver_minor})
 
-    def is_null(self):
-        return self._ver_major is None and self._ver_minor is None
+    def __bool__(self):
+        return (self._ver_major or self._ver_minor) is not None
+
+    __nonzero__ = __bool__
 
     def _cmpkey(self):
         """Return the value used by ComparableMixin for rich comparisons."""
@@ -164,7 +177,7 @@ class APIVersionRequest(utils.ComparableMixin):
         :returns: boolean
         """
 
-        if self.is_null():
+        if not self:
             raise ValueError
 
         if isinstance(min_version, str):
@@ -174,16 +187,12 @@ class APIVersionRequest(utils.ComparableMixin):
 
         if not min_version and not max_version:
             return True
-        elif ((min_version and max_version) and
-              max_version.is_null() and min_version.is_null()):
-            return True
 
-        elif not max_version or max_version.is_null():
+        if not max_version:
             return min_version <= self
-        elif not min_version or min_version.is_null():
+        if not min_version:
             return self <= max_version
-        else:
-            return min_version <= self <= max_version
+        return min_version <= self <= max_version
 
     def get_string(self):
         """Returns a string representation of this object.
@@ -191,7 +200,7 @@ class APIVersionRequest(utils.ComparableMixin):
         If this method is used to create an APIVersionRequest,
         the resulting object will be an equivalent request.
         """
-        if self.is_null():
+        if not self:
             raise ValueError
         return ("%(major)s.%(minor)s" %
                 {'major': self._ver_major, 'minor': self._ver_minor})

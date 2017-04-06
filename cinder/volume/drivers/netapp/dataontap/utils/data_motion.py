@@ -24,9 +24,9 @@ from oslo_log import log
 from oslo_utils import excutils
 
 from cinder import exception
-from cinder import utils
-from cinder.i18n import _, _LE, _LI
+from cinder.i18n import _
 from cinder.objects import fields
+from cinder import utils
 from cinder.volume.drivers.netapp.dataontap.client import api as netapp_api
 from cinder.volume.drivers.netapp.dataontap.utils import utils as config_utils
 from cinder.volume import utils as volume_utils
@@ -199,7 +199,7 @@ class DataMotionMixin(object):
                                                   dest_vserver,
                                                   dest_flexvol_name)
                 except netapp_api.NaApiError:
-                    LOG.exception(_LE("Could not re-sync SnapMirror."))
+                    LOG.exception("Could not re-sync SnapMirror.")
 
     def delete_snapmirror(self, src_backend_name, dest_backend_name,
                           src_flexvol_name, dest_flexvol_name, release=True):
@@ -241,7 +241,7 @@ class DataMotionMixin(object):
                 if (e.code == netapp_api.EOBJECTNOTFOUND or
                         e.code == netapp_api.ESOURCE_IS_DIFFERENT or
                         ENTRY_DOES_NOT_EXIST in e.message):
-                    LOG.info(_LI('No SnapMirror relationship to delete.'))
+                    LOG.info('No SnapMirror relationship to delete.')
                     exc_context.reraise = False
 
         if release:
@@ -417,6 +417,12 @@ class DataMotionMixin(object):
                 src_flexvol_name)
         )
 
+        # If the source is encrypted then the destination needs to be
+        # encrypted too. Using is_flexvol_encrypted because it includes
+        # a simple check to ensure that the NVE feature is supported.
+        if src_client.is_flexvol_encrypted(src_flexvol_name, src_vserver):
+            provisioning_options['encrypt'] = 'true'
+
         # Remove size and volume_type
         size = provisioning_options.pop('size', None)
         if not size:
@@ -547,8 +553,8 @@ class DataMotionMixin(object):
         The 'slowest' mirror determines the best update that occurred on a
         given replication target.
         """
-        filtered_mirrors = list(filter(lambda x: x.get('destination-volume')
-                                in flexvols, mirrors))
+        filtered_mirrors = [x for x in mirrors
+                            if x.get('destination-volume')in flexvols]
         sorted_mirrors = sorted(filtered_mirrors,
                                 key=lambda x: int(x.get('lag-time')),
                                 reverse=True)

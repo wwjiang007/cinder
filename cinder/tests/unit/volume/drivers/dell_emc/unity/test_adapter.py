@@ -32,7 +32,9 @@ from cinder.volume.drivers.dell_emc.unity import adapter
 ########################
 class MockConfig(object):
     def __init__(self):
+        self.config_group = 'test_backend'
         self.unity_storage_pool_names = ['pool1', 'pool2']
+        self.unity_io_ports = None
         self.reserved_percentage = 5
         self.max_over_subscription_ratio = 300
         self.volume_backend_name = 'backend'
@@ -64,6 +66,9 @@ class MockDriver(object):
 
 
 class MockClient(object):
+    def __init__(self):
+        self._system = test_client.MockSystem()
+
     @staticmethod
     def get_pools():
         return test_client.MockResourceList(['pool0', 'pool1'])
@@ -98,7 +103,7 @@ class MockClient(object):
 
     @staticmethod
     def get_snap(name=None):
-        snap = test_client.MockResource(name=name)
+        snap = test_client.MockResource(name=name, _id=name)
         if name is not None:
             ret = snap
         else:
@@ -129,12 +134,13 @@ class MockClient(object):
             raise ex.DetachIsCalled()
 
     @staticmethod
-    def get_iscsi_target_info():
+    def get_iscsi_target_info(allowed_ports=None):
         return [{'portal': '1.2.3.4:1234', 'iqn': 'iqn.1-1.com.e:c.a.a0'},
                 {'portal': '1.2.3.5:1234', 'iqn': 'iqn.1-1.com.e:c.a.a1'}]
 
     @staticmethod
-    def get_fc_target_info(host=None, logged_in_only=False):
+    def get_fc_target_info(host=None, logged_in_only=False,
+                           allowed_ports=None):
         if host and host.name == 'no_target':
             ret = []
         else:
@@ -154,6 +160,19 @@ class MockClient(object):
         if size_gib <= 0:
             raise ex.ExtendLunError
 
+    @staticmethod
+    def get_fc_ports():
+        return test_client.MockResourceList(ids=['spa_iom_0_fc0',
+                                                 'spa_iom_0_fc1'])
+
+    @staticmethod
+    def get_ethernet_ports():
+        return test_client.MockResourceList(ids=['spa_eth0', 'spb_eth0'])
+
+    @property
+    def system(self):
+        return self._system
+
 
 class MockLookupService(object):
     @staticmethod
@@ -171,7 +190,9 @@ class MockLookupService(object):
 def mock_adapter(driver_clz):
     ret = driver_clz()
     ret._client = MockClient()
-    ret.do_setup(MockDriver(), MockConfig())
+    with mock.patch('cinder.volume.drivers.dell_emc.unity.adapter.'
+                    'CommonAdapter.validate_ports'):
+        ret.do_setup(MockDriver(), MockConfig())
     ret.lookup_service = MockLookupService()
     return ret
 
@@ -192,6 +213,18 @@ def get_lun_pl(name):
     return 'id^%s|system^CLIENT_SERIAL|type^lun|version^None' % name
 
 
+def get_snap_pl(name):
+    return 'id^%s|system^CLIENT_SERIAL|type^snapshot|version^None' % name
+
+
+def get_connector_uids(adapter, connector):
+    return []
+
+
+def get_connection_info(adapter, hlu, host, connector):
+    return {}
+
+
 def patch_for_unity_adapter(func):
     @functools.wraps(func)
     @mock.patch('cinder.volume.drivers.dell_emc.unity.utils.'
@@ -204,6 +237,28 @@ def patch_for_unity_adapter(func):
         return func(*args, **kwargs)
 
     return func_wrapper
+
+
+def patch_for_concrete_adapter(clz_str):
+    def inner_decorator(func):
+        @functools.wraps(func)
+        @mock.patch('%s.get_connector_uids' % clz_str,
+                    new=get_connector_uids)
+        @mock.patch('%s.get_connection_info' % clz_str,
+                    new=get_connection_info)
+        def func_wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        return func_wrapper
+
+    return inner_decorator
+
+
+patch_for_iscsi_adapter = patch_for_concrete_adapter(
+    'cinder.volume.drivers.dell_emc.unity.adapter.ISCSIAdapter')
+
+
+patch_for_fc_adapter = patch_for_concrete_adapter(
+    'cinder.volume.drivers.dell_emc.unity.adapter.FCAdapter')
 
 
 ########################
@@ -233,8 +288,8 @@ class CommonAdapterTest(unittest.TestCase):
         snap = mock.Mock(volume=volume)
         snap.name = 'abc-def_snap'
         result = self.adapter.create_snapshot(snap)
-        self.assertEqual('abc-def_snap', result.name)
-        self.assertEqual('lun_43', result.get_id())
+        self.assertEqual(get_snap_pl('lun_43'), result['provider_location'])
+        self.assertEqual('lun_43', result['provider_id'])
 
     def test_delete_snap(self):
         def f():
@@ -290,6 +345,14 @@ class CommonAdapterTest(unittest.TestCase):
         self.assertFalse(self.adapter.array_cert_verify)
         self.assertIsNone(self.adapter.array_ca_cert_path)
 
+    def test_do_setup_version_before_4_1(self):
+        def f():
+            with mock.patch('cinder.volume.drivers.dell_emc.unity.adapter.'
+                            'CommonAdapter.validate_ports'):
+                self.adapter._client.system.system_version = '4.0.0'
+                self.adapter.do_setup(self.adapter.driver, MockConfig())
+        self.assertRaises(exception.VolumeBackendAPIException, f)
+
     def test_verify_cert_false_path_none(self):
         self.adapter.array_cert_verify = False
         self.adapter.array_ca_cert_path = None
@@ -311,22 +374,7 @@ class CommonAdapterTest(unittest.TestCase):
         self.assertEqual(self.adapter.array_ca_cert_path,
                          self.adapter.verify_cert)
 
-    def test_initialize_connection_common(self):
-        volume = mock.Mock(provider_location='id^lun_43', id='id_43')
-        connector = {'host': 'host1'}
-        data = self.adapter.initialize_connection(volume, connector)['data']
-        self.assertTrue(data['target_discovered'])
-        self.assertEqual('id_43', data['volume_id'])
-
-    def test_initialize_connection_for_resource(self):
-        snap = test_client.MockResource(_id='snap_1')
-        connector = {'host': 'host1'}
-        data = self.adapter._initialize_connection(
-            snap, connector, 'snap_1')['data']
-        self.assertTrue(data['target_discovered'])
-        self.assertEqual('snap_1', data['volume_id'])
-
-    def test_terminate_connection_common(self):
+    def test_terminate_connection_volume(self):
         def f():
             volume = mock.Mock(provider_location='id^lun_43', id='id_43')
             connector = {'host': 'host1'}
@@ -334,11 +382,12 @@ class CommonAdapterTest(unittest.TestCase):
 
         self.assertRaises(ex.DetachIsCalled, f)
 
-    def test_terminate_connection_snap(self):
+    def test_terminate_connection_snapshot(self):
         def f():
             connector = {'host': 'host1'}
-            snap = test_client.MockResource(_id='snap_0')
-            self.adapter._terminate_connection(snap, connector)
+            snap = mock.Mock(id='snap_0', name='snap_0')
+            snap.name = 'snap_0'
+            self.adapter.terminate_connection_snapshot(snap, connector)
 
         self.assertRaises(ex.DetachIsCalled, f)
 
@@ -420,6 +469,26 @@ class CommonAdapterTest(unittest.TestCase):
 
         self.assertRaises(exception.VolumeBackendAPIException, f)
 
+    def test_normalize_config(self):
+        config = MockConfig()
+        config.unity_storage_pool_names = ['  pool_1  ', '', '    ']
+        config.unity_io_ports = ['  spa_eth2  ', '', '   ']
+        normalized = self.adapter.normalize_config(config)
+        self.assertEqual(['pool_1'], normalized.unity_storage_pool_names)
+        self.assertEqual(['spa_eth2'], normalized.unity_io_ports)
+
+    def test_normalize_config_raise(self):
+        with self.assertRaisesRegexp(exception.InvalidConfigurationValue,
+                                     'unity_storage_pool_names'):
+            config = MockConfig()
+            config.unity_storage_pool_names = ['', '    ']
+            self.adapter.normalize_config(config)
+        with self.assertRaisesRegexp(exception.InvalidConfigurationValue,
+                                     'unity_io_ports'):
+            config = MockConfig()
+            config.unity_io_ports = ['', '   ']
+            self.adapter.normalize_config(config)
+
 
 class FCAdapterTest(unittest.TestCase):
     def setUp(self):
@@ -475,6 +544,25 @@ class FCAdapterTest(unittest.TestCase):
         wwns = ['8899AABBCCDDEEFF', '8899AABBCCDDFFEE']
         self.assertListEqual(wwns, ret['target_wwn'])
 
+    @patch_for_fc_adapter
+    def test_initialize_connection_volume(self):
+        volume = mock.Mock(provider_location='id^lun_43', id='id_43')
+        connector = {'host': 'host1'}
+        conn_info = self.adapter.initialize_connection(volume, connector)
+        self.assertEqual('fibre_channel', conn_info['driver_volume_type'])
+        self.assertTrue(conn_info['data']['target_discovered'])
+        self.assertEqual('id_43', conn_info['data']['volume_id'])
+
+    @patch_for_fc_adapter
+    def test_initialize_connection_snapshot(self):
+        snap = mock.Mock(id='snap_1', name='snap_1')
+        connector = {'host': 'host1'}
+        conn_info = self.adapter.initialize_connection_snapshot(
+            snap, connector)
+        self.assertEqual('fibre_channel', conn_info['driver_volume_type'])
+        self.assertTrue(conn_info['data']['target_discovered'])
+        self.assertEqual('snap_1', conn_info['data']['volume_id'])
+
     def test_terminate_connection_auto_zone_enabled(self):
         connector = {'host': 'host1', 'wwpns': 'abcdefg'}
         volume = mock.Mock(provider_location='id^lun_41', id='id_41')
@@ -487,6 +575,32 @@ class FCAdapterTest(unittest.TestCase):
         self.assertDictEqual(target_map, data['initiator_target_map'])
         target_wwn = ['100000051e55a100', '100000051e55a121']
         self.assertListEqual(target_wwn, data['target_wwn'])
+
+    def test_validate_ports_whitelist_none(self):
+        ports = self.adapter.validate_ports(None)
+        self.assertEqual(set(('spa_iom_0_fc0', 'spa_iom_0_fc1')), set(ports))
+
+    def test_validate_ports(self):
+        ports = self.adapter.validate_ports(['spa_iom_0_fc0'])
+        self.assertEqual(set(('spa_iom_0_fc0',)), set(ports))
+
+    def test_validate_ports_asterisk(self):
+        ports = self.adapter.validate_ports(['spa*'])
+        self.assertEqual(set(('spa_iom_0_fc0', 'spa_iom_0_fc1')), set(ports))
+
+    def test_validate_ports_question_mark(self):
+        ports = self.adapter.validate_ports(['spa_iom_0_fc?'])
+        self.assertEqual(set(('spa_iom_0_fc0', 'spa_iom_0_fc1')), set(ports))
+
+    def test_validate_ports_no_matched(self):
+        with self.assertRaisesRegexp(exception.InvalidConfigurationValue,
+                                     'unity_io_ports'):
+            self.adapter.validate_ports(['spc_invalid'])
+
+    def test_validate_ports_unmatched_whitelist(self):
+        with self.assertRaisesRegexp(exception.InvalidConfigurationValue,
+                                     'unity_io_ports'):
+            self.adapter.validate_ports(['spa_iom*', 'spc_invalid'])
 
 
 class ISCSIAdapterTest(unittest.TestCase):
@@ -514,3 +628,22 @@ class ISCSIAdapterTest(unittest.TestCase):
         self.assertEqual(hlu, info['target_lun'])
         self.assertTrue(info['target_portal'] in target_portals)
         self.assertTrue(info['target_iqn'] in target_iqns)
+
+    @patch_for_iscsi_adapter
+    def test_initialize_connection_volume(self):
+        volume = mock.Mock(provider_location='id^lun_43', id='id_43')
+        connector = {'host': 'host1'}
+        conn_info = self.adapter.initialize_connection(volume, connector)
+        self.assertEqual('iscsi', conn_info['driver_volume_type'])
+        self.assertTrue(conn_info['data']['target_discovered'])
+        self.assertEqual('id_43', conn_info['data']['volume_id'])
+
+    @patch_for_iscsi_adapter
+    def test_initialize_connection_snapshot(self):
+        snap = mock.Mock(id='snap_1', name='snap_1')
+        connector = {'host': 'host1'}
+        conn_info = self.adapter.initialize_connection_snapshot(
+            snap, connector)
+        self.assertEqual('iscsi', conn_info['driver_volume_type'])
+        self.assertTrue(conn_info['data']['target_discovered'])
+        self.assertEqual('snap_1', conn_info['data']['volume_id'])

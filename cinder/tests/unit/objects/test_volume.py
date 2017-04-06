@@ -192,8 +192,10 @@ class TestVolume(test_objects.BaseObjectsTestCase):
                            mock_va_get_all_by_vol, mock_vt_get_by_id,
                            mock_admin_metadata_get, mock_glance_metadata_get,
                            mock_metadata_get):
+        fake_db_volume = fake_volume.fake_db_volume(
+            consistencygroup_id=fake.CONSISTENCY_GROUP_ID)
         volume = objects.Volume._from_db_object(
-            self.context, objects.Volume(), fake_volume.fake_db_volume())
+            self.context, objects.Volume(), fake_db_volume)
 
         # Test metadata lazy-loaded field
         metadata = {'foo': 'bar'}
@@ -263,6 +265,24 @@ class TestVolume(test_objects.BaseObjectsTestCase):
         mock_admin_metadata_get.return_value = adm_metadata
         self.assertEqual(adm_metadata, volume.admin_metadata)
         mock_admin_metadata_get.assert_called_once_with(adm_context, volume.id)
+
+    @mock.patch('cinder.objects.consistencygroup.ConsistencyGroup.get_by_id')
+    def test_obj_load_attr_cgroup_not_exist(self, mock_cg_get_by_id):
+        fake_db_volume = fake_volume.fake_db_volume(consistencygroup_id=None)
+        volume = objects.Volume._from_db_object(
+            self.context, objects.Volume(), fake_db_volume)
+
+        self.assertIsNone(volume.consistencygroup)
+        mock_cg_get_by_id.assert_not_called()
+
+    @mock.patch('cinder.objects.group.Group.get_by_id')
+    def test_obj_load_attr_group_not_exist(self, mock_group_get_by_id):
+        fake_db_volume = fake_volume.fake_db_volume(group_id=None)
+        volume = objects.Volume._from_db_object(
+            self.context, objects.Volume(), fake_db_volume)
+
+        self.assertIsNone(volume.group)
+        mock_group_get_by_id.assert_not_called()
 
     def test_from_db_object_with_all_expected_attributes(self):
         expected_attrs = ['metadata', 'admin_metadata', 'glance_metadata',
@@ -354,22 +374,15 @@ class TestVolume(test_objects.BaseObjectsTestCase):
     @ddt.data({'src_vol_type_id': fake.VOLUME_TYPE_ID,
                'dest_vol_type_id': fake.VOLUME_TYPE2_ID},
               {'src_vol_type_id': None,
-               'dest_vol_type_id': fake.VOLUME_TYPE2_ID},
-              {'src_vol_type_id': fake.VOLUME_TYPE_ID,
-               'dest_vol_type_id': fake.VOLUME_TYPE2_ID,
-               'src_vol_status': 'retyping'},)
+               'dest_vol_type_id': fake.VOLUME_TYPE2_ID})
     @ddt.unpack
     def test_finish_volume_migration(self, volume_update, metadata_update,
-                                     src_vol_type_id, dest_vol_type_id,
-                                     src_vol_status=None):
+                                     src_vol_type_id, dest_vol_type_id):
         src_volume_db = fake_volume.fake_db_volume(
             **{'id': fake.VOLUME_ID, 'volume_type_id': src_vol_type_id})
         if src_vol_type_id:
             src_volume_db['volume_type'] = fake_volume.fake_db_volume_type(
                 id=src_vol_type_id)
-        if src_vol_status:
-            src_volume_db['status'] = src_vol_status
-
         dest_volume_db = fake_volume.fake_db_volume(
             **{'id': fake.VOLUME2_ID, 'volume_type_id': dest_vol_type_id})
         if dest_vol_type_id:
@@ -393,11 +406,7 @@ class TestVolume(test_objects.BaseObjectsTestCase):
             mock.call(self.context, src_volume.id, mock.ANY),
             mock.call(self.context, dest_volume.id, mock.ANY)])
         ctxt, vol_id, updates = volume_update.call_args[0]
-
-        if src_vol_status and src_vol_status == 'retyping':
-            self.assertIn('volume_type', updates)
-        else:
-            self.assertNotIn('volume_type', updates)
+        self.assertNotIn('volume_type', updates)
 
         # Ensure that the destination volume type has not been overwritten
         self.assertEqual(dest_vol_type_id,
@@ -514,6 +523,7 @@ class TestVolume(test_objects.BaseObjectsTestCase):
             self.assertFalse(volume_attachment_get.called)
 
 
+@ddt.ddt
 class TestVolumeList(test_objects.BaseObjectsTestCase):
     @mock.patch('cinder.db.volume_get_all')
     def test_get_all(self, volume_get_all):
@@ -559,6 +569,16 @@ class TestVolumeList(test_objects.BaseObjectsTestCase):
             mock.sentinel.sorted_dirs, mock.sentinel.filters)
         self.assertEqual(1, len(volumes))
         TestVolume._compare(self, db_volume, volumes[0])
+
+    @ddt.data(['name_id'], ['__contains__'])
+    def test_get_by_project_with_sort_key(self, sort_keys):
+        fake_volume.fake_db_volume()
+
+        self.assertRaises(exception.InvalidInput,
+                          objects.VolumeList.get_all_by_project,
+                          self.context,
+                          self.context.project_id,
+                          sort_keys=sort_keys)
 
     @mock.patch('cinder.db.volume_include_in_cluster')
     def test_include_in_cluster(self, include_mock):

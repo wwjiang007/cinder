@@ -1,6 +1,5 @@
 .. -*- rst -*-
 
-============================
 Volume snapshots (snapshots)
 ============================
 
@@ -28,11 +27,11 @@ possible:
 
 
 List snapshots and details
-==========================
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/snapshots/detail
+.. rest_method::  GET /v3/{project_id}/snapshots/detail
 
-Lists all Block Storage snapshots, with details, that the tenant can access.
+Lists all Block Storage snapshots, with details, that the project can access.
 
 
 Normal response codes: 200
@@ -44,7 +43,12 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - sort_key: sort_key
+   - sort_dir: sort_dir
+   - limit: limit
+   - offset: offset
+   - marker: marker
 
 
 Response Parameters
@@ -52,7 +56,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_2
    - os-extended-snapshot-attributes:progress: os-extended-snapshot-attributes:progress
    - description: description
    - created_at: created_at
@@ -71,9 +75,9 @@ Response Example
 
 
 Create a snapshot
-=================
+~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v3/{tenant_id}/snapshots
+.. rest_method::  POST /v3/{project_id}/snapshots
 
 Creates a volume snapshot, which is a point-in-time, complete copy of a volume. You can create a volume from a snapshot.
 
@@ -90,7 +94,7 @@ Request
    - force: force
    - description: description
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -103,7 +107,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_2
    - description: description
    - created_at: created_at
    - name: name
@@ -115,11 +119,11 @@ Response Parameters
 
 
 List accessible snapshots
-=========================
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/snapshots
+.. rest_method::  GET /v3/{project_id}/snapshots
 
-Lists all Block Storage snapshots, with summary information, that the tenant can access.
+Lists all Block Storage snapshots, with summary information, that the project can access.
 
 
 Normal response codes: 200
@@ -131,10 +135,11 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
+   - offset: offset
    - marker: marker
 
 
@@ -143,7 +148,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_2
    - description: description
    - created_at: created_at
    - name: name
@@ -160,9 +165,9 @@ Response Example
 
 
 Show a snapshot's metadata
-==========================
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/snapshots/{snapshot_id}/metadata
+.. rest_method::  GET /v3/{project_id}/snapshots/{snapshot_id}/metadata
 
 Shows metadata for a snapshot.
 
@@ -176,7 +181,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 
@@ -185,7 +190,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_2
    - os-extended-snapshot-attributes:progress: os-extended-snapshot-attributes:progress
    - description: description
    - created_at: created_at
@@ -204,14 +209,14 @@ Response Example
    :language: javascript
 
 
-Update a snapshot's metadata
-============================
+Create a snapshot's metadata
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v3/{tenant_id}/snapshots/{snapshot_id}/metadata
+.. rest_method::  POST /v3/{project_id}/snapshots/{snapshot_id}/metadata
 
 Updates metadata for a snapshot.
 
-Replaces metadata items that match keys. Does not modify items that
+Creates or replaces metadata items that match keys. Does not modify items that
 are not in the request.
 
 
@@ -225,7 +230,41 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - metadata: metadata
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - snapshot_id: snapshot_id
+
+Request Example
+---------------
+
+.. literalinclude:: ./samples/snapshot-metadata-create-request.json
+   :language: javascript
+
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/snapshot-metadata-create-response.json
+   :language: javascript
+
+Update a snapshot's metadata
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. rest_method::  PUT /v3/{project_id}/snapshots/{snapshot_id}/metadata
+
+Replaces all the snapshot's metadata with the key-value pairs in the request.
+
+
+Normal response codes: 200
+Error response codes:
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - metadata: metadata
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 Request Example
@@ -243,9 +282,9 @@ Response Example
 
 
 Show a snapshot's details
-=========================
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/snapshots/{snapshot_id}
+.. rest_method::  GET /v3/{project_id}/snapshots/{snapshot_id}
 
 Shows details for a snapshot.
 
@@ -259,7 +298,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 
@@ -268,7 +307,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_2
    - os-extended-snapshot-attributes:progress: os-extended-snapshot-attributes:progress
    - description: description
    - created_at: created_at
@@ -288,9 +327,9 @@ Response Example
 
 
 Update a snapshot
-=================
+~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v3/{tenant_id}/snapshots/{snapshot_id}
+.. rest_method::  PUT /v3/{project_id}/snapshots/{snapshot_id}
 
 Updates a snapshot.
 
@@ -307,7 +346,7 @@ Request
    - snapshot: snapshot
    - description: description
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 Request Example
@@ -323,7 +362,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_2
    - description: description
    - created_at: created_at
    - name: name
@@ -341,9 +380,9 @@ Response Example
 
 
 Delete a snapshot
-=================
+~~~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v3/{tenant_id}/snapshots/{snapshot_id}
+.. rest_method::  DELETE /v3/{project_id}/snapshots/{snapshot_id}
 
 Deletes a snapshot.
 
@@ -355,5 +394,5 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id

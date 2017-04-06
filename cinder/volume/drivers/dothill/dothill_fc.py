@@ -1,5 +1,6 @@
 #    Copyright 2014 Objectif Libre
-#    Copyright 2015 DotHill Systems
+#    Copyright 2015 Dot Hill Systems Corp.
+#    Copyright 2016 Seagate Technology or one of its affiliates
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -36,10 +37,11 @@ class DotHillFCDriver(cinder.volume.driver.FibreChannelDriver):
                      - added support for manage/unmanage volume
                      - added initiator target mapping in FC zoning
                      - added https support
-
+        1.6    - Add management path redundancy and reduce load placed
+                 on management controller.
     """
 
-    VERSION = "1.0"
+    VERSION = "1.6"
 
     # ThirdPartySystems CI wiki
     CI_WIKI_NAME = "Vedams_DotHillDriver_CI"
@@ -82,7 +84,7 @@ class DotHillFCDriver(cinder.volume.driver.FibreChannelDriver):
     def delete_volume(self, volume):
         self.common.delete_volume(volume)
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     def initialize_connection(self, volume, connector):
         self.common.client_login()
         try:
@@ -101,15 +103,18 @@ class DotHillFCDriver(cinder.volume.driver.FibreChannelDriver):
         finally:
             self.common.client_logout()
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector, **kwargs):
-        self.common.unmap_volume(volume, connector, 'wwpns')
         info = {'driver_volume_type': 'fibre_channel', 'data': {}}
-        if not self.common.client.list_luns_for_host(connector['wwpns'][0]):
-            ports, init_targ_map = self.get_init_targ_map(connector)
-            info['data'] = {'target_wwn': ports,
-                            'initiator_target_map': init_targ_map}
-        return info
+        try:
+            self.common.unmap_volume(volume, connector, 'wwpns')
+            if not self.common.client.list_luns_for_host(
+                    connector['wwpns'][0]):
+                ports, init_targ_map = self.get_init_targ_map(connector)
+                info['data'] = {'target_wwn': ports,
+                                'initiator_target_map': init_targ_map}
+        finally:
+            return info
 
     def get_init_targ_map(self, connector):
         init_targ_map = {}
@@ -146,7 +151,7 @@ class DotHillFCDriver(cinder.volume.driver.FibreChannelDriver):
                                         self.__class__.__name__)
         return stats
 
-    def create_export(self, context, volume, connector):
+    def create_export(self, context, volume, connector=None):
         pass
 
     def ensure_export(self, context, volume):

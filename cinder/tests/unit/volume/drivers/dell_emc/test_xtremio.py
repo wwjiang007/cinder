@@ -27,7 +27,6 @@ from cinder.tests.unit import fake_snapshot
 from cinder.tests.unit.fake_volume import fake_volume_obj
 from cinder.volume.drivers.dell_emc import xtremio
 
-
 typ2id = {'volumes': 'vol-id',
           'snapshots': 'vol-id',
           'initiators': 'initiator-id',
@@ -304,13 +303,16 @@ class CommonData(object):
              'name': 'cg1',
              'status': 'OK',
              }
-    cgsnapshot = mock.Mock(id='192eb39b-6c2f-420c-bae3-3cfd117f9876',
-                           consistencygroup_id=group['id'])
 
-    def cgsnap_getitem(self, val):
-        return self.__dict__[val]
+    cgsnapshot = {
+        'id': '192eb39b-6c2f-420c-bae3-3cfd117f9876',
+        'consistencygroup_id': group['id'],
+        'group_id': None, }
 
-    cgsnapshot.__getitem__ = cgsnap_getitem
+    cgsnapshot_as_group_id = {
+        'id': '192eb39b-6c2f-420c-bae3-3cfd117f9876',
+        'consistencygroup_id': None,
+        'group_id': group['id'], }
 
 
 class BaseXtremIODriverTestCase(test.TestCase):
@@ -522,6 +524,52 @@ class XtremIODriverISCSITestCase(BaseXtremIODriverTestCase):
                           'provider_location': fake_provider},
                          update)
 
+    def test_clone_volume_and_resize(self, req):
+        req.side_effect = xms_request
+        self.driver.db = mock.Mock()
+        (self.driver.db.
+         image_volume_cache_get_by_volume_id.return_value) = mock.MagicMock()
+        self.driver.create_volume(self.data.test_volume)
+        vol = xms_data['volumes'][1]
+        vol['num-of-dest-snaps'] = 0
+        clone = self.data.test_clone.copy()
+        clone['size'] = 2
+        with mock.patch.object(self.driver,
+                               'extend_volume') as extend:
+            self.driver.create_cloned_volume(clone, self.data.test_volume)
+            extend.assert_called_once_with(clone, clone['size'])
+
+    def test_clone_volume_and_resize_fail(self, req):
+        req.side_effect = xms_request
+        self.driver.create_volume(self.data.test_volume)
+        vol = xms_data['volumes'][1]
+
+        def failed_extend(obj_type='volumes', method='GET', data=None,
+                          *args, **kwargs):
+            if method == 'GET':
+                return {'content': vol}
+            elif method == 'POST':
+                return {'links': [{'href': 'volume/2'}]}
+            elif method == 'PUT':
+                if 'name' in data:
+                    return
+                raise exception.VolumeBackendAPIException('Failed Clone')
+
+        req.side_effect = failed_extend
+        self.driver.db = mock.Mock()
+        (self.driver.db.
+         image_volume_cache_get_by_volume_id.return_value) = mock.MagicMock()
+        vol['num-of-dest-snaps'] = 0
+        clone = self.data.test_clone.copy()
+        clone['size'] = 2
+        with mock.patch.object(self.driver,
+                               'delete_volume') as delete:
+            self.assertRaises(exception.VolumeBackendAPIException,
+                              self.driver.create_cloned_volume,
+                              clone,
+                              self.data.test_volume)
+            self.assertTrue(delete.called)
+
 # ##### Connection #####
     def test_no_portals_configured(self, req):
         req.side_effect = xms_request
@@ -622,6 +670,14 @@ class XtremIODriverISCSITestCase(BaseXtremIODriverTestCase):
         i1['chap-discovery-initiator-password'] = None
         self.driver.initialize_connection(self.data.test_volume2,
                                           self.data.connector)
+
+    @mock.patch('oslo_utils.strutils.mask_dict_password')
+    def test_initialize_connection_masks_password(self, mask_dict, req):
+        req.side_effect = xms_request
+        self.driver.create_volume(self.data.test_volume)
+        self.driver.initialize_connection(self.data.test_volume,
+                                          self.data.connector)
+        self.assertTrue(mask_dict.called)
 
     def test_add_auth(self, req):
         req.side_effect = xms_request
@@ -820,10 +876,25 @@ class XtremIODriverISCSITestCase(BaseXtremIODriverTestCase):
                                             add_volumes=[d.test_volume,
                                                          d.test_volume2])
         self.driver.db = mock.Mock()
-        (self.driver.db.
-         volume_get_all_by_group.return_value) = [mock.MagicMock()]
         self.driver.create_cgsnapshot(d.context, d.cgsnapshot, [snapshot_obj])
         self.driver.delete_consistencygroup(d.context, d.group, [])
+
+    def test_cg_delete_with_volume(self, req):
+        req.side_effect = xms_request
+        d = self.data
+        self.driver.create_consistencygroup(d.context, d.group)
+        self.driver.create_volume(d.test_volume)
+        self.driver.update_consistencygroup(d.context, d.group,
+                                            add_volumes=[d.test_volume])
+        self.driver.db = mock.Mock()
+
+        results, volumes = \
+            self.driver.delete_consistencygroup(d.context,
+                                                d.group,
+                                                [d.test_volume])
+
+        self.assertTrue(all(volume['status'] == 'deleted' for volume in
+                            volumes))
 
     @mock.patch('cinder.objects.snapshot.SnapshotList.get_all_for_cgsnapshot')
     def test_cg_snapshot(self, get_all_for_cgsnapshot, req):
@@ -936,6 +1007,219 @@ class XtremIODriverISCSITestCase(BaseXtremIODriverTestCase):
 
         self.assertRaises(exception.InvalidInput,
                           self.driver.create_consistencygroup_from_src,
+                          d.context, d.group, [], None, None, None, None)
+
+#   #### Groups ####
+    def test_group_create(self, req):
+        """Test group create."""
+
+        req.side_effect = xms_request
+        d = self.data
+
+        self.driver.create_group(d.context, d.group)
+        self.assertEqual(1, len(xms_data['consistency-groups']))
+
+    def test_group_update(self, req):
+        """Test group update."""
+
+        req.side_effect = xms_request
+        d = self.data
+
+        self.driver.create_consistencygroup(d.context, d.group)
+        self.driver.update_consistencygroup(d.context, d.group,
+                                            add_volumes=[d.test_volume,
+                                                         d.test_volume2])
+        self.assertEqual(2, len(xms_data['consistency-group-volumes']))
+        self.driver.update_group(d.context, d.group,
+                                 remove_volumes=[d.test_volume2])
+        self.assertEqual(1, len(xms_data['consistency-group-volumes']))
+
+    def test_create_group_snapshot(self, req):
+        """Test create group snapshot."""
+
+        req.side_effect = xms_request
+        d = self.data
+        snapshot_obj = fake_snapshot.fake_snapshot_obj(d.context)
+        snapshot_obj.consistencygroup_id = d.group['id']
+
+        self.driver.create_group(d.context, d.group)
+        self.driver.update_group(d.context, d.group,
+                                 add_volumes=[d.test_volume,
+                                              d.test_volume2])
+
+        res = self.driver.create_group_snapshot(d.context, d.cgsnapshot,
+                                                [snapshot_obj])
+        self.assertEqual((None, None), res)
+
+    def test_group_delete(self, req):
+        """"Test delete group."""
+        req.side_effect = xms_request
+        d = self.data
+        snapshot_obj = fake_snapshot.fake_snapshot_obj(d.context)
+        snapshot_obj.consistencygroup_id = d.group['id']
+        self.driver.create_group(d.context, d.group)
+        self.driver.update_group(d.context, d.group,
+                                 add_volumes=[d.test_volume,
+                                              d.test_volume2])
+        self.driver.db = mock.Mock()
+        (self.driver.db.
+         volume_get_all_by_group.return_value) = [mock.MagicMock()]
+        self.driver.create_group_snapshot(d.context, d.cgsnapshot,
+                                          [snapshot_obj])
+        self.driver.delete_group(d.context, d.group, [])
+
+    def test_group_delete_with_volume(self, req):
+        req.side_effect = xms_request
+        d = self.data
+        self.driver.create_consistencygroup(d.context, d.group)
+        self.driver.create_volume(d.test_volume)
+        self.driver.update_consistencygroup(d.context, d.group,
+                                            add_volumes=[d.test_volume])
+        self.driver.db = mock.Mock()
+
+        results, volumes = \
+            self.driver.delete_group(d.context, d.group, [d.test_volume])
+
+        self.assertTrue(all(volume['status'] == 'deleted' for volume in
+                            volumes))
+
+    def test_group_snapshot(self, req):
+        """test group snapshot."""
+        req.side_effect = xms_request
+        d = self.data
+        snapshot_obj = fake_snapshot.fake_snapshot_obj(d.context)
+        snapshot_obj.consistencygroup_id = d.group['id']
+        self.driver.create_group(d.context, d.group)
+        self.driver.update_group(d.context, d.group,
+                                 add_volumes=[d.test_volume,
+                                              d.test_volume2])
+
+        snapset_name = self.driver._get_cgsnap_name(d.cgsnapshot)
+        self.assertEqual(snapset_name,
+                         '192eb39b6c2f420cbae33cfd117f0345192eb39b6c2f420cbae'
+                         '33cfd117f9876')
+        snapset1 = {'ancestor-vol-id': ['', d.test_volume['id'], 2],
+                    'consistencygroup_id': d.group['id'],
+                    'name': snapset_name,
+                    'index': 1}
+        xms_data['snapshot-sets'] = {snapset_name: snapset1, 1: snapset1}
+        res = self.driver.delete_group_snapshot(d.context, d.cgsnapshot,
+                                                [snapshot_obj])
+        self.assertEqual((None, None), res)
+
+    def test_group_snapshot_with_generic_group(self, req):
+        """test group snapshot shot with generic group ."""
+        req.side_effect = xms_request
+        d = self.data
+        snapshot_obj = fake_snapshot.fake_snapshot_obj(d.context)
+        snapshot_obj.consistencygroup_id = d.group['id']
+        self.driver.create_group(d.context, d.group)
+        self.driver.update_group(d.context, d.group,
+                                 add_volumes=[d.test_volume,
+                                              d.test_volume2])
+
+        snapset_name = self.driver._get_cgsnap_name(d.cgsnapshot_as_group_id)
+        self.assertEqual(snapset_name,
+                         '192eb39b6c2f420cbae33cfd117f0345192eb39b6c2f420cbae'
+                         '33cfd117f9876')
+        snapset1 = {'ancestor-vol-id': ['', d.test_volume['id'], 2],
+                    'consistencygroup_id': d.group['id'],
+                    'name': snapset_name,
+                    'index': 1}
+        xms_data['snapshot-sets'] = {snapset_name: snapset1, 1: snapset1}
+        res = self.driver.delete_group_snapshot(d.context, d.cgsnapshot,
+                                                [snapshot_obj])
+        self.assertEqual((None, None), res)
+
+    def test_delete_group_snapshot(self, req):
+        """test delete group snapshot."""
+        d = self.data
+        snapshot_obj = fake_snapshot.fake_snapshot_obj(d.context)
+        snapshot_obj.consistencygroup_id = d.group['id']
+        self.driver.delete_group_snapshot(d.context, d.cgsnapshot,
+                                          [snapshot_obj])
+        req.assert_called_once_with('snapshot-sets', 'DELETE', None,
+                                    '192eb39b6c2f420cbae33cfd117f0345192eb39'
+                                    'b6c2f420cbae33cfd117f9876', None, 'v2')
+
+    def test_delete_group_snapshot_with_generic_group(self, req):
+        """test delete group snapshot."""
+        d = self.data
+        snapshot_obj = fake_snapshot.fake_snapshot_obj(d.context)
+        snapshot_obj.consistencygroup_id = d.group['id']
+        self.driver.delete_group_snapshot(d.context, d.cgsnapshot_as_group_id,
+                                          [snapshot_obj])
+        req.assert_called_once_with('snapshot-sets', 'DELETE', None,
+                                    '192eb39b6c2f420cbae33cfd117f0345192eb39'
+                                    'b6c2f420cbae33cfd117f9876', None, 'v2')
+
+    def test_group_from_src_snapshot(self, req):
+        """test group from source snapshot."""
+        req.side_effect = xms_request
+        d = self.data
+
+        self.driver.create_group(d.context, d.group)
+        self.driver.create_volume(d.test_volume)
+        self.driver.create_group_snapshot(d.context, d.cgsnapshot, [])
+        xms_data['volumes'][2]['ancestor-vol-id'] = (xms_data['volumes'][1]
+                                                     ['vol-id'])
+        snapset_name = self.driver._get_cgsnap_name(d.cgsnapshot)
+
+        snapset1 = {'vol-list': [xms_data['volumes'][2]['vol-id']],
+                    'name': snapset_name,
+                    'index': 1}
+        xms_data['snapshot-sets'] = {snapset_name: snapset1, 1: snapset1}
+        cg_obj = fake_cg.fake_consistencyobject_obj(d.context)
+        new_vol1 = fake_volume_obj(d.context)
+        snapshot1 = (fake_snapshot
+                     .fake_snapshot_obj
+                     (d.context, volume_id=d.test_volume['id']))
+        res = self.driver.create_group_from_src(d.context, cg_obj,
+                                                [new_vol1],
+                                                d.cgsnapshot,
+                                                [snapshot1])
+        self.assertEqual((None, None), res)
+
+    def test_group_from_src_group(self, req):
+        """test group from source group."""
+        req.side_effect = xms_request
+        d = self.data
+
+        self.driver.create_group(d.context, d.group)
+        self.driver.create_volume(d.test_volume)
+        self.driver.create_group_snapshot(d.context, d.cgsnapshot, [])
+        xms_data['volumes'][2]['ancestor-vol-id'] = (xms_data['volumes'][1]
+                                                     ['vol-id'])
+        snapset_name = self.driver._get_cgsnap_name(d.cgsnapshot)
+
+        snapset1 = {'vol-list': [xms_data['volumes'][2]['vol-id']],
+                    'name': snapset_name,
+                    'index': 1}
+        xms_data['snapshot-sets'] = {snapset_name: snapset1, 1: snapset1}
+        cg_obj = fake_cg.fake_consistencyobject_obj(d.context)
+        new_vol1 = fake_volume_obj(d.context)
+        new_cg_obj = fake_cg.fake_consistencyobject_obj(
+            d.context, id=fake.CONSISTENCY_GROUP2_ID)
+        snapset2_name = new_cg_obj.id
+        new_vol1.id = '192eb39b-6c2f-420c-bae3-3cfd117f0001'
+        new_vol2 = fake_volume_obj(d.context)
+        snapset2 = {'vol-list': [xms_data['volumes'][2]['vol-id']],
+                    'name': snapset2_name,
+                    'index': 1}
+        xms_data['snapshot-sets'].update({5: snapset2,
+                                          snapset2_name: snapset2})
+        self.driver.create_group_from_src(d.context, new_cg_obj,
+                                          [new_vol2],
+                                          None, None,
+                                          cg_obj, [new_vol1])
+
+    def test_invalid_group_from_src_input(self, req):
+        """test invalid group from source."""
+        req.side_effect = xms_request
+        d = self.data
+
+        self.assertRaises(exception.InvalidInput,
+                          self.driver.create_group_from_src,
                           d.context, d.group, [], None, None, None, None)
 
 

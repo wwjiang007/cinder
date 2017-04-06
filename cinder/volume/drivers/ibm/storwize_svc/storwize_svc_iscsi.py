@@ -39,7 +39,7 @@ from oslo_log import log as logging
 from oslo_utils import excutils
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LW
+from cinder.i18n import _
 from cinder import interface
 from cinder import utils
 
@@ -93,7 +93,7 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
     VERSION = "2.1.1"
 
     # ThirdPartySystems wiki page
-    CI_WIKI_NAME = "IBM_STORWIZE_CI"
+    CI_WIKI_NAME = "IBM_STORAGE_CI"
 
     def __init__(self, *args, **kwargs):
         super(StorwizeSVCISCSIDriver, self).__init__(*args, **kwargs)
@@ -104,8 +104,8 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
     def validate_connector(self, connector):
         """Check connector for at least one enabled iSCSI protocol."""
         if 'initiator' not in connector:
-            LOG.error(_LE('The connector does not contain the required '
-                          'information.'))
+            LOG.error('The connector does not contain the required '
+                      'information.')
             raise exception.InvalidConnectorException(
                 missing='initiator')
 
@@ -130,8 +130,7 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         """
         LOG.debug('enter: initialize_connection: volume %(vol)s with connector'
                   ' %(conn)s', {'vol': volume['id'], 'conn': connector})
-
-        volume_name = volume['name']
+        volume_name = self._get_target_vol(volume)
 
         # Check if a host object is defined for this host name
         host_name = self._helpers.get_host_from_connector(connector)
@@ -144,8 +143,7 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         if chap_enabled and chap_secret is None:
             chap_secret = self._helpers.add_chap_secret_to_host(host_name)
         elif not chap_enabled and chap_secret:
-            LOG.warning(_LW('CHAP secret exists for host but CHAP is '
-                            'disabled.'))
+            LOG.warning('CHAP secret exists for host but CHAP is disabled.')
 
         multihostmap = self.configuration.storwize_svc_multihostmap_enabled
         lun_id = self._helpers.map_vol_to_host(volume_name, host_name,
@@ -161,11 +159,11 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         except Exception:
             with excutils.save_and_reraise_exception():
                 self._do_terminate_connection(volume, connector)
-                LOG.error(_LE('initialize_connection: Failed '
-                              'to collect return '
-                              'properties for volume %(vol)s and connector '
-                              '%(conn)s.\n'), {'vol': volume,
-                                               'conn': connector})
+                LOG.error('initialize_connection: Failed '
+                          'to collect return '
+                          'properties for volume %(vol)s and connector '
+                          '%(conn)s.\n', {'vol': volume,
+                                          'conn': connector})
 
         LOG.debug('leave: initialize_connection:\n volume: %(vol)s\n '
                   'connector: %(conn)s\n properties: %(prop)s',
@@ -180,7 +178,7 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
                   {'vol': volume['id'], 'conn': connector,
                    'lun_id': lun_id})
 
-        volume_name = volume.name
+        volume_name = self._get_target_vol(volume)
         volume_attributes = self._helpers.get_vdisk_attributes(volume_name)
         if volume_attributes is None:
             msg = (_('_get_single_iscsi_data: Failed to get attributes'
@@ -222,8 +220,8 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         if not preferred_node_entry:
             # Get 1st node in I/O group
             preferred_node_entry = io_group_nodes[0]
-            LOG.warning(_LW('_get_single_iscsi_data: Did not find a '
-                            'preferred node for volume %s.'), volume_name)
+            LOG.warning('_get_single_iscsi_data: Did not find a '
+                        'preferred node for volume %s.', volume_name)
 
         properties = {
             'target_discovered': False,
@@ -327,7 +325,8 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         """
         LOG.debug('enter: terminate_connection: volume %(vol)s with connector'
                   ' %(conn)s', {'vol': volume['id'], 'conn': connector})
-        vol_name = volume['name']
+        vol_name = self._get_target_vol(volume)
+
         info = {}
         if 'host' in connector:
             # get host according to iSCSI protocol

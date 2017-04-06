@@ -29,7 +29,7 @@ import six
 from cinder import context
 from cinder import db
 from cinder import exception
-from cinder.i18n import _, _LE
+from cinder.i18n import _
 from cinder import quota_utils
 
 
@@ -103,7 +103,7 @@ class DbQuotaDriver(object):
 
     def get_default(self, context, resource, project_id):
         """Get a specific default quota for a resource."""
-        default_quotas = db.quota_class_get_default(context)
+        default_quotas = db.quota_class_get_defaults(context)
         return default_quotas.get(resource.name, resource.default)
 
     def get_defaults(self, context, resources, project_id=None):
@@ -120,7 +120,7 @@ class DbQuotaDriver(object):
         quotas = {}
         default_quotas = {}
         if CONF.use_default_quota_class:
-            default_quotas = db.quota_class_get_default(context)
+            default_quotas = db.quota_class_get_defaults(context)
 
         for resource in resources.values():
             if default_quotas:
@@ -152,7 +152,7 @@ class DbQuotaDriver(object):
         default_quotas = {}
         class_quotas = db.quota_class_get_all_by_name(context, quota_class)
         if defaults:
-            default_quotas = db.quota_class_get_default(context)
+            default_quotas = db.quota_class_get_defaults(context)
         for resource in resources.values():
             if resource.name in class_quotas:
                 quotas[resource.name] = class_quotas[resource.name]
@@ -1044,8 +1044,7 @@ class QuotaEngine(object):
             # usage resynchronization and the reservation expiration
             # mechanisms will resolve the issue.  The exception is
             # logged, however, because this is less than optimal.
-            LOG.exception(_LE("Failed to commit "
-                              "reservations %s"), reservations)
+            LOG.exception("Failed to commit reservations %s", reservations)
 
     def rollback(self, context, reservations, project_id=None):
         """Roll back reservations.
@@ -1065,8 +1064,7 @@ class QuotaEngine(object):
             # usage resynchronization and the reservation expiration
             # mechanisms will resolve the issue.  The exception is
             # logged, however, because this is less than optimal.
-            LOG.exception(_LE("Failed to roll back reservations "
-                              "%s"), reservations)
+            LOG.exception("Failed to roll back reservations %s", reservations)
 
     def destroy_by_project(self, context, project_id):
         """Destroy all quota limits associated with a project.

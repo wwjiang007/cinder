@@ -2,6 +2,7 @@
 # Copyright (c) 2014 Clinton Knight.  All rights reserved.
 # Copyright (c) 2015 Tom Barron.  All rights reserved.
 # Copyright (c) 2016 Mike Rooney. All rights reserved.
+# Copyright (c) 2017 Jose Porrua. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -20,11 +21,12 @@ import math
 import re
 
 from oslo_log import log as logging
+from oslo_utils import excutils
 from oslo_utils import units
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LW, _LE
+from cinder.i18n import _
 from cinder import utils
 from cinder.volume.drivers.netapp.dataontap.client import api as netapp_api
 from cinder.volume.drivers.netapp.dataontap.client import client_base
@@ -60,6 +62,7 @@ class Client(client_base.Client):
         ontapi_1_2x = (1, 20) <= ontapi_version < (1, 30)
         ontapi_1_30 = ontapi_version >= (1, 30)
         ontapi_1_100 = ontapi_version >= (1, 100)
+        ontapi_1_1xx = (1, 100) <= ontapi_version < (1, 200)
 
         self.features.add_feature('SNAPMIRROR_V2', supported=ontapi_1_20)
         self.features.add_feature('USER_CAPABILITY_LIST',
@@ -73,6 +76,7 @@ class Client(client_base.Client):
                                   supported=ontapi_1_30)
         self.features.add_feature('BACKUP_CLONE_PARAM', supported=ontapi_1_100)
         self.features.add_feature('CLUSTER_PEER_POLICY', supported=ontapi_1_30)
+        self.features.add_feature('FLEXVOL_ENCRYPTION', supported=ontapi_1_1xx)
 
     def _invoke_vserver_api(self, na_element, vserver):
         server = copy.copy(self.connection)
@@ -201,7 +205,7 @@ class Client(client_base.Client):
             node_client.send_request('ems-autosupport-log', message_dict)
             LOG.debug('EMS executed successfully.')
         except netapp_api.NaApiError as e:
-            LOG.warning(_LW('Failed to invoke EMS. %s') % e)
+            LOG.warning('Failed to invoke EMS. %s', e)
 
     def get_iscsi_target_details(self):
         """Gets the iSCSI target portal details."""
@@ -613,9 +617,9 @@ class Client(client_base.Client):
             try:
                 self.qos_policy_group_rename(current_name, new_name)
             except netapp_api.NaApiError as ex:
-                msg = _LW('Rename failure in cleanup of cDOT QOS policy group '
-                          '%(name)s: %(ex)s')
-                LOG.warning(msg, {'name': current_name, 'ex': ex})
+                LOG.warning('Rename failure in cleanup of cDOT QOS policy '
+                            'group %(name)s: %(ex)s',
+                            {'name': current_name, 'ex': ex})
 
         # Attempt to delete any QoS policies named "delete-openstack-*".
         self.remove_unused_qos_policy_groups()
@@ -815,6 +819,37 @@ class Client(client_base.Client):
                 return False
 
         return True
+
+    def list_cluster_nodes(self):
+        """Get all available cluster nodes."""
+
+        api_args = {
+            'desired-attributes': {
+                'node-details-info': {
+                    'node': None,
+                },
+            },
+        }
+        result = self.send_iter_request('system-node-get-iter', api_args)
+        nodes_info_list = result.get_child_by_name(
+            'attributes-list') or netapp_api.NaElement('none')
+        return [node_info.get_child_content('node') for node_info
+                in nodes_info_list.get_children()]
+
+    def check_for_cluster_credentials(self):
+        """Checks whether cluster-scoped credentials are being used or not."""
+
+        try:
+            self.list_cluster_nodes()
+            # API succeeded, so definitely a cluster management LIF
+            return True
+        except netapp_api.NaApiError as e:
+            if e.code == netapp_api.EAPINOTFOUND:
+                LOG.debug('Not connected to cluster management LIF.')
+            else:
+                with excutils.save_and_reraise_exception():
+                    LOG.exception('Failed to get the list of nodes.')
+            return False
 
     def get_operational_lif_addresses(self):
         """Gets the IP addresses of operational LIFs on the vserver."""
@@ -1063,9 +1098,14 @@ class Client(client_base.Client):
 
         try:
             result = self.send_iter_request('sis-get-iter', api_args)
-        except netapp_api.NaApiError:
-            msg = _LE('Failed to get dedupe info for volume %s.')
-            LOG.exception(msg, flexvol_name)
+        except netapp_api.NaApiError as e:
+            if e.code == netapp_api.EAPIPRIVILEGE:
+                LOG.debug('Dedup info for volume %(name)s will not be '
+                          'collected. This API requires cluster-scoped '
+                          'credentials.', {'name': flexvol_name})
+            else:
+                LOG.exception('Failed to get dedupe info for volume %s.',
+                              flexvol_name)
             return no_dedupe_response
 
         if self._get_record_count(result) != 1:
@@ -1118,8 +1158,8 @@ class Client(client_base.Client):
             result = self.send_request('clone-split-status',
                                        {'volume-name': flexvol_name})
         except netapp_api.NaApiError:
-            msg = _LE('Failed to get clone split info for volume %s.')
-            LOG.exception(msg, flexvol_name)
+            LOG.exception('Failed to get clone split info for volume %s.',
+                          flexvol_name)
             return {'unsplit-size': 0, 'unsplit-clone-count': 0}
 
         clone_split_info = result.get_child_by_name(
@@ -1154,8 +1194,43 @@ class Client(client_base.Client):
         try:
             result = self.send_iter_request('snapmirror-get-iter', api_args)
         except netapp_api.NaApiError:
-            msg = _LE('Failed to get SnapMirror info for volume %s.')
-            LOG.exception(msg, flexvol_name)
+            LOG.exception('Failed to get SnapMirror info for volume %s.',
+                          flexvol_name)
+            return False
+
+        if not self._has_records(result):
+            return False
+
+        return True
+
+    def is_flexvol_encrypted(self, flexvol_name, vserver_name):
+        """Check if a flexvol is encrypted."""
+
+        if not self.features.FLEXVOL_ENCRYPTION:
+            return False
+
+        api_args = {
+            'query': {
+                'volume-attributes': {
+                    'encrypt': 'true',
+                    'volume-id-attributes': {
+                        'name': flexvol_name,
+                        'owning-vserver-name': vserver_name,
+                    },
+                },
+            },
+            'desired-attributes': {
+                'volume-attributes': {
+                    'encrypt': None,
+                },
+            },
+        }
+
+        try:
+            result = self.send_iter_request('volume-get-iter', api_args)
+        except netapp_api.NaApiError:
+            LOG.exception('Failed to get Encryption info for volume %s.',
+                          flexvol_name)
             return False
 
         if not self._has_records(result):
@@ -1351,9 +1426,13 @@ class Client(client_base.Client):
         try:
             aggrs = self._get_aggregates(aggregate_names=[aggregate_name],
                                          desired_attributes=desired_attributes)
-        except netapp_api.NaApiError:
-            msg = _LE('Failed to get info for aggregate %s.')
-            LOG.exception(msg, aggregate_name)
+        except netapp_api.NaApiError as e:
+            if e.code == netapp_api.EAPINOTFOUND:
+                LOG.debug('Aggregate info can only be collected with '
+                          'cluster-scoped credentials.')
+            else:
+                LOG.exception('Failed to get info for aggregate %s.',
+                              aggregate_name)
             return {}
 
         if len(aggrs) < 1:
@@ -1423,9 +1502,13 @@ class Client(client_base.Client):
         try:
             result = self.send_iter_request(
                 'storage-disk-get-iter', api_args, enable_tunneling=False)
-        except netapp_api.NaApiError:
-            msg = _LE('Failed to get disk info for aggregate %s.')
-            LOG.exception(msg, aggregate_name)
+        except netapp_api.NaApiError as e:
+            if e.code == netapp_api.EAPINOTFOUND:
+                LOG.debug('Disk types can only be collected with '
+                          'cluster scoped credentials.')
+            else:
+                LOG.exception('Failed to get disk info for aggregate %s.',
+                              aggregate_name)
             return disk_types
 
         attributes_list = result.get_child_by_name(
@@ -1471,9 +1554,13 @@ class Client(client_base.Client):
         try:
             aggrs = self._get_aggregates(aggregate_names=[aggregate_name],
                                          desired_attributes=desired_attributes)
-        except netapp_api.NaApiError:
-            msg = _LE('Failed to get info for aggregate %s.')
-            LOG.exception(msg, aggregate_name)
+        except netapp_api.NaApiError as e:
+            if e.code == netapp_api.EAPINOTFOUND:
+                LOG.debug('Aggregate capacity can only be collected with '
+                          'cluster scoped credentials.')
+            else:
+                LOG.exception('Failed to get info for aggregate %s.',
+                              aggregate_name)
             return {}
 
         if len(aggrs) < 1:

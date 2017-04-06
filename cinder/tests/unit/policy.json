@@ -4,6 +4,7 @@
     "admin_or_owner":  "is_admin:True or project_id:%(project_id)s",
 
     "volume:create": "",
+    "volume:create_from_image": "",
     "volume:get": "rule:admin_or_owner",
     "volume:get_all": "",
     "volume:get_volume_metadata": "",
@@ -14,6 +15,7 @@
     "volume:get_volume_admin_metadata": "rule:admin_api",
     "volume:update_volume_admin_metadata": "rule:admin_api",
     "volume:delete": "",
+    "volume:force_delete": "rule:admin_api",
     "volume:update": "",
     "volume:attach": "",
     "volume:detach": "",
@@ -101,9 +103,6 @@
     "backup:update": "rule:admin_or_owner",
     "backup:backup_project_attribute": "rule:admin_api",
 
-    "volume_extension:replication:promote": "rule:admin_api",
-    "volume_extension:replication:reenable": "rule:admin_api",
-
     "consistencygroup:create" : "",
     "consistencygroup:delete": "",
     "consistencygroup:update": "",
@@ -142,5 +141,7 @@
 
     "clusters:get": "rule:admin_api",
     "clusters:get_all": "rule:admin_api",
-    "clusters:update": "rule:admin_api"
+    "clusters:update": "rule:admin_api",
+
+    "workers:cleanup": "rule:admin_api"
 }

@@ -12,6 +12,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import ddt
 import mock
 from oslo_concurrency import processutils
 
@@ -21,6 +22,7 @@ from cinder import test
 from cinder.volume import configuration as conf
 
 
+@ddt.ddt
 class BrickLvmTestCase(test.TestCase):
     def setUp(self):
         if not hasattr(self, 'configuration'):
@@ -67,7 +69,7 @@ class BrickLvmTestCase(test.TestCase):
                 cmd_string):
             data = "  fake-vg\n"
         elif _lvm_prefix + 'vgs, --version' in cmd_string:
-            data = "  LVM version:     2.02.95(2) (2012-03-06)\n"
+            data = "  LVM version:     2.02.103(2) (2012-03-06)\n"
         elif(_lvm_prefix + 'vgs, --noheadings, -o, uuid, fake-vg' in
              cmd_string):
             data = "  kVxztV-dKpG-Rz7E-xtKY-jeju-QsYU-SLG6Z1\n"
@@ -140,6 +142,12 @@ class BrickLvmTestCase(test.TestCase):
             data += "  fake-vg|/dev/sdb|10.00|1.00\n"
             data += "  fake-vg|/dev/sdc|10.00|8.99\n"
             data += "  fake-vg-2|/dev/sdd|10.00|9.99\n"
+            if '--ignoreskippedcluster' not in cmd_string:
+                raise processutils.ProcessExecutionError(
+                    stderr="Skipping clustered volume group",
+                    stdout=data,
+                    exit_code=5
+                )
         elif _lvm_prefix + 'lvs, --noheadings, --unit=g' \
                 ', -o, size,data_percent, --separator, :' in cmd_string:
             if 'test-prov-cap-pool' in cmd_string:
@@ -280,6 +288,23 @@ class BrickLvmTestCase(test.TestCase):
 
         self.vg._supports_lvchange_ignoreskipactivation = None
 
+    def test_pvs_ignoreskippedcluster_support(self):
+        """Tests if lvm support ignoreskippedcluster option."""
+
+        brick.LVM._supports_pvs_ignoreskippedcluster = None
+        with mock.patch.object(processutils, 'execute',
+                               self.fake_pretend_lvm_version):
+            self.assertTrue(brick.LVM.supports_pvs_ignoreskippedcluster(
+                'sudo'))
+
+        brick.LVM._supports_pvs_ignoreskippedcluster = None
+        with mock.patch.object(processutils, 'execute',
+                               self.fake_old_lvm_version):
+            self.assertFalse(brick.LVM.supports_pvs_ignoreskippedcluster(
+                'sudo'))
+
+        brick.LVM._supports_pvs_ignoreskippedcluster = None
+
     def test_thin_pool_creation(self):
 
         # The size of fake-vg volume group is 10g, so the calculated thin
@@ -366,20 +391,23 @@ class BrickLvmTestCase(test.TestCase):
     def test_get_mirrored_available_capacity(self):
         self.assertEqual(2.0, self.vg.vg_mirror_free_space(1))
 
-    def test_lv_extend(self):
-        self.vg.deactivate_lv = mock.MagicMock()
+    @ddt.data(True, False)
+    def test_lv_extend(self, has_snapshot):
+        with mock.patch.object(self.vg, '_execute'):
+            with mock.patch.object(self.vg, 'lv_has_snapshot'):
+                self.vg.deactivate_lv = mock.MagicMock()
+                self.vg.activate_lv = mock.MagicMock()
 
-        # Extend lv with snapshot and make sure deactivate called
-        self.vg.create_volume("test", "1G")
-        self.vg.extend_volume("test", "2G")
-        self.vg.deactivate_lv.assert_called_once_with('test')
-        self.vg.deactivate_lv.reset_mock()
+                self.vg.lv_has_snapshot.return_value = has_snapshot
+                self.vg.extend_volume("test", "2G")
 
-        # Extend lv without snapshot so deactivate should not be called
-        self.vg.create_volume("test", "1G")
-        self.vg.vg_name = "test-volumes"
-        self.vg.extend_volume("test", "2G")
-        self.assertFalse(self.vg.deactivate_lv.called)
+                self.vg.lv_has_snapshot.assert_called_once_with("test")
+                if has_snapshot:
+                    self.vg.activate_lv.assert_called_once_with("test")
+                    self.vg.deactivate_lv.assert_called_once_with("test")
+                else:
+                    self.vg.activate_lv.assert_not_called()
+                    self.vg.deactivate_lv.assert_not_called()
 
     def test_lv_deactivate(self):
         with mock.patch.object(self.vg, '_execute'):

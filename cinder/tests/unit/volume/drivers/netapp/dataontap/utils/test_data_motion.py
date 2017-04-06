@@ -50,11 +50,11 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         self.mock_dest_client = mock.Mock()
         self.config = fakes.get_fake_cmode_config(self.src_backend)
         self.mock_object(utils, 'get_backend_configuration',
-                         mock.Mock(side_effect=[self.mock_dest_config,
-                                                self.mock_src_config]))
+                         side_effect=[self.mock_dest_config,
+                                      self.mock_src_config])
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(side_effect=[self.mock_dest_client,
-                                                self.mock_src_client]))
+                         side_effect=[self.mock_dest_client,
+                                      self.mock_src_client])
 
     def _setup_mock_config(self):
         self.mock_src_config = configuration.Configuration(
@@ -121,7 +121,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
     @ddt.data([], ['backend1'], ['backend1', 'backend2'])
     def test_get_replication_backend_stats(self, replication_backend_names):
         self.mock_object(self.dm_mixin, 'get_replication_backend_names',
-                         mock.Mock(return_value=replication_backend_names))
+                         return_value=replication_backend_names)
         enabled_stats = {
             'replication_count': len(replication_backend_names),
             'replication_targets': replication_backend_names,
@@ -142,7 +142,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
     def test_get_replication_aggregate_map_none(self, replication_aggr_map):
 
         self.mock_object(utils, 'get_backend_configuration',
-                         mock.Mock(return_value=self.config))
+                         return_value=self.config)
         CONF.set_override('netapp_replication_aggregate_map',
                           replication_aggr_map,
                           group=self.src_backend, enforce_type=True)
@@ -157,7 +157,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
                {'backend_id': 'replication_backend_2', 'aggr2': 'aggr20'}])
     def test_get_replication_aggregate_map_valid(self, replication_aggr_map):
         self.mock_object(utils, 'get_backend_configuration',
-                         mock.Mock(return_value=self.config))
+                         return_value=self.config)
         CONF.set_override('netapp_replication_aggregate_map',
                           replication_aggr_map, group=self.src_backend,
                           enforce_type=True)
@@ -171,13 +171,13 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
     def test_create_snapmirror_dest_flexvol_exists(self, dest_exists):
         mock_dest_client = mock.Mock()
         self.mock_object(mock_dest_client, 'flexvol_exists',
-                         mock.Mock(return_value=dest_exists))
+                         return_value=dest_exists)
         self.mock_object(mock_dest_client, 'get_snapmirrors',
-                         mock.Mock(return_value=None))
+                         return_value=None)
         create_destination_flexvol = self.mock_object(
             self.dm_mixin, 'create_destination_flexvol')
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(return_value=mock_dest_client))
+                         return_value=mock_dest_client)
 
         self.dm_mixin.create_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -203,11 +203,11 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         existing_snapmirrors = [{'mirror-state': mirror_state}]
         self.mock_object(self.dm_mixin, 'create_destination_flexvol')
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(return_value=mock_dest_client))
+                         return_value=mock_dest_client)
         self.mock_object(mock_dest_client, 'flexvol_exists',
-                         mock.Mock(return_value=True))
+                         return_value=True)
         self.mock_object(mock_dest_client, 'get_snapmirrors',
-                         mock.Mock(return_value=existing_snapmirrors))
+                         return_value=existing_snapmirrors)
 
         self.dm_mixin.create_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -236,13 +236,13 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         existing_snapmirrors = [{'mirror-state': 'broken-off'}]
         self.mock_object(self.dm_mixin, 'create_destination_flexvol')
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(return_value=mock_dest_client))
+                         return_value=mock_dest_client)
         self.mock_object(mock_dest_client, 'flexvol_exists',
-                         mock.Mock(return_value=True))
+                         return_value=True)
         self.mock_object(mock_dest_client, 'get_snapmirrors',
-                         mock.Mock(return_value=existing_snapmirrors))
+                         return_value=existing_snapmirrors)
         self.mock_object(mock_dest_client, failed_call,
-                         mock.Mock(side_effect=netapp_api.NaApiError))
+                         side_effect=netapp_api.NaApiError)
 
         self.dm_mixin.create_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -264,8 +264,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         mock_src_client = mock.Mock()
         mock_dest_client = mock.Mock()
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(side_effect=[mock_dest_client,
-                                                mock_src_client]))
+                         side_effect=[mock_dest_client, mock_src_client])
 
         self.dm_mixin.delete_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -289,8 +288,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         mock_dest_client.abort_snapmirror.side_effect = netapp_api.NaApiError(
             code=netapp_api.EAPIERROR)
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(side_effect=[mock_dest_client,
-                                                mock_src_client]))
+                         side_effect=[mock_dest_client, mock_src_client])
 
         self.dm_mixin.delete_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -315,8 +313,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
             code=netapp_api.ESOURCE_IS_DIFFERENT
         )
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(side_effect=[mock_dest_client,
-                                                mock_src_client]))
+                         side_effect=[mock_dest_client, mock_src_client])
 
         self.dm_mixin.delete_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -340,8 +337,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         mock_src_client.release_snapmirror.side_effect = (
             netapp_api.NaApiError(code=netapp_api.EOBJECTNOTFOUND))
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(side_effect=[mock_dest_client,
-                                                mock_src_client]))
+                         side_effect=[mock_dest_client, mock_src_client])
 
         self.dm_mixin.delete_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -362,8 +358,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         mock_src_client = mock.Mock()
         mock_dest_client = mock.Mock()
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(side_effect=[mock_dest_client,
-                                                mock_src_client]))
+                         side_effect=[mock_dest_client, mock_src_client])
 
         self.dm_mixin.delete_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -383,8 +378,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         mock_src_client = mock.Mock()
         mock_dest_client = mock.Mock()
         self.mock_object(utils, 'get_client_for_backend',
-                         mock.Mock(side_effect=[mock_dest_client,
-                                                Exception]))
+                         side_effect=[mock_dest_client, Exception])
 
         self.dm_mixin.delete_snapmirror(self.src_backend,
                                         self.dest_backend,
@@ -439,9 +433,9 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
     def test_quiesce_then_abort_wait_for_quiesced(self):
         self.mock_object(time, 'sleep')
         self.mock_object(self.mock_dest_client, 'get_snapmirrors',
-                         mock.Mock(side_effect=[
+                         side_effect=[
                              [{'relationship-status': 'transferring'}],
-                             [{'relationship-status': 'quiesced'}]]))
+                             [{'relationship-status': 'quiesced'}]])
 
         self.dm_mixin.quiesce_then_abort(self.src_backend,
                                          self.dest_backend,
@@ -518,9 +512,9 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
     def test_create_destination_flexvol_exception(self, size, aggr_map):
         self.mock_object(
             self.mock_src_client, 'get_provisioning_options_from_flexvol',
-            mock.Mock(return_value={'size': size, 'aggregate': 'aggr01'}))
+            return_value={'size': size, 'aggregate': 'aggr01'})
         self.mock_object(self.dm_mixin, '_get_replication_aggregate_map',
-                         mock.Mock(return_value=aggr_map))
+                         return_value=aggr_map)
         mock_client_call = self.mock_object(
             self.mock_dest_client, 'create_flexvol')
 
@@ -548,9 +542,12 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         expected_prov_opts.pop('aggregate', None)
         mock_get_provisioning_opts_call = self.mock_object(
             self.mock_src_client, 'get_provisioning_options_from_flexvol',
-            mock.Mock(return_value=provisioning_opts))
+            return_value=provisioning_opts)
+        mock_is_flexvol_encrypted = self.mock_object(
+            self.mock_src_client, 'is_flexvol_encrypted',
+            return_value=False)
         self.mock_object(self.dm_mixin, '_get_replication_aggregate_map',
-                         mock.Mock(return_value=aggr_map))
+                         return_value=aggr_map)
         mock_client_call = self.mock_object(
             self.mock_dest_client, 'create_flexvol')
 
@@ -566,12 +563,51 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         mock_client_call.assert_called_once_with(
             self.dest_flexvol_name, 'aggr01', fakes.PROVISIONING_OPTS['size'],
             volume_type='dp', **expected_prov_opts)
+        mock_is_flexvol_encrypted.assert_called_once_with(
+            self.src_flexvol_name, self.src_vserver)
+
+    def test_create_encrypted_destination_flexvol(self):
+        aggr_map = {
+            fakes.ENCRYPTED_PROVISIONING_OPTS['aggregate']: 'aggr01',
+            'aggr20': 'aggr02',
+        }
+        provisioning_opts = copy.deepcopy(fakes.ENCRYPTED_PROVISIONING_OPTS)
+        expected_prov_opts = copy.deepcopy(fakes.ENCRYPTED_PROVISIONING_OPTS)
+        expected_prov_opts.pop('volume_type', None)
+        expected_prov_opts.pop('size', None)
+        expected_prov_opts.pop('aggregate', None)
+        mock_get_provisioning_opts_call = self.mock_object(
+            self.mock_src_client, 'get_provisioning_options_from_flexvol',
+            return_value=provisioning_opts)
+        mock_is_flexvol_encrypted = self.mock_object(
+            self.mock_src_client, 'is_flexvol_encrypted',
+            return_value=True)
+        self.mock_object(self.dm_mixin, '_get_replication_aggregate_map',
+                         return_value=aggr_map)
+        mock_client_call = self.mock_object(
+            self.mock_dest_client, 'create_flexvol')
+
+        retval = self.dm_mixin.create_destination_flexvol(
+            self.src_backend, self.dest_backend,
+            self.src_flexvol_name, self.dest_flexvol_name)
+
+        self.assertIsNone(retval)
+        mock_get_provisioning_opts_call.assert_called_once_with(
+            self.src_flexvol_name)
+        self.dm_mixin._get_replication_aggregate_map.assert_called_once_with(
+            self.src_backend, self.dest_backend)
+        mock_client_call.assert_called_once_with(
+            self.dest_flexvol_name, 'aggr01',
+            fakes.ENCRYPTED_PROVISIONING_OPTS['size'],
+            volume_type='dp', **expected_prov_opts)
+        mock_is_flexvol_encrypted.assert_called_once_with(
+            self.src_flexvol_name, self.src_vserver)
 
     def test_ensure_snapmirrors(self):
         flexvols = ['nvol1', 'nvol2']
         replication_backends = ['fallback1', 'fallback2']
         self.mock_object(self.dm_mixin, 'get_replication_backend_names',
-                         mock.Mock(return_value=replication_backends))
+                         return_value=replication_backends)
         self.mock_object(self.dm_mixin, 'create_snapmirror')
         expected_calls = [
             mock.call(self.src_backend, replication_backends[0],
@@ -598,9 +634,9 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         replication_backends = ['fallback1', 'fallback2']
         side_effects = [None, netapp_api.NaApiError, None, None]
         self.mock_object(self.dm_mixin, 'get_replication_backend_names',
-                         mock.Mock(return_value=replication_backends))
+                         return_value=replication_backends)
         self.mock_object(self.dm_mixin, 'break_snapmirror',
-                         mock.Mock(side_effect=side_effects))
+                         side_effect=side_effects)
         mock_exc_log = self.mock_object(data_motion.LOG, 'exception')
         expected_calls = [
             mock.call(self.src_backend, replication_backends[0],
@@ -626,10 +662,10 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         flexvols = ['nvol1', 'nvol2']
         replication_backends = ['fallback1', 'fallback2']
         self.mock_object(self.dm_mixin, 'get_replication_backend_names',
-                         mock.Mock(return_value=replication_backends))
+                         return_value=replication_backends)
         side_effects = [None, netapp_api.NaApiError, None, None]
         self.mock_object(self.dm_mixin, 'update_snapmirror',
-                         mock.Mock(side_effect=side_effects))
+                         side_effect=side_effects)
         expected_calls = [
             mock.call(self.src_backend, replication_backends[0],
                       flexvols[0], flexvols[0]),
@@ -658,7 +694,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         replication_backends = ['fallback1', 'fallback2']
         mock_debug_log = self.mock_object(data_motion.LOG, 'debug')
         self.mock_object(self.dm_mixin, 'get_snapmirrors',
-                         mock.Mock(return_value=snapmirrors))
+                         return_value=snapmirrors)
 
         target = self.dm_mixin._choose_failover_target(
             self.src_backend, flexvols, replication_backends)
@@ -681,8 +717,8 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         ]
         mock_debug_log = self.mock_object(data_motion.LOG, 'debug')
         self.mock_object(self.dm_mixin, 'get_snapmirrors',
-                         mock.Mock(side_effect=[target_1_snapmirrors,
-                                                target_2_snapmirrors]))
+                         side_effect=[target_1_snapmirrors,
+                                      target_2_snapmirrors])
 
         target = self.dm_mixin._choose_failover_target(
             self.src_backend, flexvols, replication_backends)
@@ -694,7 +730,7 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         flexvols = ['nvol1', 'nvol2']
         replication_backends = ['fallback1', 'fallback2']
         self.mock_object(self.dm_mixin, '_choose_failover_target',
-                         mock.Mock(return_value=None))
+                         return_value=None)
         self.mock_object(utils, 'get_backend_configuration')
         self.mock_object(self.dm_mixin, 'update_snapmirrors')
         self.mock_object(self.dm_mixin, 'break_snapmirrors')
@@ -732,11 +768,11 @@ class NetAppCDOTDataMotionMixinTestCase(test.TestCase):
         ]
         expected_active_backend_name = failover_target or 'fallback2'
         self.mock_object(self.dm_mixin, '_choose_failover_target',
-                         mock.Mock(return_value='fallback2'))
+                         return_value='fallback2')
         self.mock_object(utils, 'get_backend_configuration')
         self.mock_object(self.dm_mixin, 'update_snapmirrors')
         self.mock_object(self.dm_mixin, 'break_snapmirrors',
-                         mock.Mock(return_value=['nvol3']))
+                         return_value=['nvol3'])
 
         actual_active_backend_name, actual_volume_updates = (
             self.dm_mixin._complete_failover(

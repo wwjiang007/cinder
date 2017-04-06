@@ -17,6 +17,8 @@
 
 import copy
 
+from six.moves import http_client
+
 from cinder.api import extensions
 from cinder.api import openstack
 from cinder.api.openstack import api_version_request
@@ -30,13 +32,6 @@ _LINKS = [{
     "href": "http://docs.openstack.org/",
 }]
 
-_MEDIA_TYPES = [{
-    "base":
-    "application/json",
-    "type":
-    "application/vnd.openstack.volume+json;version=1",
-},
-]
 
 _KNOWN_VERSIONS = {
     "v1.0": {
@@ -46,16 +41,22 @@ _KNOWN_VERSIONS = {
         "min_version": "",
         "updated": "2016-05-02T20:25:19Z",
         "links": _LINKS,
-        "media-types": _MEDIA_TYPES,
+        "media-types": [{
+            "base": "application/json",
+            "type": "application/vnd.openstack.volume+json;version=1",
+        }]
     },
     "v2.0": {
         "id": "v2.0",
-        "status": "SUPPORTED",
+        "status": "DEPRECATED",
         "version": "",
         "min_version": "",
-        "updated": "2014-06-28T12:20:21Z",
+        "updated": "2017-02-25T12:00:00Z",
         "links": _LINKS,
-        "media-types": _MEDIA_TYPES,
+        "media-types": [{
+            "base": "application/json",
+            "type": "application/vnd.openstack.volume+json;version=2",
+        }]
     },
     "v3.0": {
         "id": "v3.0",
@@ -64,7 +65,10 @@ _KNOWN_VERSIONS = {
         "min_version": api_version_request._MIN_API_VERSION,
         "updated": "2016-02-08T12:20:21Z",
         "links": _LINKS,
-        "media-types": _MEDIA_TYPES,
+        "media-types": [{
+            "base": "application/json",
+            "type": "application/vnd.openstack.volume+json;version=3",
+        }]
     },
 }
 
@@ -118,7 +122,7 @@ class VersionsController(wsgi.Controller):
     # /v1, /v2, or /v3 in the URL will lead to this unversioned
     # method, which should always return info about all
     # available versions.
-    @wsgi.response(300)
+    @wsgi.response(http_client.MULTIPLE_CHOICES)
     def all(self, req):
         """Return all known versions."""
         builder = views_versions.get_view_builder(req)

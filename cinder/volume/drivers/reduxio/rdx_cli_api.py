@@ -22,8 +22,8 @@ import paramiko
 import six
 
 from cinder import exception
+from cinder.i18n import _
 from cinder import utils
-from cinder.i18n import _, _LE, _LI
 
 
 CONNECTION_RETRY_NUM = 5
@@ -157,7 +157,7 @@ class ReduxioAPI(object):
             raise exception.RdxAPIConnectionException(_(
                 "Authentication Error. Check login credentials"))
         except Exception:
-            LOG.exception(_LE("Exception in connecting to Reduxio CLI"))
+            LOG.exception("Exception in connecting to Reduxio CLI")
             raise exception.RdxAPIConnectionException(_(
                 "Failed to create ssh connection to Reduxio."
                 " Please check network connection or Reduxio hostname/IP."))
@@ -170,19 +170,20 @@ class ReduxioAPI(object):
         the function throws an error.
         """
         cmd.set_json_output()
-        LOG.info(_LI("Running cmd: %s"), cmd)
+        LOG.info("Running cmd: %s", cmd)
         success = False
         for x in range(1, CONNECTION_RETRY_NUM):
             try:
                 self._reconnect_if_needed()
-                stdin, stdout, stderr = self.ssh.exec_command(
+                stdin, stdout, stderr = self.ssh.exec_command(  # nosec
+                    # command input from authorized users on command line
                     command=six.text_type(cmd), timeout=CLI_SSH_CMD_TIMEOUT)
                 success = True
                 break
             except Exception:
-                LOG.exception(_LE("Error in running Reduxio CLI command"))
+                LOG.exception("Error in running Reduxio CLI command")
                 LOG.error(
-                    _LE("retrying(%(cur)s/%(overall)s)"),
+                    "retrying(%(cur)s/%(overall)s)",
                     {'cur': x, 'overall': CONNECTION_RETRY_NUM}
                 )
                 self.connected = False
@@ -201,7 +202,7 @@ class ReduxioAPI(object):
             data = json.loads(str_out)
 
         if stdout.channel.recv_exit_status() != 0:
-            LOG.error(_LE("Failed running cli command: %s"), data["msg"])
+            LOG.error("Failed running cli command: %s", data["msg"])
             raise exception.RdxAPICommandException(data["msg"])
 
         LOG.debug("Command output is: %s", str_out)

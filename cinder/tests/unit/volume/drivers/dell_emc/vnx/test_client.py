@@ -160,6 +160,14 @@ class TestClient(test.TestCase):
         client.cleanup_migration(1, 2)
 
     @res_mock.patch_client
+    def test_cleanup_migration_not_migrating(self, client, mocked):
+        client.cleanup_migration(1, 2)
+
+    @res_mock.patch_client
+    def test_cleanup_migration_cancel_failed(self, client, mocked):
+        client.cleanup_migration(1, 2)
+
+    @res_mock.patch_client
     def test_get_lun_by_name(self, client, mocked):
         lun = client.get_lun(name='lun_name_test_get_lun_by_name')
         self.assertEqual(888, lun.lun_id)
@@ -181,6 +189,12 @@ class TestClient(test.TestCase):
         self.assertRaisesRegexp(storops_ex.VNXDeleteLunError,
                                 'General lun delete error.',
                                 client.delete_lun, mocked['lun'].name)
+
+    @res_mock.patch_client
+    def test_cleanup_async_lun(self, client, mocked):
+        client.cleanup_async_lun(
+            mocked['lun'].name,
+            force=True)
 
     @res_mock.patch_client
     def test_enable_compression(self, client, mocked):
@@ -261,7 +275,8 @@ class TestClient(test.TestCase):
         lun = client.vnx.get_lun()
         lun.create_snap.assert_called_once_with('snap_test_create_snapshot',
                                                 allow_rw=True,
-                                                auto_delete=False)
+                                                auto_delete=False,
+                                                keep_for=None)
 
     @res_mock.patch_client
     def test_create_snapshot_snap_name_exist_error(self, client, _ignore):
@@ -316,10 +331,9 @@ class TestClient(test.TestCase):
 
     @res_mock.patch_client
     def test_create_sg_name_in_use(self, client, mocked):
-        self.assertRaisesRegexp(storops_ex.VNXStorageGroupNameInUseError,
-                                'Storage group sg_name already exists. '
-                                'Message: ',
-                                client.create_storage_group('sg_name'))
+        client.create_storage_group('sg_name')
+        self.assertIsNotNone(client.sg_cache['sg_name'])
+        self.assertTrue(client.sg_cache['sg_name'].existed)
 
     @res_mock.patch_client
     def test_get_storage_group(self, client, mocked):

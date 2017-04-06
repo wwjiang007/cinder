@@ -26,7 +26,7 @@ from oslo_utils import excutils
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LI, _LW
+from cinder.i18n import _
 from cinder import interface
 from cinder import utils
 import cinder.volume.driver
@@ -52,6 +52,8 @@ class HBSDFCDriver(cinder.volume.driver.FibreChannelDriver):
 
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = ["Hitachi_HBSD_CI", "Hitachi_HBSD2_CI"]
+
+    SUPPORTED = False
 
     def __init__(self, *args, **kwargs):
         os.environ['LANG'] = 'C'
@@ -89,7 +91,7 @@ class HBSDFCDriver(cinder.volume.driver.FibreChannelDriver):
             for opt in volume_opts:
                 if not opt.secret:
                     value = getattr(self.configuration, opt.name)
-                    LOG.info(_LI('\t%(name)-35s : %(value)s'),
+                    LOG.info('\t%(name)-35s : %(value)s',
                              {'name': opt.name, 'value': value})
             self.common.command.output_param_to_log(self.configuration)
 
@@ -184,7 +186,7 @@ class HBSDFCDriver(cinder.volume.driver.FibreChannelDriver):
                     try:
                         self._fill_group(hgs, port, host_grp_name, wwns_copy)
                     except Exception as ex:
-                        LOG.warning(_LW('Failed to add host group: %s'), ex)
+                        LOG.warning('Failed to add host group: %s', ex)
                         LOG.warning(basic_lib.set_msg(
                             308, port=port, name=host_grp_name))
 
@@ -409,7 +411,7 @@ class HBSDFCDriver(cinder.volume.driver.FibreChannelDriver):
 
         return hostgroups
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     def initialize_connection(self, volume, connector):
         self.do_setup_status.wait()
         ldev = self.common.get_ldev(volume)
@@ -437,7 +439,7 @@ class HBSDFCDriver(cinder.volume.driver.FibreChannelDriver):
         self._delete_lun(hostgroups, ldev)
         LOG.debug("*** _terminate_ ***")
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector, **kwargs):
         self.do_setup_status.wait()
         ldev = self.common.get_ldev(volume)

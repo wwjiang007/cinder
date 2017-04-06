@@ -118,9 +118,18 @@ class VolumeAPI(rpc.RPCAPI):
         3.5  - Adds support for cluster in retype and migrate_volume
         3.6  - Switch to use oslo.messaging topics to indicate backends instead
                of @backend suffixes in server names.
+        3.7  - Adds do_cleanup method to do volume cleanups from other nodes
+               that we were doing in init_host.
+        3.8  - Make failover_host cluster aware and add failover_completed.
+        3.9  - Adds new attach/detach methods
+        3.10 -  Returning objects instead of raw dictionaries in
+               get_manageable_volumes & get_manageable_snapshots
+        3.11 - Removes create_consistencygroup, delete_consistencygroup,
+               create_cgsnapshot, delete_cgsnapshot, update_consistencygroup,
+               and create_consistencygroup_from_src.
     """
 
-    RPC_API_VERSION = '3.6'
+    RPC_API_VERSION = '3.11'
     RPC_DEFAULT_VERSION = '3.0'
     TOPIC = constants.VOLUME_TOPIC
     BINARY = 'cinder-volume'
@@ -141,38 +150,6 @@ class VolumeAPI(rpc.RPCAPI):
             kwargs['server'] = server
 
         return super(VolumeAPI, self)._get_cctxt(version=version, **kwargs)
-
-    def create_consistencygroup(self, ctxt, group):
-        cctxt = self._get_cctxt(group.service_topic_queue)
-        cctxt.cast(ctxt, 'create_consistencygroup', group=group)
-
-    def delete_consistencygroup(self, ctxt, group):
-        cctxt = self._get_cctxt(group.service_topic_queue)
-        cctxt.cast(ctxt, 'delete_consistencygroup', group=group)
-
-    def update_consistencygroup(self, ctxt, group, add_volumes=None,
-                                remove_volumes=None):
-        cctxt = self._get_cctxt(group.service_topic_queue)
-        cctxt.cast(ctxt, 'update_consistencygroup',
-                   group=group,
-                   add_volumes=add_volumes,
-                   remove_volumes=remove_volumes)
-
-    def create_consistencygroup_from_src(self, ctxt, group, cgsnapshot=None,
-                                         source_cg=None):
-        cctxt = self._get_cctxt(group.service_topic_queue)
-        cctxt.cast(ctxt, 'create_consistencygroup_from_src',
-                   group=group,
-                   cgsnapshot=cgsnapshot,
-                   source_cg=source_cg)
-
-    def create_cgsnapshot(self, ctxt, cgsnapshot):
-        cctxt = self._get_cctxt(cgsnapshot.service_topic_queue)
-        cctxt.cast(ctxt, 'create_cgsnapshot', cgsnapshot=cgsnapshot)
-
-    def delete_cgsnapshot(self, ctxt, cgsnapshot):
-        cctxt = self._get_cctxt(cgsnapshot.service_topic_queue)
-        cctxt.cast(ctxt, 'delete_cgsnapshot', cgsnapshot=cgsnapshot)
 
     def create_volume(self, ctxt, volume, request_spec, filter_properties,
                       allow_reschedule=True):
@@ -306,21 +283,31 @@ class VolumeAPI(rpc.RPCAPI):
                    new_volume=new_volume,
                    volume_status=original_volume_status)
 
-    def freeze_host(self, ctxt, host):
+    def freeze_host(self, ctxt, service):
         """Set backend host to frozen."""
-        cctxt = self._get_cctxt(host)
+        cctxt = self._get_cctxt(service.service_topic_queue)
         return cctxt.call(ctxt, 'freeze_host')
 
-    def thaw_host(self, ctxt, host):
+    def thaw_host(self, ctxt, service):
         """Clear the frozen setting on a backend host."""
-        cctxt = self._get_cctxt(host)
+        cctxt = self._get_cctxt(service.service_topic_queue)
         return cctxt.call(ctxt, 'thaw_host')
 
-    def failover_host(self, ctxt, host, secondary_backend_id=None):
-        """Failover host to the specified backend_id (secondary)."""
-        cctxt = self._get_cctxt(host)
-        cctxt.cast(ctxt, 'failover_host',
-                   secondary_backend_id=secondary_backend_id)
+    def failover(self, ctxt, service, secondary_backend_id=None):
+        """Failover host to the specified backend_id (secondary). """
+        version = '3.8'
+        method = 'failover'
+        if not self.client.can_send_version(version):
+            version = '3.0'
+            method = 'failover_host'
+        cctxt = self._get_cctxt(service.service_topic_queue, version)
+        cctxt.cast(ctxt, method, secondary_backend_id=secondary_backend_id)
+
+    def failover_completed(self, ctxt, service, updates):
+        """Complete failover on all services of the cluster."""
+        cctxt = self._get_cctxt(service.service_topic_queue, '3.8',
+                                fanout=True)
+        cctxt.cast(ctxt, 'failover_completed', updates=updates)
 
     def manage_existing_snapshot(self, ctxt, snapshot, ref, backend):
         cctxt = self._get_cctxt(backend)
@@ -350,17 +337,37 @@ class VolumeAPI(rpc.RPCAPI):
 
     def get_manageable_volumes(self, ctxt, service, marker, limit, offset,
                                sort_keys, sort_dirs):
-        cctxt = self._get_cctxt(service.service_topic_queue)
-        return cctxt.call(ctxt, 'get_manageable_volumes', marker=marker,
-                          limit=limit, offset=offset, sort_keys=sort_keys,
-                          sort_dirs=sort_dirs)
+        version = ('3.10', '3.0')
+        cctxt = self._get_cctxt(service.service_topic_queue, version=version)
+
+        msg_args = {'marker': marker,
+                    'limit': limit,
+                    'offset': offset,
+                    'sort_keys': sort_keys,
+                    'sort_dirs': sort_dirs,
+                    }
+
+        if cctxt.can_send_version('3.10'):
+            msg_args['want_objects'] = True
+
+        return cctxt.call(ctxt, 'get_manageable_volumes', **msg_args)
 
     def get_manageable_snapshots(self, ctxt, service, marker, limit, offset,
                                  sort_keys, sort_dirs):
-        cctxt = self._get_cctxt(service.service_topic_queue)
-        return cctxt.call(ctxt, 'get_manageable_snapshots', marker=marker,
-                          limit=limit, offset=offset, sort_keys=sort_keys,
-                          sort_dirs=sort_dirs)
+        version = ('3.10', '3.0')
+        cctxt = self._get_cctxt(service.service_topic_queue, version=version)
+
+        msg_args = {'marker': marker,
+                    'limit': limit,
+                    'offset': offset,
+                    'sort_keys': sort_keys,
+                    'sort_dirs': sort_dirs,
+                    }
+
+        if cctxt.can_send_version('3.10'):
+            msg_args['want_objects'] = True
+
+        return cctxt.call(ctxt, 'get_manageable_snapshots', **msg_args)
 
     def create_group(self, ctxt, group):
         cctxt = self._get_cctxt(group.service_topic_queue)
@@ -390,3 +397,32 @@ class VolumeAPI(rpc.RPCAPI):
         cctxt = self._get_cctxt(group_snapshot.service_topic_queue)
         cctxt.cast(ctxt, 'delete_group_snapshot',
                    group_snapshot=group_snapshot)
+
+    @rpc.assert_min_rpc_version('3.9')
+    def attachment_update(self, ctxt, vref, connector, attachment_id):
+        version = self._compat_ver('3.9')
+        cctxt = self._get_cctxt(vref.host, version=version)
+        return cctxt.call(ctxt,
+                          'attachment_update',
+                          vref=vref,
+                          connector=connector,
+                          attachment_id=attachment_id)
+
+    @rpc.assert_min_rpc_version('3.9')
+    def attachment_delete(self, ctxt, attachment_id, vref):
+        version = self._compat_ver('3.9')
+        cctxt = self._get_cctxt(vref.host, version=version)
+        return cctxt.call(ctxt,
+                          'attachment_delete',
+                          attachment_id=attachment_id,
+                          vref=vref)
+
+    @rpc.assert_min_rpc_version('3.7')
+    def do_cleanup(self, ctxt, cleanup_request):
+        """Perform this service/cluster resource cleanup as requested."""
+        destination = cleanup_request.service_topic_queue
+        cctxt = self._get_cctxt(destination, '3.7')
+        # NOTE(geguileo): This call goes to do_cleanup code in
+        # cinder.manager.CleanableManager unless in the future we overwrite it
+        # in cinder.volume.manager
+        cctxt.cast(ctxt, 'do_cleanup', cleanup_request=cleanup_request)

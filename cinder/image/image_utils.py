@@ -39,9 +39,10 @@ from oslo_utils import fileutils
 from oslo_utils import imageutils
 from oslo_utils import timeutils
 from oslo_utils import units
+import psutil
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder import utils
 from cinder.volume import throttling
 from cinder.volume import utils as volume_utils
@@ -57,14 +58,15 @@ CONF = cfg.CONF
 CONF.register_opts(image_helper_opts)
 
 QEMU_IMG_LIMITS = processutils.ProcessLimits(
-    cpu_time=2,
+    cpu_time=8,
     address_space=1 * units.Gi)
 
 # NOTE(abhishekk): qemu-img convert command supports raw, qcow2, qed,
 # vdi, vmdk, vhd and vhdx disk-formats but glance doesn't support qed
 # disk-format.
 # Ref: http://docs.openstack.org/image-guide/convert-images.html
-VALID_DISK_FORMATS = ('raw', 'vmdk', 'vdi', 'qcow2', 'vhd', 'vhdx')
+VALID_DISK_FORMATS = ('raw', 'vmdk', 'vdi', 'qcow2',
+                      'vhd', 'vhdx', 'parallels')
 
 
 def validate_disk_format(disk_format):
@@ -82,11 +84,11 @@ def qemu_img_info(path, run_as_root=True):
 
 
 def get_qemu_img_version():
-    info = utils.execute('qemu-img', '--help', check_exit_code=False)[0]
+    info = utils.execute('qemu-img', '--version', check_exit_code=False)[0]
     pattern = r"qemu-img version ([0-9\.]*)"
     version = re.match(pattern, info)
     if not version:
-        LOG.warning(_LW("qemu-img is not installed."))
+        LOG.warning("qemu-img is not installed.")
         return None
     return _get_version_from_string(version.groups()[0])
 
@@ -144,10 +146,11 @@ def _convert_image(prefix, source, dest, out_format, run_as_root=True):
     if duration < 1:
         duration = 1
     try:
-        image_size = qemu_img_info(source, run_as_root=True).virtual_size
+        image_size = qemu_img_info(source,
+                                   run_as_root=run_as_root).virtual_size
     except ValueError as e:
-        msg = _LI("The image was successfully converted, but image size "
-                  "is unavailable. src %(src)s, dest %(dest)s. %(error)s")
+        msg = ("The image was successfully converted, but image size "
+               "is unavailable. src %(src)s, dest %(dest)s. %(error)s")
         LOG.info(msg, {"src": source,
                        "dest": dest,
                        "error": e})
@@ -162,7 +165,7 @@ def _convert_image(prefix, source, dest, out_format, run_as_root=True):
                     "duration": duration,
                     "dest": dest})
 
-    msg = _LI("Converted %(sz).2f MB image at %(mbps).2f MB/s")
+    msg = "Converted %(sz).2f MB image at %(mbps).2f MB/s"
     LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
 
 
@@ -195,9 +198,9 @@ def fetch(context, image_service, image_id, path, _user_id, _project_id):
                 with excutils.save_and_reraise_exception():
                     if e.errno == errno.ENOSPC:
                         # TODO(eharney): Fire an async error message for this
-                        LOG.error(_LE("No space left in image_conversion_dir "
-                                      "path (%(path)s) while fetching "
-                                      "image %(image)s."),
+                        LOG.error("No space left in image_conversion_dir "
+                                  "path (%(path)s) while fetching "
+                                  "image %(image)s.",
                                   {'path': os.path.dirname(path),
                                    'image': image_id})
 
@@ -214,7 +217,7 @@ def fetch(context, image_service, image_id, path, _user_id, _project_id):
     LOG.debug(msg, {"dest": image_file.name,
                     "sz": fsz_mb,
                     "duration": duration})
-    msg = _LI("Image download %(sz).2f MB at %(mbps).2f MB/s")
+    msg = "Image download %(sz).2f MB at %(mbps).2f MB/s"
     LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
 
 
@@ -349,6 +352,10 @@ def fetch_to_volume_format(context, image_service,
                 reason=_("fmt=%(fmt)s backed by:%(backing_file)s")
                 % {'fmt': fmt, 'backing_file': backing_file, })
 
+        # NOTE(e0ne): check for free space in destination directory before
+        # image convertion.
+        check_available_space(dest, virt_size, image_id)
+
         # NOTE(jdg): I'm using qemu-img convert to write
         # to the volume regardless if it *needs* conversion or not
         # TODO(avishay): We can speed this up by checking if the image is raw
@@ -391,7 +398,7 @@ def upload_volume(context, image_service, image_meta, volume_path,
                 image_service.update(context, image_id, {}, image_file)
         else:
             with utils.temporary_chown(volume_path):
-                with open(volume_path) as image_file:
+                with open(volume_path, 'rb') as image_file:
                     image_service.update(context, image_id, {}, image_file)
         return
 
@@ -445,6 +452,20 @@ def check_virtual_size(virtual_size, volume_size, image_id):
     return virtual_size
 
 
+def check_available_space(dest, image_size, image_id):
+    # TODO(e0ne): replace psutil with shutil.disk_usage when we drop
+    # Python 2.7 support.
+    if not os.path.isdir(dest):
+        dest = os.path.dirname(dest)
+
+    free_space = psutil.disk_usage(dest).free
+    if free_space <= image_size:
+        msg = ('There is no space to convert image. '
+               'Requested: %(image_size)s, available: %(free_space)s'
+               ) % {'image_size': image_size, 'free_space': free_space}
+        raise exception.ImageUnacceptable(image_id=image_id, reason=msg)
+
+
 def is_xenserver_format(image_meta):
     return (
         image_meta['disk_format'] == 'vhd'
@@ -488,6 +509,29 @@ def create_temporary_file(*args, **kwargs):
     fd, tmp = tempfile.mkstemp(dir=CONF.image_conversion_dir, *args, **kwargs)
     os.close(fd)
     return tmp
+
+
+def cleanup_temporary_file(backend_name):
+    temp_dir = CONF.image_conversion_dir
+    if (not temp_dir or not os.path.exists(temp_dir)):
+        LOG.debug("Configuration image_conversion_dir is None or the path "
+                  "doesn't exist.")
+        return
+    try:
+        # TODO(wanghao): Consider using os.scandir for better performance in
+        # future when cinder only supports Python version 3.5+.
+        files = os.listdir(CONF.image_conversion_dir)
+        # NOTE(wanghao): For multi-backend case, if one backend was slow
+        # starting but another backend is up and doing an image conversion,
+        # init_host should only clean the tmp files which belongs to its
+        # backend.
+        for tmp_file in files:
+            if tmp_file.endswith(backend_name):
+                path = os.path.join(temp_dir, tmp_file)
+                os.remove(path)
+    except OSError as e:
+        LOG.warning("Exception caught while clearing temporary image "
+                    "files: %s", e)
 
 
 @contextlib.contextmanager
@@ -569,9 +613,9 @@ class TemporaryImages(object):
 
     @classmethod
     @contextlib.contextmanager
-    def fetch(cls, image_service, context, image_id):
+    def fetch(cls, image_service, context, image_id, suffix=''):
         tmp_images = cls.for_image_service(image_service).temporary_images
-        with temporary_file() as tmp:
+        with temporary_file(suffix=suffix) as tmp:
             fetch_verify_image(context, image_service, image_id, tmp)
             user = context.user_id
             if not tmp_images.get(user):

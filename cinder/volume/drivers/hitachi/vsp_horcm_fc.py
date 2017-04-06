@@ -36,15 +36,7 @@ MSG = utils.VSPMsg
 
 
 class VSPHORCMFC(horcm.VSPHORCM):
-    """HORCM interface fibre channel class for Hitachi VSP Driver.
-
-    Version history:
-
-    .. code-block:: none
-
-    1.0.0 - Initial driver.
-
-    """
+    """HORCM interface fibre channel class for Hitachi VSP Driver."""
 
     def __init__(self, conf, storage_protocol, db):
         """Initialize instance variables."""
@@ -54,15 +46,29 @@ class VSPHORCMFC(horcm.VSPHORCM):
     def connect_storage(self):
         """Prepare for using the storage."""
         target_ports = self.conf.vsp_target_ports
+        compute_target_ports = self.conf.vsp_compute_target_ports
+        pair_target_ports = self.conf.vsp_horcm_pair_target_ports
 
         super(VSPHORCMFC, self).connect_storage()
         result = self.run_raidcom('get', 'port')
         for port, wwn in _FC_PORT_PATTERN.findall(result[1]):
             if target_ports and port in target_ports:
-                self.storage_info['ports'].append(port)
+                self.storage_info['controller_ports'].append(port)
                 self.storage_info['wwns'][port] = wwn
+            if compute_target_ports and port in compute_target_ports:
+                self.storage_info['compute_ports'].append(port)
+                self.storage_info['wwns'][port] = wwn
+            if pair_target_ports and port in pair_target_ports:
+                self.storage_info['pair_ports'].append(port)
 
         self.check_ports_info()
+        if pair_target_ports and not self.storage_info['pair_ports']:
+            msg = utils.output_log(MSG.RESOURCE_NOT_FOUND,
+                                   resource="Pair target ports")
+            raise exception.VSPError(msg)
+        utils.output_log(MSG.SET_CONFIG_VALUE,
+                         object='pair target port list',
+                         value=self.storage_info['pair_ports'])
         utils.output_log(MSG.SET_CONFIG_VALUE, object='port-wwn list',
                          value=self.storage_info['wwns'])
 
@@ -163,7 +169,7 @@ class VSPHORCMFC(horcm.VSPHORCM):
 
         return nr_not_found
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     def initialize_connection(self, volume, connector):
         """Initialize connection between the server and the volume."""
         conn_info = super(VSPHORCMFC, self).initialize_connection(
@@ -172,7 +178,7 @@ class VSPHORCMFC(horcm.VSPHORCM):
             utils.update_conn_info(conn_info, connector, self._lookup_service)
         return conn_info
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector):
         """Terminate connection between the server and the volume."""
         conn_info = super(VSPHORCMFC, self).terminate_connection(

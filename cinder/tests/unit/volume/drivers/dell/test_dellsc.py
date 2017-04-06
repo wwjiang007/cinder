@@ -769,6 +769,27 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
         self.assertEqual(2, mock_delete_replications.call_count)
 
     @mock.patch.object(dell_storagecenter_iscsi.DellStorageCenterISCSIDriver,
+                       '_delete_replications')
+    @mock.patch.object(dell_storagecenter_api.StorageCenterApi,
+                       'delete_volume',
+                       return_value=True)
+    @mock.patch.object(dell_storagecenter_iscsi.DellStorageCenterISCSIDriver,
+                       '_get_replication_specs',
+                       return_value={'enabled': True,
+                                     'live': False})
+    def test_delete_volume_migrating(self,
+                                     mock_get_replication_specs,
+                                     mock_delete_volume,
+                                     mock_delete_replications,
+                                     mock_close_connection,
+                                     mock_open_connection,
+                                     mock_init):
+        volume = {'id': fake.VOLUME_ID, '_name_id': fake.VOLUME2_ID,
+                  'provider_id': '12345.100', 'migration_status': 'deleting'}
+        self.driver.delete_volume(volume)
+        mock_delete_volume.assert_called_once_with(fake.VOLUME2_ID, None)
+
+    @mock.patch.object(dell_storagecenter_iscsi.DellStorageCenterISCSIDriver,
                        '_delete_live_volume')
     @mock.patch.object(dell_storagecenter_api.StorageCenterApi,
                        'delete_volume',
@@ -1785,7 +1806,7 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
         src_vref = {'id': fake.VOLUME2_ID, 'size': 1}
         ret = self.driver.create_cloned_volume(volume, src_vref)
         mock_create_cloned_volume.assert_called_once_with(
-            fake.VOLUME_ID, self.VOLUME, None, None, None, None)
+            fake.VOLUME_ID, self.VOLUME, None, None, None, None, None)
         self.assertTrue(mock_find_volume.called)
         self.assertEqual({'provider_id': provider_id}, ret)
 
@@ -1802,6 +1823,7 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
             mock_find_volume, mock_create_replications, mock_close_connection,
             mock_open_connection, mock_init):
         mock_get_volume_extra_specs.return_value = {
+            'storagetype:storageprofile': 'storageprofile',
             'storagetype:replayprofiles': 'replayprofiles',
             'storagetype:volumeqos': 'volumeqos',
             'storagetype:groupqos': 'groupqos',
@@ -1814,8 +1836,8 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
         src_vref = {'id': fake.VOLUME2_ID, 'size': 1}
         ret = self.driver.create_cloned_volume(volume, src_vref)
         mock_create_cloned_volume.assert_called_once_with(
-            fake.VOLUME_ID, self.VOLUME, 'replayprofiles', 'volumeqos',
-            'groupqos', 'drprofile')
+            fake.VOLUME_ID, self.VOLUME, 'storageprofile', 'replayprofiles',
+            'volumeqos', 'groupqos', 'drprofile')
         self.assertTrue(mock_find_volume.called)
         self.assertEqual({'provider_id': provider_id}, ret)
 
@@ -1844,7 +1866,7 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
         src_vref = {'id': fake.VOLUME2_ID, 'size': 1}
         ret = self.driver.create_cloned_volume(volume, src_vref)
         mock_create_cloned_volume.assert_called_once_with(
-            fake.VOLUME_ID, self.VOLUME, None, None, None, None)
+            fake.VOLUME_ID, self.VOLUME, None, None, None, None, None)
         self.assertTrue(mock_find_volume.called)
         self.assertEqual({'provider_id': provider_id}, ret)
         self.assertTrue(mock_expand_volume.called)
@@ -1958,7 +1980,7 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
         src_vref = {'id': fake.VOLUME2_ID, 'size': 1}
         self.driver.create_cloned_volume(volume, src_vref)
         mock_create_cloned_volume.assert_called_once_with(
-            fake.VOLUME_ID, self.VOLUME, None, None, None, None)
+            fake.VOLUME_ID, self.VOLUME, None, None, None, None, None)
         self.assertTrue(mock_find_volume.called)
         self.assertTrue(mock_find_replay_profile.called)
         self.assertTrue(mock_update_cg_volumes.called)
@@ -2272,17 +2294,18 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
                                      mock_close_connection,
                                      mock_open_connection,
                                      mock_init):
-        mock_volume = mock.MagicMock()
-        expected_volumes = [mock_volume]
+        volume = {'id': fake.VOLUME_ID}
+        expected_volumes = [{'id': fake.VOLUME_ID,
+                             'status': 'deleted'}]
         context = {}
         group = {'id': fake.CONSISTENCY_GROUP_ID,
                  'status': fields.ConsistencyGroupStatus.DELETED}
         model_update, volumes = self.driver.delete_consistencygroup(
-            context, group, [mock_volume])
+            context, group, [volume])
         mock_find_replay_profile.assert_called_once_with(
             fake.CONSISTENCY_GROUP_ID)
         mock_delete_replay_profile.assert_called_once_with(self.SCRPLAYPROFILE)
-        mock_delete_volume.assert_called_once_with(mock_volume)
+        mock_delete_volume.assert_called_once_with(volume)
         self.assertEqual(group['status'], model_update['status'])
         self.assertEqual(expected_volumes, volumes)
 
@@ -2472,19 +2495,19 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
                                mock_close_connection,
                                mock_open_connection,
                                mock_init):
-        mock_snapshot = mock.MagicMock()
-        expected_snapshots = [mock_snapshot]
+        snapshot = {'id': fake.SNAPSHOT_ID, 'status': 'available'}
         context = {}
         cgsnap = {'consistencygroup_id': fake.CONSISTENCY_GROUP_ID,
                   'id': fake.CGSNAPSHOT_ID, 'status': 'deleted'}
         model_update, snapshots = self.driver.delete_cgsnapshot(
-            context, cgsnap, [mock_snapshot])
+            context, cgsnap, [snapshot])
         mock_find_replay_profile.assert_called_once_with(
             fake.CONSISTENCY_GROUP_ID)
         mock_delete_cg_replay.assert_called_once_with(self.SCRPLAYPROFILE,
                                                       fake.CGSNAPSHOT_ID)
         self.assertEqual({'status': cgsnap['status']}, model_update)
-        self.assertEqual(expected_snapshots, snapshots)
+        self.assertEqual([{'id': fake.SNAPSHOT_ID, 'status': 'deleted'}],
+                         snapshots)
 
     @mock.patch.object(dell_storagecenter_api.StorageCenterApi,
                        'delete_cg_replay')
@@ -2497,18 +2520,18 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
                                                  mock_close_connection,
                                                  mock_open_connection,
                                                  mock_init):
-        mock_snapshot = mock.MagicMock()
-        expected_snapshots = [mock_snapshot]
+        snapshot = {'id': fake.SNAPSHOT_ID, 'status': 'available'}
         context = {}
         cgsnap = {'consistencygroup_id': fake.CONSISTENCY_GROUP_ID,
                   'id': fake.CGSNAPSHOT_ID, 'status': 'deleted'}
         model_update, snapshots = self.driver.delete_cgsnapshot(
-            context, cgsnap, [mock_snapshot])
+            context, cgsnap, [snapshot])
         mock_find_replay_profile.assert_called_once_with(
             fake.CONSISTENCY_GROUP_ID)
         self.assertFalse(mock_delete_cg_replay.called)
         self.assertEqual({'status': cgsnap['status']}, model_update)
-        self.assertEqual(expected_snapshots, snapshots)
+        self.assertEqual([{'id': fake.SNAPSHOT_ID, 'status': 'deleted'}],
+                         snapshots)
 
     @mock.patch.object(dell_storagecenter_api.StorageCenterApi,
                        'delete_cg_replay',
@@ -2705,20 +2728,21 @@ class DellSCSanISCSIDriverTestCase(test.TestCase):
                                         mock_init):
 
         res = self.driver.retype(
-            None, {'id': fake.VOLUME_ID}, None,
+            None, {'id': fake.VOLUME_ID},
+            {'extra_specs': {'replication_enabled': [None, '<is> True']}},
             {'extra_specs': {'replication_enabled': [None, '<is> True']}},
             None)
         self.assertTrue(mock_create_replications.called)
         self.assertFalse(mock_delete_replications.called)
-        self.assertEqual({'replication_status': 'enabled',
-                          'replication_driver_data': '54321'}, res)
+        self.assertEqual((True, {'replication_status': 'enabled',
+                                 'replication_driver_data': '54321'}), res)
         res = self.driver.retype(
             None, {'id': fake.VOLUME_ID}, None,
             {'extra_specs': {'replication_enabled': ['<is> True', None]}},
             None)
         self.assertTrue(mock_delete_replications.called)
-        self.assertEqual({'replication_status': 'disabled',
-                          'replication_driver_data': ''}, res)
+        self.assertEqual((True, {'replication_status': 'disabled',
+                                 'replication_driver_data': ''}), res)
 
     @mock.patch.object(dell_storagecenter_api.StorageCenterApi,
                        'update_replicate_active_replay')

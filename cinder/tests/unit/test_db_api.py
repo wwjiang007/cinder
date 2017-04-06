@@ -34,7 +34,6 @@ from cinder import quota
 from cinder import test
 from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import utils
-from cinder.volume import group_types
 
 CONF = cfg.CONF
 THREE = 3
@@ -78,43 +77,24 @@ class BaseTest(test.TestCase, test.ModelsObjectComparatorMixin):
         self.ctxt = context.get_admin_context()
 
 
+@ddt.ddt
 class DBAPIServiceTestCase(BaseTest):
 
     """Unit tests for cinder.db.api.service_*."""
 
-    def _get_base_values(self):
-        return {
-            'host': 'fake_host',
-            'cluster_name': None,
-            'binary': 'fake_binary',
-            'topic': 'fake_topic',
-            'report_count': 3,
-            'disabled': False
-        }
-
-    def _create_service(self, values):
-        v = self._get_base_values()
-        v.update(values)
-        service = db.service_create(self.ctxt, v)
-        # We need to read the contents from the DB if we have set updated_at
-        # or created_at fields
-        if 'updated_at' in values or 'created_at' in values:
-            service = db.service_get(self.ctxt, service.id)
-        return service
-
     def test_service_create(self):
         # Add a cluster value to the service
         values = {'cluster_name': 'cluster'}
-        service = self._create_service(values)
+        service = utils.create_service(self.ctxt, values)
         self.assertIsNotNone(service['id'])
-        expected = self._get_base_values()
+        expected = utils.default_service_values()
         expected.update(values)
         for key, value in expected.items():
             self.assertEqual(value, service[key])
 
     def test_service_destroy(self):
-        service1 = self._create_service({})
-        service2 = self._create_service({'host': 'fake_host2'})
+        service1 = utils.create_service(self.ctxt, {})
+        service2 = utils.create_service(self.ctxt, {'host': 'fake_host2'})
 
         self.assertDictEqual(
             {'deleted': True, 'deleted_at': mock.ANY},
@@ -126,7 +106,7 @@ class DBAPIServiceTestCase(BaseTest):
             db.service_get(self.ctxt, service2['id']))
 
     def test_service_update(self):
-        service = self._create_service({})
+        service = utils.create_service(self.ctxt, {})
         new_values = {
             'host': 'fake_host1',
             'binary': 'fake_binary1',
@@ -144,12 +124,13 @@ class DBAPIServiceTestCase(BaseTest):
                           db.service_update, self.ctxt, 100500, {})
 
     def test_service_get(self):
-        service1 = self._create_service({})
+        service1 = utils.create_service(self.ctxt, {})
         real_service1 = db.service_get(self.ctxt, service1['id'])
         self._assertEqualObjects(service1, real_service1)
 
     def test_service_get_by_cluster(self):
-        service = self._create_service({'cluster_name': 'cluster@backend'})
+        service = utils.create_service(self.ctxt,
+                                       {'cluster_name': 'cluster@backend'})
         # Search with an exact match
         real_service = db.service_get(self.ctxt,
                                       cluster_name='cluster@backend')
@@ -163,43 +144,45 @@ class DBAPIServiceTestCase(BaseTest):
                           db.service_get, self.ctxt, 100500)
 
     def test_service_get_by_host_and_topic(self):
-        service1 = self._create_service({'host': 'host1', 'topic': 'topic1'})
+        service1 = utils.create_service(self.ctxt,
+                                        {'host': 'host1', 'topic': 'topic1'})
 
         real_service1 = db.service_get(self.ctxt, host='host1', topic='topic1')
         self._assertEqualObjects(service1, real_service1)
 
-    def test_service_get_all_disabled_by_cluster(self):
+    @ddt.data('disabled', 'frozen')
+    def test_service_get_all_boolean_by_cluster(self, field_name):
         values = [
-            # Enabled services
-            {'host': 'host1', 'binary': 'b1', 'disabled': False},
-            {'host': 'host2', 'binary': 'b1', 'disabled': False,
-             'cluster_name': 'enabled_cluster'},
-            {'host': 'host3', 'binary': 'b1', 'disabled': True,
-             'cluster_name': 'enabled_cluster'},
+            # Enabled/Unfrozen services
+            {'host': 'host1', 'binary': 'b1', field_name: False},
+            {'host': 'host2', 'binary': 'b1', field_name: False,
+             'cluster_name': 'enabled_unfrozen_cluster'},
+            {'host': 'host3', 'binary': 'b1', field_name: True,
+             'cluster_name': 'enabled_unfrozen_cluster'},
 
-            # Disabled services
-            {'host': 'host4', 'binary': 'b1', 'disabled': True},
-            {'host': 'host5', 'binary': 'b1', 'disabled': False,
-             'cluster_name': 'disabled_cluster'},
-            {'host': 'host6', 'binary': 'b1', 'disabled': True,
-             'cluster_name': 'disabled_cluster'},
+            # Disabled/Frozen services
+            {'host': 'host4', 'binary': 'b1', field_name: True},
+            {'host': 'host5', 'binary': 'b1', field_name: False,
+             'cluster_name': 'disabled_frozen_cluster'},
+            {'host': 'host6', 'binary': 'b1', field_name: True,
+             'cluster_name': 'disabled_frozen_cluster'},
         ]
 
-        db.cluster_create(self.ctxt, {'name': 'enabled_cluster',
+        db.cluster_create(self.ctxt, {'name': 'enabled_unfrozen_cluster',
                                       'binary': 'b1',
-                                      'disabled': False}),
-        db.cluster_create(self.ctxt, {'name': 'disabled_cluster',
+                                      field_name: False}),
+        db.cluster_create(self.ctxt, {'name': 'disabled_frozen_cluster',
                                       'binary': 'b1',
-                                      'disabled': True}),
-        services = [self._create_service(vals) for vals in values]
+                                      field_name: True}),
+        services = [utils.create_service(self.ctxt, vals) for vals in values]
 
-        enabled = db.service_get_all(self.ctxt, disabled=False)
-        disabled = db.service_get_all(self.ctxt, disabled=True)
+        false_services = db.service_get_all(self.ctxt, **{field_name: False})
+        true_services = db.service_get_all(self.ctxt, **{field_name: True})
 
         self.assertSetEqual({s.host for s in services[:3]},
-                            {s.host for s in enabled})
+                            {s.host for s in false_services})
         self.assertSetEqual({s.host for s in services[3:]},
-                            {s.host for s in disabled})
+                            {s.host for s in true_services})
 
     def test_service_get_all(self):
         expired = (datetime.datetime.utcnow()
@@ -222,7 +205,7 @@ class DBAPIServiceTestCase(BaseTest):
             {'disabled': True, 'cluster_name': 'cluster_disabled'},
             {'disabled': True, 'created_at': expired, 'updated_at': expired},
         ]
-        services = [self._create_service(vals) for vals in values]
+        services = [utils.create_service(self.ctxt, vals) for vals in values]
 
         disabled_services = services[-3:]
         non_disabled_services = services[:-3]
@@ -251,7 +234,7 @@ class DBAPIServiceTestCase(BaseTest):
             {'host': 'host4', 'disabled': True, 'topic': 't1'},
             {'host': 'host3', 'topic': 't2'}
         ]
-        services = [self._create_service(vals) for vals in values]
+        services = [utils.create_service(self.ctxt, vals) for vals in values]
         expected = services[:3]
         real = db.service_get_all(self.ctxt, topic='t1')
         self._assertEqualListsOfObjects(expected, real)
@@ -263,7 +246,7 @@ class DBAPIServiceTestCase(BaseTest):
             {'host': 'host4', 'disabled': True, 'binary': 'b1'},
             {'host': 'host3', 'binary': 'b2'}
         ]
-        services = [self._create_service(vals) for vals in values]
+        services = [utils.create_service(self.ctxt, vals) for vals in values]
         expected = services[:3]
         real = db.service_get_all(self.ctxt, binary='b1')
         self._assertEqualListsOfObjects(expected, real)
@@ -273,7 +256,7 @@ class DBAPIServiceTestCase(BaseTest):
             {'host': 'host1', 'binary': 'a'},
             {'host': 'host2', 'binary': 'b'}
         ]
-        services = [self._create_service(vals) for vals in values]
+        services = [utils.create_service(self.ctxt, vals) for vals in values]
 
         service1 = db.service_get(self.ctxt, host='host1', binary='a')
         self._assertEqualObjects(services[0], service1)
@@ -288,9 +271,21 @@ class DBAPIServiceTestCase(BaseTest):
             {'host': 'host3', 'cluster_name': 'cluster@backend'},
             {'host': 'host4', 'cluster_name': 'cluster2'},
         ]
-        services = [self._create_service(vals) for vals in values]
+        services = [utils.create_service(self.ctxt, vals) for vals in values]
         expected = services[:3]
         real = db.service_get_all(self.ctxt, cluster_name='cluster')
+        self._assertEqualListsOfObjects(expected, real)
+
+    def test_service_get_all_by_host_or_cluster(self):
+        values = [
+            {'host': 'host1', 'cluster_name': 'cluster'},
+            {'host': 'host2', 'cluster_name': 'host1'},
+            {'host': 'host3', 'cluster_name': 'cluster@backend'},
+            {'host': 'host4', 'cluster_name': 'cluster2'},
+        ]
+        services = [utils.create_service(self.ctxt, vals) for vals in values]
+        expected = services[0:2]
+        real = db.service_get_all(self.ctxt, host_or_cluster='host1')
         self._assertEqualListsOfObjects(expected, real)
 
     def test_service_get_by_args_not_found_exception(self):
@@ -1223,6 +1218,27 @@ class DBAPIVolumeTestCase(BaseTest):
                           False,
                           FAKE_METADATA_TYPE.fake_type)
 
+    @ddt.data(common.METADATA_TYPES.user, common.METADATA_TYPES.image)
+    @mock.patch.object(timeutils, 'utcnow')
+    @mock.patch.object(sqlalchemy_api, 'resource_exists')
+    @mock.patch.object(sqlalchemy_api, 'conditional_update')
+    @mock.patch.object(sqlalchemy_api, '_volume_x_metadata_get_query')
+    def test_volume_metadata_delete_deleted_at_updated(self,
+                                                       meta_type,
+                                                       mock_query,
+                                                       mock_update,
+                                                       mock_resource,
+                                                       mock_utc):
+        mock_query.all.return_value = {}
+        mock_utc.return_value = 'fake_time'
+
+        db.volume_metadata_update(self.ctxt, 1, {}, True, meta_type=meta_type)
+
+        mock_update.assert_called_once_with(mock.ANY, mock.ANY,
+                                            {'deleted': True,
+                                             'deleted_at': 'fake_time'},
+                                            mock.ANY)
+
     def test_volume_metadata_update_delete(self):
         metadata1 = {'a': '1', 'c': '2'}
         metadata2 = {'a': '3', 'd': '4'}
@@ -1543,7 +1559,7 @@ class DBAPISnapshotTestCase(BaseTest):
             self.assertSetEqual({s.id for s in snapshots[:i + 1]},
                                 {s.id for s in result})
 
-    def test_snapshot_get_by_host(self):
+    def test_snapshot_get_all_by_host(self):
         db.volume_create(self.ctxt, {'id': 1, 'host': 'host1'})
         db.volume_create(self.ctxt, {'id': 2, 'host': 'host2'})
         snapshot1 = db.snapshot_create(self.ctxt, {'id': 1, 'volume_id': 1})
@@ -1554,33 +1570,33 @@ class DBAPISnapshotTestCase(BaseTest):
                                             fields.SnapshotStatus.ERROR})
 
         self._assertEqualListsOfObjects([snapshot1],
-                                        db.snapshot_get_by_host(
+                                        db.snapshot_get_all_by_host(
                                             self.ctxt,
                                             'host1'),
                                         ignored_keys='volume')
         self._assertEqualListsOfObjects([snapshot2],
-                                        db.snapshot_get_by_host(
+                                        db.snapshot_get_all_by_host(
                                             self.ctxt,
                                             'host2'),
                                         ignored_keys='volume')
         self._assertEqualListsOfObjects(
-            [], db.snapshot_get_by_host(self.ctxt, 'host2', {
+            [], db.snapshot_get_all_by_host(self.ctxt, 'host2', {
                 'status': fields.SnapshotStatus.AVAILABLE}),
             ignored_keys='volume')
         self._assertEqualListsOfObjects(
-            [snapshot2], db.snapshot_get_by_host(self.ctxt, 'host2', {
+            [snapshot2], db.snapshot_get_all_by_host(self.ctxt, 'host2', {
                 'status': fields.SnapshotStatus.ERROR}),
             ignored_keys='volume')
         self._assertEqualListsOfObjects([],
-                                        db.snapshot_get_by_host(
+                                        db.snapshot_get_all_by_host(
                                             self.ctxt,
                                             'host2', {'fake_key': 'fake'}),
                                         ignored_keys='volume')
         # If host is None or empty string, empty list should be returned.
-        self.assertEqual([], db.snapshot_get_by_host(self.ctxt, None))
-        self.assertEqual([], db.snapshot_get_by_host(self.ctxt, ''))
+        self.assertEqual([], db.snapshot_get_all_by_host(self.ctxt, None))
+        self.assertEqual([], db.snapshot_get_all_by_host(self.ctxt, ''))
 
-    def test_snapshot_get_by_host_with_pools(self):
+    def test_snapshot_get_all_by_host_with_pools(self):
         db.volume_create(self.ctxt, {'id': 1, 'host': 'host1#pool1'})
         db.volume_create(self.ctxt, {'id': 2, 'host': 'host1#pool2'})
 
@@ -1588,18 +1604,18 @@ class DBAPISnapshotTestCase(BaseTest):
         snapshot2 = db.snapshot_create(self.ctxt, {'id': 2, 'volume_id': 2})
 
         self._assertEqualListsOfObjects([snapshot1, snapshot2],
-                                        db.snapshot_get_by_host(
+                                        db.snapshot_get_all_by_host(
                                             self.ctxt,
                                             'host1'),
                                         ignored_keys='volume')
         self._assertEqualListsOfObjects([snapshot1],
-                                        db.snapshot_get_by_host(
+                                        db.snapshot_get_all_by_host(
                                             self.ctxt,
                                             'host1#pool1'),
                                         ignored_keys='volume')
 
         self._assertEqualListsOfObjects([],
-                                        db.snapshot_get_by_host(
+                                        db.snapshot_get_all_by_host(
                                             self.ctxt,
                                             'host1#pool0'),
                                         ignored_keys='volume')
@@ -1672,6 +1688,26 @@ class DBAPISnapshotTestCase(BaseTest):
         db_meta = db.snapshot_metadata_update(self.ctxt, 1, metadata2, True)
 
         self.assertEqual(should_be, db_meta)
+
+    @mock.patch.object(timeutils, 'utcnow')
+    @mock.patch.object(sqlalchemy_api, 'resource_exists')
+    @mock.patch.object(sqlalchemy_api, '_snapshot_metadata_get')
+    @mock.patch.object(sqlalchemy_api, '_snapshot_metadata_get_item')
+    def test_snapshot_metadata_delete_deleted_at_updated(self,
+                                                         mock_metadata_item,
+                                                         mock_metadata,
+                                                         mock_resource,
+                                                         mock_utc):
+        fake_metadata = {'fake_key1': 'fake_value1'}
+        mock_item = mock.Mock()
+        mock_metadata.return_value = fake_metadata
+        mock_utc.return_value = 'fake_time'
+        mock_metadata_item.side_effect = [mock_item]
+
+        db.snapshot_metadata_update(self.ctxt, 1, {}, True)
+
+        mock_item.update.assert_called_once_with({'deleted': True,
+                                                  'deleted_at': 'fake_time'})
 
     def test_snapshot_metadata_delete(self):
         metadata = {'a': '1', 'c': '2'}
@@ -1764,228 +1800,6 @@ class DBAPIConsistencygroupTestCase(BaseTest):
             self.assertEqual(
                 new_cluster_name + cgs[i].cluster_name[len(cluster_name):],
                 db_cgs[i].cluster_name)
-
-
-class DBAPIMigrateCGstoGroupsTestCase(BaseTest):
-    """Tests for cinder.db.api.migrate_consistencygroups_to_groups."""
-
-    def setUp(self):
-        super(DBAPIMigrateCGstoGroupsTestCase, self).setUp()
-
-        db.volume_type_create(self.ctxt, {'id': 'a', 'name': 'a'})
-        db.volume_type_create(self.ctxt, {'id': 'b', 'name': 'b'})
-
-        cg_dicts = [
-            {'id': '1', 'status': fields.ConsistencyGroupStatus.AVAILABLE,
-             'volume_type_id': 'a,b,'},
-            {'id': '2', 'status': fields.ConsistencyGroupStatus.ERROR,
-             'volume_type_id': 'a,'},
-            {'id': '3',
-             'status': fields.ConsistencyGroupStatus.AVAILABLE,
-             'volume_type_id': 'b,'},
-            {'id': '4',
-             'status': fields.ConsistencyGroupStatus.UPDATING,
-             'volume_type_id': 'a,'},
-        ]
-        for cg_dict in cg_dicts:
-            db.consistencygroup_create(self.ctxt, cg_dict)
-
-        # Create volumes in CGs
-        self.vol1 = db.volume_create(self.ctxt, {'volume_type_id': 'a',
-                                                 'consistencygroup_id': '1',
-                                                 'status': 'available',
-                                                 'size': 1})
-        self.vol2 = db.volume_create(self.ctxt, {'volume_type_id': 'b',
-                                                 'consistencygroup_id': '1',
-                                                 'status': 'available',
-                                                 'size': 1})
-        self.vol3 = db.volume_create(self.ctxt, {'volume_type_id': 'b',
-                                                 'consistencygroup_id': '3',
-                                                 'status': 'available',
-                                                 'size': 1})
-
-        # Create cgsnapshots
-        cgsnap1 = db.cgsnapshot_create(
-            self.ctxt,
-            {'id': 'cgsnap1',
-             'consistencygroup_id': '1',
-             'status': fields.ConsistencyGroupStatus.AVAILABLE}
-        )
-        cgsnap3 = db.cgsnapshot_create(
-            self.ctxt,
-            {'id': 'cgsnap3',
-             'consistencygroup_id': '3',
-             'status': fields.ConsistencyGroupStatus.AVAILABLE}
-        )
-
-        # Create snapshots
-        self.snap1 = db.snapshot_create(
-            self.ctxt,
-            {'volume_id': self.vol1['id'],
-             'cgsnapshot_id': cgsnap1['id'],
-             'status': fields.SnapshotStatus.AVAILABLE})
-        self.snap2 = db.snapshot_create(
-            self.ctxt,
-            {'volume_id': self.vol2['id'],
-             'cgsnapshot_id': cgsnap1['id'],
-             'status': fields.SnapshotStatus.AVAILABLE})
-        self.snap3 = db.snapshot_create(
-            self.ctxt,
-            {'volume_id': self.vol3['id'],
-             'cgsnapshot_id': cgsnap3['id'],
-             'status': fields.SnapshotStatus.AVAILABLE})
-
-        # Create CG from CG snapshot
-        cg5_dict = {
-            'id': '5',
-            'cgsnapshot_id': cgsnap3['id'],
-            'status': fields.ConsistencyGroupStatus.AVAILABLE,
-            'volume_type_id': 'b,'
-        }
-        db.consistencygroup_create(self.ctxt, cg5_dict)
-        cg_dicts.append(cg5_dict)
-        self.vol5 = db.volume_create(self.ctxt, {'volume_type_id': 'b',
-                                                 'consistencygroup_id': '5',
-                                                 'status': 'available',
-                                                 'size': 1})
-
-        # Create CG from source CG
-        cg6_dict = {
-            'id': '6',
-            'source_cgid': '5',
-            'status': fields.ConsistencyGroupStatus.AVAILABLE,
-            'volume_type_id': 'b,'
-        }
-        db.consistencygroup_create(self.ctxt, cg6_dict)
-        cg_dicts.append(cg6_dict)
-        self.vol6 = db.volume_create(self.ctxt, {'volume_type_id': 'b',
-                                                 'consistencygroup_id': '6',
-                                                 'status': 'available',
-                                                 'size': 1})
-
-        self.addCleanup(self._cleanup)
-
-    def _cleanup(self):
-        db.snapshot_destroy(self.ctxt, self.snap1.id)
-        db.snapshot_destroy(self.ctxt, self.snap2.id)
-        db.snapshot_destroy(self.ctxt, self.snap3.id)
-
-        db.volume_destroy(self.ctxt, self.vol1.id)
-        db.volume_destroy(self.ctxt, self.vol2.id)
-        db.volume_destroy(self.ctxt, self.vol3.id)
-        db.volume_destroy(self.ctxt, self.vol5.id)
-        db.volume_destroy(self.ctxt, self.vol6.id)
-
-        db.cgsnapshot_destroy(self.ctxt, 'cgsnap1')
-        db.cgsnapshot_destroy(self.ctxt, 'cgsnap3')
-
-        db.group_snapshot_destroy(self.ctxt, 'cgsnap1')
-        db.group_snapshot_destroy(self.ctxt, 'cgsnap3')
-
-        db.consistencygroup_destroy(self.ctxt, '1')
-        db.consistencygroup_destroy(self.ctxt, '2')
-        db.consistencygroup_destroy(self.ctxt, '3')
-        db.consistencygroup_destroy(self.ctxt, '4')
-        db.consistencygroup_destroy(self.ctxt, '5')
-        db.consistencygroup_destroy(self.ctxt, '6')
-
-        db.group_destroy(self.ctxt, '1')
-        db.group_destroy(self.ctxt, '2')
-        db.group_destroy(self.ctxt, '3')
-        db.group_destroy(self.ctxt, '4')
-        db.group_destroy(self.ctxt, '5')
-        db.group_destroy(self.ctxt, '6')
-
-        db.volume_type_destroy(self.ctxt, 'a')
-        db.volume_type_destroy(self.ctxt, 'b')
-
-        grp_type = group_types.get_default_group_type()
-        if grp_type:
-            db.group_type_destroy(self.ctxt, grp_type.id)
-
-    def _assert_migrated(self, migrated, not_migrated):
-        for cg_id, cgsnap_id in migrated.items():
-            grp = db.group_get(self.ctxt, cg_id)
-            self.assertIsNotNone(grp)
-            vols_in_cgs = db.volume_get_all_by_group(self.ctxt, cg_id)
-            vols_in_grps = db.volume_get_all_by_generic_group(self.ctxt, cg_id)
-            self.assertEqual(0, len(vols_in_cgs))
-            if cg_id == '1':
-                self.assertEqual(2, len(vols_in_grps))
-            elif cg_id == '3':
-                self.assertEqual(1, len(vols_in_grps))
-            if cgsnap_id:
-                grp_snap = db.group_snapshot_get(self.ctxt, cgsnap_id)
-                self.assertIsNotNone(grp_snap)
-                snaps_in_cgsnaps = db.snapshot_get_all_for_cgsnapshot(
-                    self.ctxt, cgsnap_id)
-                snaps_in_grpsnaps = db.snapshot_get_all_for_group_snapshot(
-                    self.ctxt, cgsnap_id)
-                self.assertEqual(0, len(snaps_in_cgsnaps))
-                if cg_id == '1':
-                    self.assertEqual(2, len(snaps_in_grpsnaps))
-                elif cg_id == '3':
-                    self.assertEqual(1, len(snaps_in_grpsnaps))
-
-        for cg_id in not_migrated:
-            self.assertRaises(exception.GroupNotFound,
-                              db.group_get, self.ctxt, cg_id)
-
-    def test_migrate(self):
-        # Run migration
-        count_all, count_hit = db.migrate_consistencygroups_to_groups(
-            self.ctxt, 50)
-        # Check counted entries
-        self.assertEqual(6, count_all)
-        self.assertEqual(5, count_hit)
-
-        # Check migated
-        migrated = {'1': 'cgsnap1', '2': None, '3': 'cgsnap3',
-                    '5': None, '6': None}
-        not_migrated = ('4',)
-
-        self._assert_migrated(migrated, not_migrated)
-
-    def test_migrate_force(self):
-        # Run migration
-        count_all, count_hit = db.migrate_consistencygroups_to_groups(
-            self.ctxt, 50, True)
-        # Check counted entries
-        self.assertEqual(6, count_all)
-        self.assertEqual(6, count_hit)
-
-        # Check migrated
-        migrated = {'1': 'cgsnap1', '2': None, '3': 'cgsnap3', '4': None,
-                    '5': None, '6': None}
-
-        self._assert_migrated(migrated, ())
-
-    def test_migrate_limit_force(self):
-        # Run first migration
-        count_all, count_hit = db.migrate_consistencygroups_to_groups(
-            self.ctxt, 2, True)
-        # Check counted entries
-        self.assertEqual(2, count_all)
-        self.assertEqual(2, count_hit)
-
-        # Check migrated
-        migrated = {'1': 'cgsnap1', '2': None}
-        not_migrated = ('3', '4', '5', '6',)
-
-        self._assert_migrated(migrated, not_migrated)
-
-        # Run second migration
-        count_all, count_hit = db.migrate_consistencygroups_to_groups(
-            self.ctxt, 4, True)
-        # Check counted entries
-        self.assertEqual(4, count_all)
-        self.assertEqual(4, count_hit)
-
-        # Check migrated
-        migrated = {'1': 'cgsnap1', '2': None, '3': 'cgsnap3', '4': None,
-                    '5': None, '6': None}
-
-        self._assert_migrated(migrated, ())
 
 
 class DBAPICgsnapshotTestCase(BaseTest):
@@ -2199,14 +2013,12 @@ class DBAPIEncryptionTestCase(BaseTest):
             self._assertEqualObjects(values[i], encryption, self._ignored_keys)
 
     def test_volume_type_encryption_update(self):
-        update_values = self._get_values(updated=True)
-        self.updated = \
-            [db.volume_type_encryption_update(self.ctxt,
-                                              values['volume_type_id'], values)
-             for values in update_values]
-        for i, encryption in enumerate(self.updated):
-            self._assertEqualObjects(update_values[i], encryption,
-                                     self._ignored_keys)
+        for values in self._get_values(updated=True):
+            db.volume_type_encryption_update(self.ctxt,
+                                             values['volume_type_id'], values)
+            db_enc = db.volume_type_encryption_get(self.ctxt,
+                                                   values['volume_type_id'])
+            self._assertEqualObjects(values, db_enc, self._ignored_keys)
 
     def test_volume_type_encryption_get(self):
         for encryption in self.created:
@@ -2674,8 +2486,8 @@ class DBAPIBackupTestCase(BaseTest):
     def test_backup_update(self):
         updated_values = self._get_values(one=True)
         update_id = self.created[1]['id']
-        updated_backup = db.backup_update(self.ctxt, update_id,
-                                          updated_values)
+        db.backup_update(self.ctxt, update_id, updated_values)
+        updated_backup = db.backup_get(self.ctxt, update_id)
         self._assertEqualObjects(updated_values, updated_backup,
                                  self._ignored_keys)
 
@@ -2685,9 +2497,8 @@ class DBAPIBackupTestCase(BaseTest):
         updated_values['fail_reason'] = fail_reason
 
         update_id = self.created[1]['id']
-        updated_backup = db.backup_update(self.ctxt, update_id,
-                                          updated_values)
-
+        db.backup_update(self.ctxt, update_id, updated_values)
+        updated_backup = db.backup_get(self.ctxt, update_id)
         updated_values['fail_reason'] = fail_reason[:255]
         self._assertEqualObjects(updated_values, updated_backup,
                                  self._ignored_keys)
@@ -2836,13 +2647,15 @@ class DBAPIDriverInitiatorDataTestCase(BaseTest):
         self._test_insert('key2', 'bar', expected_result=False)
 
 
+@ddt.ddt
 class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
 
-    def _validate_entry(self, entry, host, image_id, image_updated_at,
-                        volume_id, size):
+    def _validate_entry(self, entry, host, cluster_name, image_id,
+                        image_updated_at, volume_id, size):
         self.assertIsNotNone(entry)
         self.assertIsNotNone(entry['id'])
         self.assertEqual(host, entry['host'])
+        self.assertEqual(cluster_name, entry['cluster_name'])
         self.assertEqual(image_id, entry['image_id'])
         self.assertEqual(image_updated_at, entry['image_updated_at'])
         self.assertEqual(volume_id, entry['volume_id'])
@@ -2851,35 +2664,38 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
 
     def test_create_delete_query_cache_entry(self):
         host = 'abc@123#poolz'
+        cluster_name = 'def@123#poolz'
         image_id = 'c06764d7-54b0-4471-acce-62e79452a38b'
         image_updated_at = datetime.datetime.utcnow()
         volume_id = 'e0e4f819-24bb-49e6-af1e-67fb77fc07d1'
         size = 6
 
-        entry = db.image_volume_cache_create(self.ctxt, host, image_id,
-                                             image_updated_at, volume_id, size)
-        self._validate_entry(entry, host, image_id, image_updated_at,
-                             volume_id, size)
+        entry = db.image_volume_cache_create(self.ctxt, host, cluster_name,
+                                             image_id, image_updated_at,
+                                             volume_id, size)
+        self._validate_entry(entry, host, cluster_name, image_id,
+                             image_updated_at, volume_id, size)
 
         entry = db.image_volume_cache_get_and_update_last_used(self.ctxt,
                                                                image_id,
-                                                               host)
-        self._validate_entry(entry, host, image_id, image_updated_at,
-                             volume_id, size)
+                                                               host=host)
+        self._validate_entry(entry, host, cluster_name, image_id,
+                             image_updated_at, volume_id, size)
 
         entry = db.image_volume_cache_get_by_volume_id(self.ctxt, volume_id)
-        self._validate_entry(entry, host, image_id, image_updated_at,
-                             volume_id, size)
+        self._validate_entry(entry, host, cluster_name, image_id,
+                             image_updated_at, volume_id, size)
 
         db.image_volume_cache_delete(self.ctxt, entry['volume_id'])
 
         entry = db.image_volume_cache_get_and_update_last_used(self.ctxt,
                                                                image_id,
-                                                               host)
+                                                               host=host)
         self.assertIsNone(entry)
 
     def test_cache_entry_get_multiple(self):
         host = 'abc@123#poolz'
+        cluster_name = 'def@123#poolz'
         image_id = 'c06764d7-54b0-4471-acce-62e79452a38b'
         image_updated_at = datetime.datetime.utcnow()
         volume_id = 'e0e4f819-24bb-49e6-af1e-67fb77fc07d1'
@@ -2889,6 +2705,7 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
         for i in range(0, 3):
             entries.append(db.image_volume_cache_create(self.ctxt,
                                                         host,
+                                                        cluster_name,
                                                         image_id,
                                                         image_updated_at,
                                                         volume_id,
@@ -2897,18 +2714,18 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
         # entries. Expect only a single one from the query.
         entry = db.image_volume_cache_get_and_update_last_used(self.ctxt,
                                                                image_id,
-                                                               host)
-        self._validate_entry(entry, host, image_id, image_updated_at,
-                             volume_id, size)
+                                                               host=host)
+        self._validate_entry(entry, host, cluster_name, image_id,
+                             image_updated_at, volume_id, size)
 
         # We expect to get the same one on subsequent queries due to the
         # last_used field being updated each time and ordering by it.
         entry_id = entry['id']
         entry = db.image_volume_cache_get_and_update_last_used(self.ctxt,
                                                                image_id,
-                                                               host)
-        self._validate_entry(entry, host, image_id, image_updated_at,
-                             volume_id, size)
+                                                               host=host)
+        self._validate_entry(entry, host, cluster_name, image_id,
+                             image_updated_at, volume_id, size)
         self.assertEqual(entry_id, entry['id'])
 
         # Cleanup
@@ -2920,7 +2737,7 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
         image_id = 'c06764d7-54b0-4471-acce-62e79452a38b'
         entry = db.image_volume_cache_get_and_update_last_used(self.ctxt,
                                                                image_id,
-                                                               host)
+                                                               host=host)
         self.assertIsNone(entry)
 
     def test_cache_entry_get_by_volume_id_none(self):
@@ -2937,6 +2754,7 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
         for i in range(0, 3):
             entries.append(db.image_volume_cache_create(self.ctxt,
                                                         host,
+                                                        'cluster-%s' % i,
                                                         'image-' + str(i),
                                                         image_updated_at,
                                                         'vol-' + str(i),
@@ -2944,12 +2762,13 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
 
         other_entry = db.image_volume_cache_create(self.ctxt,
                                                    'someOtherHost',
+                                                   'someOtherCluster',
                                                    'image-12345',
                                                    image_updated_at,
                                                    'vol-1234',
                                                    size)
 
-        found_entries = db.image_volume_cache_get_all_for_host(self.ctxt, host)
+        found_entries = db.image_volume_cache_get_all(self.ctxt, host=host)
         self.assertIsNotNone(found_entries)
         self.assertEqual(len(entries), len(found_entries))
         for found_entry in found_entries:
@@ -2957,6 +2776,7 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
                 if found_entry['id'] == entry['id']:
                     self._validate_entry(found_entry,
                                          entry['host'],
+                                         entry['cluster_name'],
                                          entry['image_id'],
                                          entry['image_updated_at'],
                                          entry['volume_id'],
@@ -2969,8 +2789,35 @@ class DBAPIImageVolumeCacheEntryTestCase(BaseTest):
 
     def test_cache_entry_get_all_for_host_none(self):
         host = 'abc@123#poolz'
-        entries = db.image_volume_cache_get_all_for_host(self.ctxt, host)
+        entries = db.image_volume_cache_get_all(self.ctxt, host=host)
         self.assertEqual([], entries)
+
+    @ddt.data('host1@backend1#pool1', 'host1@backend1')
+    def test_cache_entry_include_in_cluster_by_host(self, host):
+        """Basic cache include test filtering by host and with full rename."""
+        image_updated_at = datetime.datetime.utcnow()
+        image_cache = (
+            db.image_volume_cache_create(
+                self.ctxt, 'host1@backend1#pool1', 'cluster1@backend1#pool1',
+                'image-1', image_updated_at, 'vol-1', 6),
+            db.image_volume_cache_create(
+                self.ctxt, 'host1@backend2#pool2', 'cluster1@backend2#pool2',
+                'image-2', image_updated_at, 'vol-2', 6),
+            db.image_volume_cache_create(
+                self.ctxt, 'host2@backend#pool', 'cluster2@backend#pool',
+                'image-3', image_updated_at, 'vol-3', 6),
+
+        )
+
+        cluster_name = 'my_cluster'
+        result = db.image_volume_cache_include_in_cluster(self.ctxt,
+                                                          cluster_name,
+                                                          partial_rename=False,
+                                                          host=host)
+        self.assertEqual(1, result)
+        db_image_cache = db.image_volume_cache_get_by_volume_id(
+            self.ctxt, image_cache[0].volume_id)
+        self.assertEqual(cluster_name, db_image_cache.cluster_name)
 
 
 class DBAPIGenericTestCase(BaseTest):
@@ -3062,3 +2909,28 @@ class DBAPIGenericTestCase(BaseTest):
         # Admin can find it
         res = sqlalchemy_api.resource_exists(self.ctxt, model, snap.id)
         self.assertTrue(res, msg="Admin cannot find the Snapshot")
+
+
+@ddt.ddt
+class DBAPIBackendTestCase(BaseTest):
+    @ddt.data(True, False)
+    def test_is_backend_frozen_service(self, frozen):
+        service = utils.create_service(self.ctxt, {'frozen': frozen})
+        utils.create_service(self.ctxt, {'host': service.host + '2',
+                                         'frozen': not frozen})
+        self.assertEqual(frozen, db.is_backend_frozen(self.ctxt, service.host,
+                                                      service.cluster_name))
+
+    @ddt.data(True, False)
+    def test_is_backend_frozen_cluster(self, frozen):
+        cluster = utils.create_cluster(self.ctxt, frozen=frozen)
+        utils.create_service(self.ctxt, {'frozen': frozen, 'host': 'hostA',
+                                         'cluster_name': cluster.name})
+        service = utils.create_service(self.ctxt,
+                                       {'frozen': not frozen,
+                                        'host': 'hostB',
+                                        'cluster_name': cluster.name})
+        utils.create_populated_cluster(self.ctxt, 3, 0, frozen=not frozen,
+                                       name=cluster.name + '2')
+        self.assertEqual(frozen, db.is_backend_frozen(self.ctxt, service.host,
+                                                      service.cluster_name))

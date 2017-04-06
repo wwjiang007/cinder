@@ -27,7 +27,7 @@ if storops:
     from storops import exception as storops_ex
 
 from cinder import exception
-from cinder.i18n import _, _LI, _LE, _LW
+from cinder.i18n import _
 from cinder.objects import fields
 from cinder.volume.drivers.dell_emc.vnx import client
 from cinder.volume.drivers.dell_emc.vnx import common
@@ -59,6 +59,7 @@ class CommonAdapter(object):
         self.reserved_percentage = None
         self.destroy_empty_sg = None
         self.itor_auto_dereg = None
+        self.queue_path = None
 
     def do_setup(self):
         self._normalize_config()
@@ -68,9 +69,16 @@ class CommonAdapter(object):
             self.config.san_password,
             self.config.storage_vnx_authentication_type,
             self.config.naviseccli_path,
-            self.config.storage_vnx_security_file_dir)
+            self.config.storage_vnx_security_file_dir,
+            self.queue_path)
         # Replication related
-        self.mirror_view = self.build_mirror_view(self.config, True)
+        if (self.active_backend_id in
+                common.ReplicationDeviceList.get_backend_ids(self.config)):
+            # The backend is in failed-over state
+            self.mirror_view = self.build_mirror_view(self.config, False)
+            self.client = self.mirror_view.primary_client
+        else:
+            self.mirror_view = self.build_mirror_view(self.config, True)
         self.serial_number = self.client.get_serial()
         self.storage_pools = self.parse_pools()
         self.force_delete_lun_in_sg = (
@@ -86,14 +94,17 @@ class CommonAdapter(object):
         self.set_extra_spec_defaults()
 
     def _normalize_config(self):
+        self.queue_path = (
+            self.config.config_group if self.config.config_group
+            else 'DEFAULT')
         # Check option `naviseccli_path`.
         # Set to None (then pass to storops) if it is not set or set to an
         # empty string.
         naviseccli_path = self.config.naviseccli_path
         if naviseccli_path is None or len(naviseccli_path.strip()) == 0:
-            LOG.warning(_LW('[%(group)s] naviseccli_path is not set or set to '
-                            'an empty string. None will be passed into '
-                            'storops.'), {'group': self.config.config_group})
+            LOG.warning('[%(group)s] naviseccli_path is not set or set to '
+                        'an empty string. None will be passed into '
+                        'storops.', {'group': self.config.config_group})
             self.config.naviseccli_path = None
 
         # Check option `storage_vnx_pool_names`.
@@ -102,8 +113,8 @@ class CommonAdapter(object):
         if pool_names is not None:
             # Filter out the empty string in the list.
             pool_names = [name.strip()
-                          for name in filter(lambda x: len(x.strip()) != 0,
-                                             pool_names)]
+                          for name in [x for x in pool_names
+                                       if len(x.strip()) != 0]]
             if len(pool_names) == 0:
                 raise exception.InvalidConfigurationValue(
                     option='[{group}] storage_vnx_pool_names'.format(
@@ -116,8 +127,8 @@ class CommonAdapter(object):
         io_port_list = self.config.io_port_list
         if io_port_list is not None:
             io_port_list = [port.strip().upper()
-                            for port in filter(lambda x: len(x.strip()) != 0,
-                                               io_port_list)]
+                            for port in [x for x in io_port_list
+                                         if len(x.strip()) != 0]]
             if len(io_port_list) == 0:
                 # io_port_list is allowed to be an empty list, which means
                 # none of the ports will be registered.
@@ -128,32 +139,32 @@ class CommonAdapter(object):
             self.config.io_port_list = io_port_list
 
         if self.config.ignore_pool_full_threshold:
-            LOG.warning(_LW('[%(group)s] ignore_pool_full_threshold: True. '
-                            'LUN creation will still be forced even if the '
-                            'pool full threshold is exceeded.'),
+            LOG.warning('[%(group)s] ignore_pool_full_threshold: True. '
+                        'LUN creation will still be forced even if the '
+                        'pool full threshold is exceeded.',
                         {'group': self.config.config_group})
 
         if self.config.destroy_empty_storage_group:
-            LOG.warning(_LW('[%(group)s] destroy_empty_storage_group: True. '
-                            'Empty storage group will be deleted after volume '
-                            'is detached.'),
+            LOG.warning('[%(group)s] destroy_empty_storage_group: True. '
+                        'Empty storage group will be deleted after volume '
+                        'is detached.',
                         {'group': self.config.config_group})
 
         if not self.config.initiator_auto_registration:
-            LOG.info(_LI('[%(group)s] initiator_auto_registration: False. '
-                         'Initiator auto registration is not enabled. '
-                         'Please register initiator manually.'),
+            LOG.info('[%(group)s] initiator_auto_registration: False. '
+                     'Initiator auto registration is not enabled. '
+                     'Please register initiator manually.',
                      {'group': self.config.config_group})
 
         if self.config.force_delete_lun_in_storagegroup:
-            LOG.warning(_LW(
-                '[%(group)s] force_delete_lun_in_storagegroup=True'),
+            LOG.warning(
+                '[%(group)s] force_delete_lun_in_storagegroup=True',
                 {'group': self.config.config_group})
 
         if self.config.ignore_pool_full_threshold:
-            LOG.warning(_LW('[%(group)s] ignore_pool_full_threshold: True. '
-                            'LUN creation will still be forced even if the '
-                            'pool full threshold is exceeded.'),
+            LOG.warning('[%(group)s] ignore_pool_full_threshold: True. '
+                        'LUN creation will still be forced even if the '
+                        'pool full threshold is exceeded.',
                         {'group': self.config.config_group})
 
     def _build_port_str(self, port):
@@ -212,19 +223,20 @@ class CommonAdapter(object):
         tier = specs.tier
 
         volume_metadata['snapcopy'] = 'False'
-        LOG.info(_LI('Create Volume: %(volume)s  Size: %(size)s '
-                     'pool: %(pool)s '
-                     'provision: %(provision)s '
-                     'tier: %(tier)s '),
+        LOG.info('Create Volume: %(volume)s  Size: %(size)s '
+                 'pool: %(pool)s '
+                 'provision: %(provision)s '
+                 'tier: %(tier)s ',
                  {'volume': volume_name,
                   'size': volume_size,
                   'pool': pool,
                   'provision': provision,
                   'tier': tier})
 
+        cg_id = volume.group_id or volume.consistencygroup_id
         lun = self.client.create_lun(
             pool, volume_name, volume_size,
-            provision, tier, volume.consistencygroup_id,
+            provision, tier, cg_id,
             ignore_thresholds=self.config.ignore_pool_full_threshold)
         location = self._build_provider_location(
             lun_type='lun',
@@ -301,7 +313,7 @@ class CommonAdapter(object):
         tier = specs.tier
         base_lun_name = utils.get_base_lun_name(snapshot.volume)
         rep_update = dict()
-        if utils.snapcopy_enabled(volume):
+        if utils.is_snapcopy_enabled(volume):
             new_lun_id = emc_taskflow.fast_create_volume_from_snapshot(
                 client=self.client,
                 snap_name=snapshot.name,
@@ -309,26 +321,34 @@ class CommonAdapter(object):
                 lun_name=volume.name,
                 base_lun_name=base_lun_name,
                 pool_name=pool)
+
             location = self._build_provider_location(
                 lun_type='smp',
                 lun_id=new_lun_id,
                 base_lun_name=base_lun_name)
             volume_metadata['snapcopy'] = 'True'
+            volume_metadata['async_migrate'] = 'False'
         else:
+            async_migrate = utils.is_async_migrate_enabled(volume)
+            new_snap_name = (
+                utils.construct_snap_name(volume) if async_migrate else None)
             new_lun_id = emc_taskflow.create_volume_from_snapshot(
                 client=self.client,
-                snap_name=snapshot.name,
+                src_snap_name=snapshot.name,
                 lun_name=volume.name,
                 lun_size=volume.size,
                 base_lun_name=base_lun_name,
                 pool_name=pool,
                 provision=provision,
-                tier=tier)
+                tier=tier,
+                new_snap_name=new_snap_name)
+
             location = self._build_provider_location(
                 lun_type='lun',
                 lun_id=new_lun_id,
                 base_lun_name=volume.name)
             volume_metadata['snapcopy'] = 'False'
+            volume_metadata['async_migrate'] = six.text_type(async_migrate)
             rep_update = self.setup_lun_replication(volume, new_lun_id)
 
         model_update = {'provider_location': location,
@@ -349,7 +369,7 @@ class CommonAdapter(object):
         source_lun_id = self.client.get_lun_id(src_vref)
         snap_name = utils.construct_snap_name(volume)
         rep_update = dict()
-        if utils.snapcopy_enabled(volume):
+        if utils.is_snapcopy_enabled(volume):
             # snapcopy feature enabled
             new_lun_id = emc_taskflow.fast_create_cloned_volume(
                 client=self.client,
@@ -362,7 +382,10 @@ class CommonAdapter(object):
                 lun_type='smp',
                 lun_id=new_lun_id,
                 base_lun_name=base_lun_name)
+            volume_metadata['snapcopy'] = 'True'
+            volume_metadata['async_migrate'] = 'False'
         else:
+            async_migrate = utils.is_async_migrate_enabled(volume)
             new_lun_id = emc_taskflow.create_cloned_volume(
                 client=self.client,
                 snap_name=snap_name,
@@ -372,14 +395,15 @@ class CommonAdapter(object):
                 base_lun_name=base_lun_name,
                 pool_name=pool,
                 provision=provision,
-                tier=tier)
-            self.client.delete_snapshot(snap_name)
+                tier=tier,
+                async_migrate=async_migrate)
             # After migration, volume's base lun is itself
             location = self._build_provider_location(
                 lun_type='lun',
                 lun_id=new_lun_id,
                 base_lun_name=volume.name)
             volume_metadata['snapcopy'] = 'False'
+            volume_metadata['async_migrate'] = six.text_type(async_migrate)
             rep_update = self.setup_lun_replication(volume, new_lun_id)
 
         model_update = {'provider_location': location,
@@ -445,7 +469,7 @@ class CommonAdapter(object):
         model_update = {}
         volumes_model_update = []
         model_update['status'] = group.status
-        LOG.info(_LI('Start to delete consistency group: %(cg_name)s'),
+        LOG.info('Start to delete consistency group: %(cg_name)s',
                  {'cg_name': cg_name})
 
         self.client.delete_consistency_group(cg_name)
@@ -464,15 +488,21 @@ class CommonAdapter(object):
         return model_update, volumes_model_update
 
     def create_cgsnapshot(self, context, cgsnapshot, snapshots):
+
         """Creates a CG snapshot(snap group)."""
+        return self.do_create_cgsnap(cgsnapshot.consistencygroup_id,
+                                     cgsnapshot.id,
+                                     snapshots)
+
+    def do_create_cgsnap(self, group_name, snap_name, snapshots):
         model_update = {}
         snapshots_model_update = []
-        LOG.info(_LI('Creating CG snapshot for consistency group'
-                     ': %(group_name)s'),
-                 {'group_name': cgsnapshot.consistencygroup_id})
+        LOG.info('Creating consistency snapshot for group'
+                 ': %(group_name)s',
+                 {'group_name': group_name})
 
-        self.client.create_cg_snapshot(cgsnapshot.id,
-                                       cgsnapshot.consistencygroup_id)
+        self.client.create_cg_snapshot(snap_name,
+                                       group_name)
         for snapshot in snapshots:
             snapshots_model_update.append(
                 {'id': snapshot.id, 'status': 'available'})
@@ -482,15 +512,22 @@ class CommonAdapter(object):
 
     def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Deletes a CG snapshot(snap group)."""
+        return self.do_delete_cgsnap(cgsnapshot.consistencygroup_id,
+                                     cgsnapshot.id,
+                                     cgsnapshot.status,
+                                     snapshots)
+
+    def do_delete_cgsnap(self, group_name, snap_name,
+                         snap_status, snapshots):
         model_update = {}
         snapshots_model_update = []
-        model_update['status'] = cgsnapshot.status
-        LOG.info(_LI('Deleting CG snapshot %(snap_name)s for consistency '
-                     'group: %(group_name)s'),
-                 {'snap_name': cgsnapshot.id,
-                  'group_name': cgsnapshot.consistencygroup_id})
+        model_update['status'] = snap_status
+        LOG.info('Deleting consistency snapshot %(snap_name)s for '
+                 'group: %(group_name)s',
+                 {'snap_name': snap_name,
+                  'group_name': group_name})
 
-        self.client.delete_cg_snapshot(cgsnapshot.id)
+        self.client.delete_cg_snapshot(snap_name)
         for snapshot in snapshots:
             snapshots_model_update.append(
                 {'id': snapshot.id, 'status': 'deleted'})
@@ -500,6 +537,11 @@ class CommonAdapter(object):
 
     def create_cg_from_cgsnapshot(self, context, group,
                                   volumes, cgsnapshot, snapshots):
+        return self.do_create_cg_from_cgsnap(
+            group.id, group.host, volumes, cgsnapshot.id, snapshots)
+
+    def do_create_cg_from_cgsnap(self, cg_id, cg_host, volumes,
+                                 cgsnap_id, snapshots):
         # 1. Copy a temp CG snapshot from CG snapshot
         #    and allow RW for it
         # 2. Create SMPs from source volumes
@@ -509,9 +551,9 @@ class CommonAdapter(object):
         # 6. Wait completion of migration
         # 7. Create a new CG, add all LUNs to it
         # 8. Delete the temp CG snapshot
-        cg_name = group.id
-        src_cg_snap_name = cgsnapshot.id
-        pool_name = utils.get_pool_from_host(group.host)
+        cg_name = cg_id
+        src_cg_snap_name = cgsnap_id
+        pool_name = utils.get_pool_from_host(cg_host)
         lun_sizes = []
         lun_names = []
         src_lun_names = []
@@ -549,9 +591,14 @@ class CommonAdapter(object):
 
     def create_cloned_cg(self, context, group,
                          volumes, source_cg, source_vols):
+        self.do_clone_cg(group.id, group.host, volumes,
+                         source_cg.id, source_vols)
+
+    def do_clone_cg(self, cg_id, cg_host, volumes,
+                    source_cg_id, source_vols):
         # 1. Create temp CG snapshot from source_cg
         # Same with steps 2-8 of create_cg_from_cgsnapshot
-        pool_name = utils.get_pool_from_host(group.host)
+        pool_name = utils.get_pool_from_host(cg_host)
         lun_sizes = []
         lun_names = []
         src_lun_names = []
@@ -564,8 +611,8 @@ class CommonAdapter(object):
 
         lun_id_list = emc_taskflow.create_cloned_cg(
             client=self.client,
-            cg_name=group.id,
-            src_cg_name=source_cg.id,
+            cg_name=cg_id,
+            src_cg_name=source_cg_id,
             pool_name=pool_name,
             lun_sizes=lun_sizes,
             lun_names=lun_names,
@@ -599,10 +646,10 @@ class CommonAdapter(object):
                         'Non-existent pools: %s') % ','.join(nonexistent_pools)
                 raise exception.VolumeBackendAPIException(data=msg)
             if nonexistent_pools:
-                LOG.warning(_LW('The following specified storage pools '
-                                'do not exist: %(nonexistent)s. '
-                                'This host will only manage the storage '
-                                'pools: %(exist)s'),
+                LOG.warning('The following specified storage pools '
+                            'do not exist: %(nonexistent)s. '
+                            'This host will only manage the storage '
+                            'pools: %(exist)s',
                             {'nonexistent': ','.join(nonexistent_pools),
                              'exist': ','.join(pool_names)})
             else:
@@ -610,8 +657,8 @@ class CommonAdapter(object):
                           ','.join(pool_names))
         else:
             pool_names = [p.name for p in array_pools]
-            LOG.info(_LI('No storage pool is configured. This host will '
-                         'manage all the pools on the VNX system.'))
+            LOG.info('No storage pool is configured. This host will '
+                     'manage all the pools on the VNX system.')
 
         return [pool for pool in array_pools if pool.name in pool_names]
 
@@ -623,6 +670,8 @@ class CommonAdapter(object):
         stats['thin_provisioning_support'] = self.client.is_thin_enabled()
         stats['consistencygroup_support'] = self.client.is_snap_enabled()
         stats['replication_enabled'] = True if self.mirror_view else False
+        stats['consistent_group_snapshot_enabled'] = (
+            self.client.is_snap_enabled())
         return stats
 
     def get_pool_stats(self, enabler_stats=None):
@@ -641,7 +690,7 @@ class CommonAdapter(object):
             # or Deleting.
             if pool.state in common.PoolState.VALID_CREATE_LUN_STATE:
                 pool_stats['free_capacity_gb'] = 0
-                LOG.warning(_LW('Storage Pool [%(pool)s] is [%(state)s].'),
+                LOG.warning('Storage Pool [%(pool)s] is [%(state)s].',
                             {'pool': pool.name,
                              'state': pool.state})
             else:
@@ -649,9 +698,9 @@ class CommonAdapter(object):
 
                 if (pool_feature.max_pool_luns <=
                         pool_feature.total_pool_luns):
-                    LOG.warning(_LW('Maximum number of Pool LUNs %(max_luns)s '
-                                    'have been created for %(pool_name)s. '
-                                    'No more LUN creation can be done.'),
+                    LOG.warning('Maximum number of Pool LUNs %(max_luns)s '
+                                'have been created for %(pool_name)s. '
+                                'No more LUN creation can be done.',
                                 {'max_luns': pool_feature.max_pool_luns,
                                  'pool_name': pool.name})
                     pool_stats['free_capacity_gb'] = 0
@@ -720,8 +769,27 @@ class CommonAdapter(object):
 
     def delete_volume(self, volume):
         """Deletes an EMC volume."""
+        async_migrate = utils.is_async_migrate_enabled(volume)
         self.cleanup_lun_replication(volume)
-        self.client.delete_lun(volume.name, force=self.force_delete_lun_in_sg)
+        try:
+            self.client.delete_lun(volume.name,
+                                   force=self.force_delete_lun_in_sg)
+        except storops_ex.VNXLunUsedByFeatureError:
+            # Case 1. Migration not finished, cleanup related stuff.
+            if async_migrate:
+                self.client.cleanup_async_lun(
+                    name=volume.name,
+                    force=self.force_delete_lun_in_sg)
+            else:
+                raise
+        except (storops_ex.VNXLunHasSnapError,
+                storops_ex.VNXLunHasSnapMountPointError):
+            # Here, we assume no Cinder managed snaps, and add it to queue
+            # for later deletion
+            self.client.delay_delete_lun(volume.name)
+        # Case 2. Migration already finished, delete temp snap if exists.
+        if async_migrate:
+            self.client.delete_snapshot(utils.construct_snap_name(volume))
 
     def extend_volume(self, volume, new_size):
         """Extends an EMC volume."""
@@ -956,15 +1024,14 @@ class CommonAdapter(object):
         lun = self.client.get_lun(lun_id=volume.vnx_lun_id)
         hostname = host.name
         if not sg.existed:
-            LOG.warning(_LW("Storage Group %s is not found. "
-                            "Nothing can be done in terminate_connection()."),
+            LOG.warning("Storage Group %s is not found. "
+                        "Nothing can be done in terminate_connection().",
                         hostname)
         else:
             try:
                 sg.detach_alu(lun)
             except storops_ex.VNXDetachAluNotFoundError:
-                LOG.warning(_LW("Volume %(vol)s is not in Storage Group"
-                                " %(sg)s."),
+                LOG.warning("Volume %(vol)s is not in Storage Group %(sg)s.",
                             {'vol': volume.name, 'sg': hostname})
 
     def build_terminate_connection_return_data(self, host, sg):
@@ -980,19 +1047,19 @@ class CommonAdapter(object):
 
     def _destroy_empty_sg(self, host, sg):
         try:
-            LOG.info(_LI("Storage Group %s is empty."), sg.name)
+            LOG.info("Storage Group %s is empty.", sg.name)
             sg.disconnect_host(sg.name)
             sg.delete()
             if self.itor_auto_dereg:
                 self._deregister_initiator(host)
         except storops_ex.StoropsException:
-            LOG.warning(_LW("Failed to destroy Storage Group %s."),
+            LOG.warning("Failed to destroy Storage Group %s.",
                         sg.name)
             try:
                 sg.connect_host(sg.name)
             except storops_ex.StoropsException:
-                LOG.warning(_LW("Failed to connect host %(host)s "
-                                "back to storage group %(sg)s."),
+                LOG.warning("Failed to connect host %(host)s "
+                            "back to storage group %(sg)s.",
                             {'host': sg.name, 'sg': sg.name})
 
     def _deregister_initiator(self, host):
@@ -1000,7 +1067,7 @@ class CommonAdapter(object):
         try:
             self.client.deregister_initiators(initiators)
         except storops_ex:
-            LOG.warning(_LW("Failed to deregister the initiators %s"),
+            LOG.warning("Failed to deregister the initiators %s",
                         initiators)
 
     def _is_allowed_port(self, port):
@@ -1017,7 +1084,12 @@ class CommonAdapter(object):
 
     def update_consistencygroup(self, context, group, add_volumes,
                                 remove_volumes):
-        cg = self.client.get_cg(name=group.id)
+        return self.do_update_cg(group.id, add_volumes,
+                                 remove_volumes)
+
+    def do_update_cg(self, cg_name, add_volumes,
+                     remove_volumes):
+        cg = self.client.get_cg(name=cg_name)
         lun_ids_to_add = [self.client.get_lun_id(volume)
                           for volume in add_volumes]
         lun_ids_to_remove = [self.client.get_lun_id(volume)
@@ -1071,7 +1143,7 @@ class CommonAdapter(object):
                 volume.name, lun_size,
                 provision, tier)
 
-            LOG.info(_LI('Successfully setup replication for %s.'), volume.id)
+            LOG.info('Successfully setup replication for %s.', volume.id)
             rep_update.update({'replication_status':
                                fields.ReplicationStatus.ENABLED})
         return rep_update
@@ -1085,7 +1157,7 @@ class CommonAdapter(object):
             mirror_view = self.build_mirror_view(self.config, True)
             mirror_view.destroy_mirror(mirror_name, volume.name)
             LOG.info(
-                _LI('Successfully destroyed replication for volume: %s'),
+                'Successfully destroyed replication for volume: %s',
                 volume.id)
 
     def build_mirror_view(self, configuration, failover=True):
@@ -1097,7 +1169,7 @@ class CommonAdapter(object):
         """
         rep_devices = configuration.replication_device
         if not rep_devices:
-            LOG.info(_LI('Replication is not configured on backend: %s.'),
+            LOG.info('Replication is not configured on backend: %s.',
                      configuration.config_group)
             return None
         elif len(rep_devices) == 1:
@@ -1158,13 +1230,13 @@ class CommonAdapter(object):
             try:
                 mirror_view.promote_image(mirror_name)
             except storops_ex.VNXMirrorException as ex:
-                msg = _LE(
+                LOG.error(
                     'Failed to failover volume %(volume_id)s '
-                    'to %(target)s: %(error)s.')
-                LOG.error(msg, {'volume_id': volume.id,
-                                'target': secondary_backend_id,
-                                'error': ex},)
-                new_status = fields.ReplicationStatus.ERROR
+                    'to %(target)s: %(error)s.',
+                    {'volume_id': volume.id,
+                     'target': secondary_backend_id,
+                     'error': ex})
+                new_status = fields.ReplicationStatus.FAILOVER_ERROR
             else:
                 # Transfer ownership to secondary_backend_id and
                 # update provider_location field
@@ -1190,6 +1262,10 @@ class CommonAdapter(object):
                 volume_update_list.append({
                     'volume_id': volume.id,
                     'updates': {'status': 'error'}})
+        # After failover, the secondary is now the primary,
+        # any sequential request will be redirected to it.
+        self.client = mirror_view.secondary_client
+
         return secondary_backend_id, volume_update_list
 
     def get_pool_name(self, volume):
@@ -1203,6 +1279,46 @@ class CommonAdapter(object):
                                 else 'False')
         return {'provider_location': new_volume.provider_location,
                 'metadata': metadata}
+
+    def create_group(self, context, group):
+        return self.create_consistencygroup(context, group)
+
+    def delete_group(self, context, group, volumes):
+        return self.delete_consistencygroup(context, group, volumes)
+
+    def create_group_snapshot(self, context, group_snapshot, snapshots):
+        """Creates a group_snapshot."""
+        return self.do_create_cgsnap(group_snapshot.group_id,
+                                     group_snapshot.id,
+                                     snapshots)
+
+    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+        """Deletes a group snapshot."""
+        return self.do_delete_cgsnap(
+            group_snapshot.group_id,
+            group_snapshot.id,
+            group_snapshot.status,
+            snapshots)
+
+    def create_group_from_group_snapshot(self,
+                                         context, group, volumes,
+                                         group_snapshot, snapshots):
+        """Creates a group from a group snapshot."""
+        return self.do_create_cg_from_cgsnap(group.id, group.host, volumes,
+                                             group_snapshot.id, snapshots)
+
+    def update_group(self, context, group,
+                     add_volumes=None, remove_volumes=None):
+        """Updates a group."""
+        return self.do_update_cg(group.id,
+                                 add_volumes,
+                                 remove_volumes)
+
+    def create_cloned_group(self, context, group, volumes,
+                            source_group, source_vols):
+        """Clones a group"""
+        return self.do_clone_cg(group.id, group.host, volumes,
+                                source_group.id, source_vols)
 
 
 class ISCSIAdapter(CommonAdapter):
@@ -1247,8 +1363,7 @@ class ISCSIAdapter(CommonAdapter):
                 raise exception.InvalidConfigurationValue(
                     option=option,
                     value=iscsi_initiators)
-            LOG.info(_LI("[%(group)s] iscsi_initiators is configured: "
-                         "%(value)s"),
+            LOG.info("[%(group)s] iscsi_initiators is configured: %(value)s",
                      {'group': self.config.config_group,
                       'value': self.config.iscsi_initiators})
 

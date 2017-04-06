@@ -23,7 +23,6 @@ from oslo_log import log as logging
 from oslo_vmware import pbm
 from oslo_vmware import vim_util
 
-from cinder.i18n import _LE
 from cinder.volume.drivers.vmware import exceptions as vmdk_exceptions
 
 
@@ -64,11 +63,11 @@ class DatastoreSelector(object):
 
         :param profile_name: profile name
         :return: vCenter profile ID
-        :raises: ProfileNotFoundException
+        :raises ProfileNotFoundException:
         """
         profile_id = pbm.get_profile_id_by_name(self._session, profile_name)
         if profile_id is None:
-            LOG.error(_LE("Storage profile: %s cannot be found in vCenter."),
+            LOG.error("Storage profile: %s cannot be found in vCenter.",
                       profile_name)
             raise vmdk_exceptions.ProfileNotFoundException(
                 storage_profile=profile_name)
@@ -283,7 +282,7 @@ class DatastoreSelector(object):
         :param datastore: datastore to check the compliance
         :param profile_name: profile to check the compliance against
         :return: True if the datastore is compliant; False otherwise
-        :raises: ProfileNotFoundException
+        :raises ProfileNotFoundException:
         """
         LOG.debug("Checking datastore: %(datastore)s compliance against "
                   "profile: %(profile)s.",

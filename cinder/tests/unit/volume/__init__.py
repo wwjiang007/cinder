@@ -58,6 +58,9 @@ class BaseVolumeTestCase(test.TestCase):
         # assertions with the notification code, it's part of an
         # elastic-recheck query so don't remove it or change it.
         self.project_id = '7f265bd4-3a85-465e-a899-5dc4854a86d3'
+        self.user_context = context.RequestContext(user_id=fake.USER_ID,
+                                                   project_id=self.project_id,
+                                                   is_admin=False)
         self.context.project_id = self.project_id
         self.volume_params = {
             'status': 'creating',
@@ -69,6 +72,8 @@ class BaseVolumeTestCase(test.TestCase):
         fake_image.mock_image_service(self)
         self.mock_object(brick_lvm.LVM, '_vg_exists', lambda x: True)
         self.mock_object(os.path, 'exists', lambda x: True)
+        self.mock_object(image_utils, 'check_available_space',
+                         lambda x, y, z: True)
         self.volume.driver.set_initialized()
         self.volume.stats = {'allocated_capacity_gb': 0,
                              'pools': {}}
@@ -140,6 +145,7 @@ class BaseVolumeTestCase(test.TestCase):
             request_spec = {
                 'volume_properties': self.volume_params,
                 'image_id': image_id,
+                'image_size': 1
             }
             self.volume.create_volume(self.context, volume, request_spec)
         finally:

@@ -90,7 +90,7 @@ class Service(BASE, CinderBase):
 
     # replication_status can be: enabled, disabled, not-capable, error,
     # failed-over or not-configured
-    replication_status = Column(String(255), default="not-capable")
+    replication_status = Column(String(36), default="not-capable")
     active_backend_id = Column(String(255))
     frozen = Column(Boolean, nullable=False, default=False)
 
@@ -121,6 +121,10 @@ class Cluster(BASE, CinderBase):
     disabled = Column(Boolean, default=False)
     disabled_reason = Column(String(255))
     race_preventer = Column(Integer, nullable=False, default=0)
+
+    replication_status = Column(String(36), default="not-capable")
+    active_backend_id = Column(String(255))
+    frozen = Column(Boolean, nullable=False, default=False)
 
     # Last heartbeat reported by any of the services of this cluster.  This is
     # not deferred since we always want to load this field.
@@ -414,7 +418,7 @@ class VolumeTypeProjects(BASE, CinderBase):
         name="uniq_volume_type_projects0volume_type_id0project_id0deleted"),
     )
     id = Column(Integer, primary_key=True)
-    volume_type_id = Column(Integer, ForeignKey('volume_types.id'),
+    volume_type_id = Column(String, ForeignKey('volume_types.id'),
                             nullable=False)
     project_id = Column(String(255))
     deleted = Column(Integer, default=0)
@@ -436,7 +440,7 @@ class GroupTypeProjects(BASE, CinderBase):
         name="uniq_group_type_projects0group_type_id0project_id0deleted"),
     )
     id = Column(Integer, primary_key=True)
-    group_type_id = Column(Integer, ForeignKey('group_types.id'),
+    group_type_id = Column(String, ForeignKey('group_types.id'),
                            nullable=False)
     project_id = Column(String(255))
     deleted = Column(Integer, default=0)
@@ -824,6 +828,7 @@ class ImageVolumeCacheEntry(BASE, models.ModelBase):
     __tablename__ = 'image_volume_cache_entries'
     id = Column(Integer, primary_key=True, nullable=False)
     host = Column(String(255), index=True, nullable=False)
+    cluster_name = Column(String(255), nullable=True)
     image_id = Column(String(36), index=True, nullable=False)
     image_updated_at = Column(DateTime, nullable=False)
     volume_id = Column(String(36), nullable=False)
@@ -857,6 +862,9 @@ class Worker(BASE, CinderBase):
     # Service that is currently processing the operation
     service_id = Column(Integer, nullable=True)
 
+    # To prevent claiming and updating races
+    race_preventer = Column(Integer, nullable=False, default=0)
+
     # This is a flag we don't need to store in the DB as it is only used when
     # we are doing the cleanup to let decorators know
     cleaning = False
@@ -866,3 +874,24 @@ class Worker(BASE, CinderBase):
         backref="workers",
         foreign_keys=service_id,
         primaryjoin='Worker.service_id == Service.id')
+
+
+class AttachmentSpecs(BASE, CinderBase):
+    """Represents attachment specs as k/v pairs for a volume_attachment."""
+
+    __tablename__ = 'attachment_specs'
+    id = Column(Integer, primary_key=True)
+    key = Column(String(255))
+    value = Column(String(255))
+    attachment_id = (
+        Column(String(36),
+               ForeignKey('volume_attachment.id'),
+               nullable=False))
+    volume_attachment = relationship(
+        VolumeAttachment,
+        backref="attachment_specs",
+        foreign_keys=attachment_id,
+        primaryjoin='and_('
+        'AttachmentSpecs.attachment_id == VolumeAttachment.id,'
+        'AttachmentSpecs.deleted == False)'
+    )

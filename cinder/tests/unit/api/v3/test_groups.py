@@ -144,6 +144,49 @@ class GroupsAPITestCase(test.TestCase):
         self.assertEqual([fake.VOLUME_TYPE_ID],
                          res_dict['group']['volume_types'])
 
+    @mock.patch('cinder.objects.volume_type.VolumeTypeList.get_all_by_group')
+    @mock.patch('cinder.objects.volume.VolumeList.get_all_by_generic_group')
+    def test_show_group_with_list_volume(self, mock_vol_get_all_by_group,
+                                         mock_vol_type_get_all_by_group):
+        volume_objs = [objects.Volume(context=self.ctxt, id=i)
+                       for i in [fake.VOLUME_ID]]
+        volumes = objects.VolumeList(context=self.ctxt, objects=volume_objs)
+        mock_vol_get_all_by_group.return_value = volumes
+
+        vol_type_objs = [objects.VolumeType(context=self.ctxt, id=i)
+                         for i in [fake.VOLUME_TYPE_ID]]
+        vol_types = objects.VolumeTypeList(context=self.ctxt,
+                                           objects=vol_type_objs)
+        mock_vol_type_get_all_by_group.return_value = vol_types
+
+        # If the microversion >= 3.25 and "list_volume=True", "volumes" should
+        # be contained in the response body.
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s?list_volume=True' %
+                                      (fake.PROJECT_ID, self.group1.id),
+                                      version='3.25')
+        res_dict = self.controller.show(req, self.group1.id)
+        self.assertEqual(1, len(res_dict))
+        self.assertEqual([fake.VOLUME_ID],
+                         res_dict['group']['volumes'])
+
+        # If the microversion >= 3.25 but "list_volume" is missing, "volumes"
+        # should not be contained in the response body.
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s' %
+                                      (fake.PROJECT_ID, self.group1.id),
+                                      version='3.25')
+        res_dict = self.controller.show(req, self.group1.id)
+        self.assertEqual(1, len(res_dict))
+        self.assertIsNone(res_dict['group'].get('volumes', None))
+
+        # If the microversion < 3.25, "volumes" should not be contained in the
+        # response body.
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s?list_volume=True' %
+                                      (fake.PROJECT_ID, self.group1.id),
+                                      version='3.24')
+        res_dict = self.controller.show(req, self.group1.id)
+        self.assertEqual(1, len(res_dict))
+        self.assertIsNone(res_dict['group'].get('volumes', None))
+
     def test_show_group_with_group_NotFound(self):
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s' %
                                       (fake.PROJECT_ID,
@@ -154,11 +197,16 @@ class GroupsAPITestCase(test.TestCase):
 
     def test_list_groups_json(self):
         self.group2.group_type_id = fake.GROUP_TYPE2_ID
-        self.group2.volume_type_ids = [fake.VOLUME_TYPE2_ID]
+        # TODO(geguileo): One `volume_type_ids` gets sorted out make proper
+        # changes here
+        # self.group2.volume_type_ids = [fake.VOLUME_TYPE2_ID]
+
         self.group2.save()
 
         self.group3.group_type_id = fake.GROUP_TYPE3_ID
-        self.group3.volume_type_ids = [fake.VOLUME_TYPE3_ID]
+        # TODO(geguileo): One `volume_type_ids` gets sorted out make proper
+        # changes here
+        # self.group3.volume_type_ids = [fake.VOLUME_TYPE3_ID]
         self.group3.save()
 
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
@@ -185,7 +233,11 @@ class GroupsAPITestCase(test.TestCase):
         if is_detail:
             url = '/v3/%s/groups/detail?limit=1' % fake.PROJECT_ID
         req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
-        res_dict = self.controller.index(req)
+
+        if is_detail:
+            res_dict = self.controller.detail(req)
+        else:
+            res_dict = self.controller.index(req)
 
         self.assertEqual(2, len(res_dict))
         self.assertEqual(1, len(res_dict['groups']))
@@ -197,6 +249,8 @@ class GroupsAPITestCase(test.TestCase):
             (fake.PROJECT_ID, res_dict['groups'][0]['id']))
         self.assertEqual(next_link,
                          res_dict['group_links'][0]['href'])
+        if is_detail:
+            self.assertIn('description', res_dict['groups'][0].keys())
 
     @ddt.data(False, True)
     def test_list_groups_with_offset(self, is_detail):
@@ -221,8 +275,12 @@ class GroupsAPITestCase(test.TestCase):
             url = ('/v3/%s/groups/detail?offset=234523423455454' %
                    fake.PROJECT_ID)
         req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.index,
-                          req)
+        if is_detail:
+            self.assertRaises(webob.exc.HTTPBadRequest, self.controller.detail,
+                              req)
+        else:
+            self.assertRaises(webob.exc.HTTPBadRequest, self.controller.index,
+                              req)
 
     @ddt.data(False, True)
     def test_list_groups_with_limit_and_offset(self, is_detail):
@@ -231,7 +289,11 @@ class GroupsAPITestCase(test.TestCase):
             url = ('/v3/%s/groups/detail?limit=2&offset=1' %
                    fake.PROJECT_ID)
         req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
-        res_dict = self.controller.index(req)
+
+        if is_detail:
+            res_dict = self.controller.detail(req)
+        else:
+            res_dict = self.controller.index(req)
 
         self.assertEqual(2, len(res_dict))
         self.assertEqual(2, len(res_dict['groups']))
@@ -239,6 +301,8 @@ class GroupsAPITestCase(test.TestCase):
                          res_dict['groups'][0]['id'])
         self.assertEqual(self.group1.id,
                          res_dict['groups'][1]['id'])
+        if is_detail:
+            self.assertIn('description', res_dict['groups'][0].keys())
 
     @ddt.data(False, True)
     def test_list_groups_with_filter(self, is_detail):
@@ -252,12 +316,18 @@ class GroupsAPITestCase(test.TestCase):
                                                 self.group3.id)
         req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION,
                                       use_admin_context=True)
-        res_dict = self.controller.index(req)
+
+        if is_detail:
+            res_dict = self.controller.detail(req)
+        else:
+            res_dict = self.controller.index(req)
 
         self.assertEqual(1, len(res_dict))
         self.assertEqual(1, len(res_dict['groups']))
         self.assertEqual(self.group3.id,
                          res_dict['groups'][0]['id'])
+        if is_detail:
+            self.assertIn('description', res_dict['groups'][0].keys())
 
     @ddt.data(False, True)
     def test_list_groups_with_sort(self, is_detail):
@@ -269,7 +339,11 @@ class GroupsAPITestCase(test.TestCase):
         expect_result = [self.group1.id, self.group2.id,
                          self.group3.id]
         expect_result.sort()
-        res_dict = self.controller.index(req)
+
+        if is_detail:
+            res_dict = self.controller.detail(req)
+        else:
+            res_dict = self.controller.index(req)
 
         self.assertEqual(1, len(res_dict))
         self.assertEqual(3, len(res_dict['groups']))
@@ -279,6 +353,8 @@ class GroupsAPITestCase(test.TestCase):
                          res_dict['groups'][1]['id'])
         self.assertEqual(expect_result[2],
                          res_dict['groups'][2]['id'])
+        if is_detail:
+            self.assertIn('description', res_dict['groups'][0].keys())
 
     @mock.patch('cinder.objects.volume_type.VolumeTypeList.get_all_by_group')
     def test_list_groups_detail_json(self, mock_vol_type_get_all_by_group):
@@ -289,72 +365,51 @@ class GroupsAPITestCase(test.TestCase):
                                            objects=vol_type_objs)
         mock_vol_type_get_all_by_group.return_value = vol_types
 
-        self.group1.volume_type_ids = volume_type_ids
-        self.group1.save()
-        self.group2.volume_type_ids = volume_type_ids
-        self.group2.save()
-        self.group3.volume_type_ids = volume_type_ids
-        self.group3.save()
+        # TODO(geguileo): One `volume_type_ids` gets sorted out make proper
+        # changes here
+        # self.group1.volume_type_ids = volume_type_ids
+        # self.group1.save()
+        # self.group2.volume_type_ids = volume_type_ids
+        # self.group2.save()
+        # self.group3.volume_type_ids = volume_type_ids
+        # self.group3.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/detail' %
                                       fake.PROJECT_ID,
                                       version=GROUP_MICRO_VERSION)
         res_dict = self.controller.detail(req)
 
         self.assertEqual(1, len(res_dict))
-        self.assertEqual('az1',
-                         res_dict['groups'][0]['availability_zone'])
-        self.assertEqual('this is a test group',
-                         res_dict['groups'][0]['description'])
-        self.assertEqual('test_group',
-                         res_dict['groups'][0]['name'])
-        self.assertEqual(self.group3.id,
-                         res_dict['groups'][0]['id'])
-        self.assertEqual('creating',
-                         res_dict['groups'][0]['status'])
-        self.assertEqual([fake.VOLUME_TYPE_ID, fake.VOLUME_TYPE2_ID],
-                         res_dict['groups'][0]['volume_types'])
+        index = 0
+        for group in [self.group3, self.group2, self.group1]:
+            self.assertEqual(group.id,
+                             res_dict['groups'][index]['id'])
+            self.assertEqual([fake.VOLUME_TYPE_ID, fake.VOLUME_TYPE2_ID],
+                             res_dict['groups'][index]['volume_types'])
+            self.assertEqual('test_group',
+                             res_dict['groups'][index]['name'])
+            self.assertTrue({'availability_zone', 'description',
+                             'status'}.issubset(
+                                 set(res_dict['groups'][index].keys())))
+            index += 1
 
-        self.assertEqual('az1',
-                         res_dict['groups'][1]['availability_zone'])
-        self.assertEqual('this is a test group',
-                         res_dict['groups'][1]['description'])
-        self.assertEqual('test_group',
-                         res_dict['groups'][1]['name'])
-        self.assertEqual(self.group2.id,
-                         res_dict['groups'][1]['id'])
-        self.assertEqual('creating',
-                         res_dict['groups'][1]['status'])
-        self.assertEqual([fake.VOLUME_TYPE_ID, fake.VOLUME_TYPE2_ID],
-                         res_dict['groups'][1]['volume_types'])
-
-        self.assertEqual('az1',
-                         res_dict['groups'][2]['availability_zone'])
-        self.assertEqual('this is a test group',
-                         res_dict['groups'][2]['description'])
-        self.assertEqual('test_group',
-                         res_dict['groups'][2]['name'])
-        self.assertEqual(self.group1.id,
-                         res_dict['groups'][2]['id'])
-        self.assertEqual('creating',
-                         res_dict['groups'][2]['status'])
-        self.assertEqual([fake.VOLUME_TYPE_ID, fake.VOLUME_TYPE2_ID],
-                         res_dict['groups'][2]['volume_types'])
-
+    @ddt.data(False, True)
     @mock.patch(
         'cinder.api.openstack.wsgi.Controller.validate_name_and_description')
-    def test_create_group_json(self, mock_validate):
+    def test_create_group_json(self, use_group_type_name, mock_validate):
         # Create volume types and group type
         vol_type = 'test'
         vol_type_id = db.volume_type_create(
             self.ctxt,
             {'name': vol_type, 'extra_specs': {}}).get('id')
-        grp_type = 'grp_type'
-        grp_type_id = db.group_type_create(
+        grp_type_name = 'test_grp_type'
+        grp_type = db.group_type_create(
             self.ctxt,
-            {'name': grp_type, 'group_specs': {}}).get('id')
+            {'name': grp_type_name, 'group_specs': {}}).get('id')
+        if use_group_type_name:
+            grp_type = grp_type_name
         body = {"group": {"name": "group1",
                           "volume_types": [vol_type_id],
-                          "group_type": grp_type_id,
+                          "group_type": grp_type,
                           "description":
                           "Group 1", }}
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
@@ -465,14 +520,10 @@ class GroupsAPITestCase(test.TestCase):
         grp_type = {'id': fake.GROUP_TYPE_ID, 'name': 'group_type'}
         fake_type = {'id': fake.VOLUME_TYPE_ID, 'name': 'fake_type'}
         self.mock_object(db, 'volume_types_get_by_name_or_id',
-                         mock.Mock(return_value=[fake_type]))
-        self.mock_object(db, 'group_type_get',
-                         mock.Mock(return_value=grp_type))
-        self.mock_object(self.group_api,
-                         '_cast_create_group',
-                         mock.Mock())
-        self.mock_object(self.group_api, 'update_quota',
-                         mock.Mock())
+                         return_value=[fake_type])
+        self.mock_object(db, 'group_type_get', return_value=grp_type)
+        self.mock_object(self.group_api, '_cast_create_group')
+        self.mock_object(self.group_api, 'update_quota')
         group = self.group_api.create(self.ctxt, name, description,
                                       grp_type['id'], [fake_type['id']])
         self.group_api.update_quota.assert_called_once_with(
@@ -638,7 +689,9 @@ class GroupsAPITestCase(test.TestCase):
         volume_type_id = fake.VOLUME_TYPE_ID
         self.group1.status = fields.GroupStatus.AVAILABLE
         self.group1.host = 'test_host'
-        self.group1.volume_type_ids = [volume_type_id]
+        # TODO(geguileo): One `volume_type_ids` gets sorted out make proper
+        # changes here
+        # self.group1.volume_type_ids = [volume_type_id]
         self.group1.save()
 
         remove_volume = utils.create_volume(

@@ -38,12 +38,13 @@ import string
 
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_utils import strutils
 from oslo_utils import units
 import six
 
 from cinder import context
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder import interface
 from cinder.objects import fields
 from cinder import utils
@@ -155,18 +156,18 @@ class XtremIOClient(object):
             error = response.json()
             err_msg = error.get('message')
             if err_msg.endswith(OBJ_NOT_FOUND_ERR):
-                LOG.warning(_LW("object %(key)s of "
-                                "type %(typ)s not found, %(err_msg)s"),
+                LOG.warning("object %(key)s of "
+                            "type %(typ)s not found, %(err_msg)s",
                             {'key': key, 'typ': object_type,
                              'err_msg': err_msg, })
                 raise exception.NotFound()
             elif err_msg == VOL_NOT_UNIQUE_ERR:
-                LOG.error(_LE("can't create 2 volumes with the same name, %s"),
+                LOG.error("can't create 2 volumes with the same name, %s",
                           err_msg)
-                msg = (_('Volume by this name already exists'))
+                msg = _('Volume by this name already exists')
                 raise exception.VolumeBackendAPIException(data=msg)
             elif err_msg == VOL_OBJ_NOT_FOUND_ERR:
-                LOG.error(_LE("Can't find volume to map %(key)s, %(msg)s"),
+                LOG.error("Can't find volume to map %(key)s, %(msg)s",
                           {'key': key, 'msg': err_msg, })
                 raise exception.VolumeNotFound(volume_id=key)
             elif ALREADY_MAPPED_ERR in err_msg:
@@ -337,8 +338,7 @@ class XtremIOClient4(XtremIOClient):
             self.req(typ, 'PUT', data, idx=int(idx))
         except exception.VolumeBackendAPIException:
             # reverting
-            msg = _LE('Failed to rename the created snapshot, reverting.')
-            LOG.error(msg)
+            LOG.error('Failed to rename the created snapshot, reverting.')
             self.req(typ, 'DELETE', idx=int(idx))
             raise
 
@@ -403,20 +403,30 @@ class XtremIOVolumeDriver(san.SanDriver):
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
         else:
-            LOG.info(_LI('XtremIO SW version %s'), version_text)
+            LOG.info('XtremIO SW version %s', version_text)
         if ver[0] >= 4:
             self.client = XtremIOClient4(self.configuration, self.cluster_id)
 
     def create_volume(self, volume):
-        "Creates a volume"
+        """Creates a volume."""
         data = {'vol-name': volume['id'],
                 'vol-size': str(volume['size']) + 'g'
                 }
         self.client.req('volumes', 'POST', data)
 
-        if volume.get('consistencygroup_id'):
+        # Add the volume to a cg in case volume requested a cgid or group_id.
+        # If both cg_id and group_id exists in a volume. group_id will take
+        # place.
+
+        consistency_group = volume.get('consistencygroup_id')
+
+        # if cg_id and group_id are both exists, we gives priority to group_id.
+        if volume.get('group_id'):
+            consistency_group = volume.get('group_id')
+
+        if consistency_group:
             self.client.add_vol_to_cg(volume['id'],
-                                      volume['consistencygroup_id'])
+                                      consistency_group)
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Creates a volume from a snapshot."""
@@ -450,6 +460,17 @@ class XtremIOVolumeDriver(san.SanDriver):
         except exception.XtremIOSnapshotsLimitExceeded as e:
             raise exception.CinderException(e.message)
 
+        # extend the snapped volume if requested size is larger then original
+        if volume['size'] > src_vref['size']:
+            try:
+                self.extend_volume(volume, volume['size'])
+            except Exception:
+                LOG.error('failes to extend volume %s, '
+                          'reverting clone operation', volume['id'])
+                # remove the volume in case resize failed
+                self.delete_volume(volume)
+                raise
+
         if volume.get('consistencygroup_id') and self.client is XtremIOClient4:
             self.client.add_vol_to_cg(volume['id'],
                                       volume['consistencygroup_id'])
@@ -459,7 +480,7 @@ class XtremIOVolumeDriver(san.SanDriver):
         try:
             self.client.req('volumes', 'DELETE', name=volume.name_id)
         except exception.NotFound:
-            LOG.info(_LI("volume %s doesn't exist"), volume.name_id)
+            LOG.info("volume %s doesn't exist", volume.name_id)
 
     def create_snapshot(self, snapshot):
         """Creates a snapshot."""
@@ -470,7 +491,7 @@ class XtremIOVolumeDriver(san.SanDriver):
         try:
             self.client.req('volumes', 'DELETE', name=snapshot.id)
         except exception.NotFound:
-            LOG.info(_LI("snapshot %s doesn't exist"), snapshot.id)
+            LOG.info("snapshot %s doesn't exist", snapshot.id)
 
     def update_migrated_volume(self, ctxt, volume, new_volume,
                                original_volume_status):
@@ -483,8 +504,8 @@ class XtremIOVolumeDriver(san.SanDriver):
             data = {'name': original_name}
             self.client.req('volumes', 'PUT', data, name=current_name)
         except exception.VolumeBackendAPIException:
-            LOG.error(_LE('Unable to rename the logical volume '
-                          'for volume: %s'), original_name)
+            LOG.error('Unable to rename the logical volume '
+                      'for volume: %s', original_name)
             # If the rename fails, _name_id should be set to the new
             # volume id and provider_location should be set to the
             # one from the new volume as well.
@@ -513,7 +534,7 @@ class XtremIOVolumeDriver(san.SanDriver):
                        'reserved_percentage':
                        self.configuration.reserved_percentage,
                        'QoS_support': False,
-                       'multiattach': True,
+                       'multiattach': False,
                        }
         self._stats.update(self.client.get_extra_capabilities())
 
@@ -581,8 +602,8 @@ class XtremIOVolumeDriver(san.SanDriver):
             self.client.req('volumes', 'PUT', name=volume['id'],
                             data={'vol-name': volume['name'] + '-unmanged'})
         except exception.NotFound:
-            LOG.info(_LI("%(typ)s with the name %(name)s wasn't found, "
-                         "can't unmanage") %
+            LOG.info("%(typ)s with the name %(name)s wasn't found, "
+                     "can't unmanage",
                      {'typ': 'Snapshot' if is_snapshot else 'Volume',
                       'name': volume['id']})
             raise exception.VolumeNotFound(volume_id=volume['id'])
@@ -622,7 +643,7 @@ class XtremIOVolumeDriver(san.SanDriver):
             try:
                 self.client.req('lun-maps', 'DELETE', name=lm_name)
             except exception.NotFound:
-                LOG.warning(_LW("terminate_connection: lun map not found"))
+                LOG.warning("terminate_connection: lun map not found")
 
     def _get_password(self):
         return ''.join(RANDOM.choice
@@ -637,9 +658,9 @@ class XtremIOVolumeDriver(san.SanDriver):
             res = self.client.req('lun-maps', 'POST', data)
 
             lunmap = self._obj_from_result(res)
-            LOG.info(_LI('Created lun-map:\n%s'), lunmap)
+            LOG.info('Created lun-map:\n%s', lunmap)
         except exception.XtremIOAlreadyMappedError:
-            LOG.info(_LI('Volume already mapped, retrieving %(ig)s, %(vol)s'),
+            LOG.info('Volume already mapped, retrieving %(ig)s, %(vol)s',
                      {'ig': ig, 'vol': volume['id']})
             lunmap = self.client.find_lunmap(ig, volume['id'])
         return lunmap
@@ -679,15 +700,19 @@ class XtremIOVolumeDriver(san.SanDriver):
         self.client.req('consistency-groups', 'DELETE', name=group['id'],
                         ver='v2')
 
-        volumes = self.db.volume_get_all_by_group(context, group['id'])
+        volumes_model_update = []
 
         for volume in volumes:
             self.delete_volume(volume)
-            volume.status = 'deleted'
+
+            update_item = {'id': volume['id'],
+                           'status': 'deleted'}
+
+            volumes_model_update.append(update_item)
 
         model_update = {'status': group['status']}
 
-        return model_update, volumes
+        return model_update, volumes_model_update
 
     def _get_snapset_ancestors(self, snapset_name):
         snapset = self.client.req('snapshot-sets',
@@ -768,13 +793,23 @@ class XtremIOVolumeDriver(san.SanDriver):
         return None, None, None
 
     def _get_cgsnap_name(self, cgsnapshot):
-        return '%(cg)s%(snap)s' % {'cg': cgsnapshot['consistencygroup_id']
+
+        group_id = cgsnapshot.get('group_id')
+        if group_id is None:
+            group_id = cgsnapshot.get('consistencygroup_id')
+
+        return '%(cg)s%(snap)s' % {'cg': group_id
                                    .replace('-', ''),
                                    'snap': cgsnapshot['id'].replace('-', '')}
 
     def create_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Creates a cgsnapshot."""
-        data = {'consistency-group-id': cgsnapshot['consistencygroup_id'],
+
+        group_id = cgsnapshot.get('group_id')
+        if group_id is None:
+            group_id = cgsnapshot.get('consistencygroup_id')
+
+        data = {'consistency-group-id': group_id,
                 'snapshot-set-name': self._get_cgsnap_name(cgsnapshot)}
         self.client.req('snapshots', 'POST', data, ver='v2')
 
@@ -784,8 +819,95 @@ class XtremIOVolumeDriver(san.SanDriver):
         """Deletes a cgsnapshot."""
         self.client.req('snapshot-sets', 'DELETE',
                         name=self._get_cgsnap_name(cgsnapshot), ver='v2')
-
         return None, None
+
+    def create_group(self, context, group):
+        """Creates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :returns: model_update
+        """
+
+        # the driver treats a group as a CG internally.
+        # We proxy the calls to the CG api.
+        return self.create_consistencygroup(context, group)
+
+    def delete_group(self, context, group, volumes):
+        """Deletes a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param volumes: a list of volume objects in the group.
+        :returns: model_update, volumes_model_update
+        """
+
+        # the driver treats a group as a CG internally.
+        # We proxy the calls to the CG api.
+        return self.delete_consistencygroup(context, group, volumes)
+
+    def update_group(self, context, group,
+                     add_volumes=None, remove_volumes=None):
+        """Updates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param add_volumes: a list of volume objects to be added.
+        :param remove_volumes: a list of volume objects to be removed.
+        :returns: model_update, add_volumes_update, remove_volumes_update
+        """
+
+        # the driver treats a group as a CG internally.
+        # We proxy the calls to the CG api.
+        return self.update_consistencygroup(context, group, add_volumes,
+                                            remove_volumes)
+
+    def create_group_from_src(self, context, group, volumes,
+                              group_snapshot=None, snapshots=None,
+                              source_group=None, source_vols=None):
+        """Creates a group from source.
+
+        :param context: the context of the caller.
+        :param group: the Group object to be created.
+        :param volumes: a list of Volume objects in the group.
+        :param group_snapshot: the GroupSnapshot object as source.
+        :param snapshots: a list of snapshot objects in group_snapshot.
+        :param source_group: the Group object as source.
+        :param source_vols: a list of volume objects in the source_group.
+        :returns: model_update, volumes_model_update
+        """
+
+        # the driver treats a group as a CG internally.
+        # We proxy the calls to the CG api.
+        return self.create_consistencygroup_from_src(context, group, volumes,
+                                                     group_snapshot, snapshots,
+                                                     source_group, source_vols)
+
+    def create_group_snapshot(self, context, group_snapshot, snapshots):
+        """Creates a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be created.
+        :param snapshots: a list of Snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+
+        # the driver treats a group as a CG internally.
+        # We proxy the calls to the CG api.
+        return self.create_cgsnapshot(context, group_snapshot, snapshots)
+
+    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+        """Deletes a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be deleted.
+        :param snapshots: a list of snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+
+        # the driver treats a group as a CG internally.
+        # We proxy the calls to the CG api.
+        return self.delete_cgsnapshot(context, group_snapshot, snapshots)
 
     def _get_ig(self, name):
         try:
@@ -875,8 +997,7 @@ class XtremIOISCSIDriver(XtremIOVolumeDriver, driver.ISCSIDriver):
                                                         discovery_chap)
         # if CHAP was enabled after the initiator was created
         if login_chap and not login_passwd:
-            LOG.info(_LI('initiator has no password while using chap,'
-                         'adding it'))
+            LOG.info('Initiator has no password while using chap, adding it.')
             data = {}
             (login_passwd,
              d_passwd) = self._add_auth(data, login_chap, discovery_chap and
@@ -898,7 +1019,8 @@ class XtremIOISCSIDriver(XtremIOVolumeDriver, driver.ISCSIDriver):
             properties['discovery_auth_method'] = 'CHAP'
             properties['discovery_auth_username'] = 'chap_user'
             properties['discovery_auth_password'] = discovery_passwd
-        LOG.debug('init conn params:\n%s', properties)
+        LOG.debug('init conn params:\n%s',
+                  strutils.mask_dict_password(properties))
         return {
             'driver_volume_type': 'iscsi',
             'data': properties
@@ -987,7 +1109,7 @@ class XtremIOFCDriver(XtremIOVolumeDriver,
         seq = range(len(uniq_luns) + 1)
         return min(set(seq) - uniq_luns)
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     def initialize_connection(self, volume, connector):
         wwpns = self._get_initiator_names(connector)
         ig_name = self._get_ig_name(connector)
@@ -1028,7 +1150,7 @@ class XtremIOFCDriver(XtremIOVolumeDriver,
                     'target_wwn': self.get_targets(),
                     'initiator_target_map': i_t_map}}
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector, **kwargs):
         (super(XtremIOFCDriver, self)
          .terminate_connection(volume, connector, **kwargs))

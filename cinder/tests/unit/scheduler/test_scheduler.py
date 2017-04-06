@@ -17,20 +17,19 @@
 Tests For Scheduler
 """
 
+import collections
+from datetime import datetime
+
 import mock
 from oslo_config import cfg
 
 from cinder import context
-from cinder import db
 from cinder import exception
 from cinder.message import defined_messages
 from cinder import objects
-from cinder.objects import fields
 from cinder.scheduler import driver
-from cinder.scheduler import filter_scheduler
 from cinder.scheduler import manager
 from cinder import test
-from cinder.tests.unit.consistencygroup import fake_consistencygroup
 from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import fake_volume
 from cinder.tests.unit import utils as tests_utils
@@ -75,7 +74,8 @@ class SchedulerManagerTestCase(test.TestCase):
     @mock.patch('cinder.objects.service.Service.get_minimum_rpc_version')
     @mock.patch('cinder.objects.service.Service.get_minimum_obj_version')
     @mock.patch('cinder.rpc.LAST_RPC_VERSIONS', {'cinder-volume': '1.3'})
-    @mock.patch('cinder.rpc.LAST_OBJ_VERSIONS', {'cinder-volume': '1.4'})
+    @mock.patch('cinder.rpc.LAST_OBJ_VERSIONS', {'cinder-volume': '1.4',
+                                                 'cinder-scheduler': '1.4'})
     def test_reset(self, get_min_obj, get_min_rpc):
         mgr = self.manager_cls()
 
@@ -120,6 +120,40 @@ class SchedulerManagerTestCase(test.TestCase):
         _mock_update_cap.assert_called_once_with(service, host, capabilities,
                                                  None, None)
 
+    @mock.patch('cinder.scheduler.driver.Scheduler.'
+                'notify_service_capabilities')
+    def test_notify_service_capabilities_no_timestamp(self, _mock_notify_cap):
+        """Test old interface that receives host."""
+        service = 'volume'
+        host = 'fake_host'
+        capabilities = {'fake_capability': 'fake_value'}
+
+        self.manager.notify_service_capabilities(self.context,
+                                                 service_name=service,
+                                                 host=host,
+                                                 capabilities=capabilities)
+        _mock_notify_cap.assert_called_once_with(service, host, capabilities,
+                                                 None)
+
+    @mock.patch('cinder.scheduler.driver.Scheduler.'
+                'notify_service_capabilities')
+    def test_notify_service_capabilities_timestamp(self, _mock_notify_cap):
+        """Test new interface that receives backend and timestamp."""
+        service = 'volume'
+        backend = 'fake_cluster'
+        capabilities = {'fake_capability': 'fake_value'}
+
+        timestamp = '1970-01-01T00:00:00.000000'
+
+        self.manager.notify_service_capabilities(self.context,
+                                                 service_name=service,
+                                                 backend=backend,
+                                                 capabilities=capabilities,
+                                                 timestamp=timestamp)
+        _mock_notify_cap.assert_called_once_with(service, backend,
+                                                 capabilities,
+                                                 datetime(1970, 1, 1))
+
     @mock.patch('cinder.scheduler.driver.Scheduler.schedule_create_volume')
     @mock.patch('cinder.message.api.API.create')
     @mock.patch('cinder.db.volume_update')
@@ -146,7 +180,7 @@ class SchedulerManagerTestCase(test.TestCase):
                                                    request_spec_obj, {})
 
         _mock_message_create.assert_called_once_with(
-            self.context, defined_messages.UNABLE_TO_ALLOCATE,
+            self.context, defined_messages.EventIds.UNABLE_TO_ALLOCATE,
             self.context.project_id, resource_type='VOLUME',
             resource_uuid=volume.id)
 
@@ -303,49 +337,104 @@ class SchedulerManagerTestCase(test.TestCase):
                                                  {'status': 'in-use'})
         self.manager.driver.find_retype_host = orig_retype
 
-    def test_create_consistencygroup_exceptions(self):
-        with mock.patch.object(filter_scheduler.FilterScheduler,
-                               'schedule_create_consistencygroup') as mock_cg:
-            original_driver = self.manager.driver
-            consistencygroup_obj = \
-                fake_consistencygroup.fake_consistencyobject_obj(self.context)
-            self.manager.driver = filter_scheduler.FilterScheduler
-            LOG = self.mock_object(manager, 'LOG')
-            self.mock_object(db, 'consistencygroup_update')
-
-            ex = exception.CinderException('test')
-            mock_cg.side_effect = ex
-            group_id = fake.CONSISTENCY_GROUP_ID
-            self.assertRaises(exception.CinderException,
-                              self.manager.create_consistencygroup,
-                              self.context,
-                              consistencygroup_obj)
-            self.assertGreater(LOG.exception.call_count, 0)
-            db.consistencygroup_update.assert_called_once_with(
-                self.context, group_id, {'status': (
-                    fields.ConsistencyGroupStatus.ERROR)})
-
-            mock_cg.reset_mock()
-            LOG.exception.reset_mock()
-            db.consistencygroup_update.reset_mock()
-
-            mock_cg.side_effect = exception.NoValidBackend(
-                reason="No weighed hosts available")
-            self.manager.create_consistencygroup(
-                self.context, consistencygroup_obj)
-            self.assertGreater(LOG.error.call_count, 0)
-            db.consistencygroup_update.assert_called_once_with(
-                self.context, group_id, {'status': (
-                    fields.ConsistencyGroupStatus.ERROR)})
-
-            self.manager.driver = original_driver
-
     def test_do_cleanup(self):
         vol = tests_utils.create_volume(self.context, status='creating')
         self.manager._do_cleanup(self.context, vol)
 
         vol.refresh()
         self.assertEqual('error', vol.status)
+
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI'
+                '.determine_rpc_version_cap', mock.Mock(return_value='2.0'))
+    def test_upgrading_cloud(self):
+        self.assertTrue(self.manager.upgrading_cloud)
+
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI'
+                '.determine_rpc_version_cap')
+    def test_upgrading_cloud_not(self, cap_mock):
+        cap_mock.return_value = self.manager.RPC_API_VERSION
+        self.assertFalse(self.manager.upgrading_cloud)
+
+    def test_cleanup_destination_scheduler(self):
+        service = objects.Service(id=1, host='hostname',
+                                  binary='cinder-scheduler')
+        result = self.manager._cleanup_destination(None, service)
+        expected = self.manager.sch_api.do_cleanup, None, service.host
+        self.assertEqual(expected, result)
+
+    def test_cleanup_destination_volume(self):
+        service = objects.Service(id=1, host='hostname', cluster_name=None,
+                                  binary='cinder-volume')
+        result = self.manager._cleanup_destination(None, service)
+        expected = self.manager.volume_api.do_cleanup, service, service.host
+        self.assertEqual(expected, result)
+
+    def test_cleanup_destination_volume_cluster_cache_hit(self):
+        cluster = objects.Cluster(id=1, name='mycluster',
+                                  binary='cinder-volume')
+        service = objects.Service(id=2, host='hostname',
+                                  cluster_name=cluster.name,
+                                  binary='cinder-volume')
+        cluster_cache = {'cinder-volume': {'mycluster': cluster}}
+        result = self.manager._cleanup_destination(cluster_cache, service)
+        expected = self.manager.volume_api.do_cleanup, cluster, cluster.name
+        self.assertEqual(expected, result)
+
+    @mock.patch('cinder.objects.Cluster.get_by_id')
+    def test_cleanup_destination_volume_cluster_cache_miss(self, get_mock):
+        cluster = objects.Cluster(id=1, name='mycluster',
+                                  binary='cinder-volume')
+        service = objects.Service(self.context,
+                                  id=2, host='hostname',
+                                  cluster_name=cluster.name,
+                                  binary='cinder-volume')
+        get_mock.return_value = cluster
+        cluster_cache = collections.defaultdict(dict)
+        result = self.manager._cleanup_destination(cluster_cache, service)
+        expected = self.manager.volume_api.do_cleanup, cluster, cluster.name
+        self.assertEqual(expected, result)
+
+    @mock.patch('cinder.scheduler.manager.SchedulerManager.upgrading_cloud')
+    def test_work_cleanup_upgrading(self, upgrading_mock):
+        cleanup_request = objects.CleanupRequest(host='myhost')
+        upgrading_mock.return_value = True
+        self.assertRaises(exception.UnavailableDuringUpgrade,
+                          self.manager.work_cleanup,
+                          self.context,
+                          cleanup_request)
+
+    @mock.patch('cinder.objects.Cluster.is_up', True)
+    @mock.patch('cinder.objects.Service.is_up', False)
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.do_cleanup')
+    @mock.patch('cinder.volume.rpcapi.VolumeAPI.do_cleanup')
+    @mock.patch('cinder.objects.ServiceList.get_all')
+    def test_work_cleanup(self, get_mock, vol_clean_mock, sch_clean_mock):
+        args = dict(service_id=1, cluster_name='cluster_name', host='host',
+                    binary='cinder-volume', is_up=False, disabled=True,
+                    resource_id=fake.VOLUME_ID, resource_type='Volume')
+
+        cluster = objects.Cluster(id=1, name=args['cluster_name'],
+                                  binary='cinder-volume')
+        services = [objects.Service(self.context,
+                                    id=2, host='hostname',
+                                    cluster_name=cluster.name,
+                                    binary='cinder-volume',
+                                    cluster=cluster),
+                    objects.Service(self.context,
+                                    id=3, host='hostname',
+                                    cluster_name=None,
+                                    binary='cinder-scheduler'),
+                    objects.Service(self.context,
+                                    id=4, host='hostname',
+                                    cluster_name=None,
+                                    binary='cinder-volume')]
+        get_mock.return_value = services
+
+        cleanup_request = objects.CleanupRequest(self.context, **args)
+        res = self.manager.work_cleanup(self.context, cleanup_request)
+        self.assertEqual((services[:2], services[2:]), res)
+        self.assertEqual(1, vol_clean_mock.call_count)
+        self.assertEqual(1, sch_clean_mock.call_count)
 
 
 class SchedulerTestCase(test.TestCase):

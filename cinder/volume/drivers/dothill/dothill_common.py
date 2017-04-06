@@ -1,5 +1,6 @@
 #    Copyright 2014 Objectif Libre
-#    Copyright 2015 DotHill Systems
+#    Copyright 2015 Dot Hill Systems Corp.
+#    Copyright 2016 Seagate Technology or one of its affiliates
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -25,7 +26,7 @@ from oslo_config import cfg
 from oslo_log import log as logging
 
 from cinder import exception
-from cinder.i18n import _, _LE
+from cinder.i18n import _
 from cinder.objects import fields
 from cinder.volume.drivers.dothill import dothill_client as dothill
 
@@ -62,7 +63,7 @@ CONF.register_opts(iscsi_opts)
 
 
 class DotHillCommon(object):
-    VERSION = "1.0"
+    VERSION = "1.6"
 
     stats = {}
 
@@ -93,7 +94,6 @@ class DotHillCommon(object):
         self.client_logout()
 
     def client_login(self):
-        LOG.debug("Connecting to %s Array.", self.vendor_name)
         try:
             self.client.login()
         except exception.DotHillConnectionError as ex:
@@ -124,7 +124,6 @@ class DotHillCommon(object):
 
     def client_logout(self):
         self.client.logout()
-        LOG.debug("Disconnected from %s Array.", self.vendor_name)
 
     def _get_vol_name(self, volume_id):
         volume_name = self._encode_name(volume_id)
@@ -164,7 +163,7 @@ class DotHillCommon(object):
         self.client_login()
         # Use base64 to encode the volume name (UUID is too long for DotHill)
         volume_name = self._get_vol_name(volume['id'])
-        volume_size = "%dGB" % volume['size']
+        volume_size = "%dGiB" % volume['size']
         LOG.debug("Create Volume having display_name: %(display_name)s "
                   "name: %(name)s id: %(id)s size: %(size)s",
                   {'display_name': volume['display_name'],
@@ -177,7 +176,7 @@ class DotHillCommon(object):
                                       self.backend_name,
                                       self.backend_type)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Creation of volume %s failed."), volume['id'])
+            LOG.exception("Creation of volume %s failed.", volume['id'])
             raise exception.Invalid(ex)
 
         finally:
@@ -202,7 +201,7 @@ class DotHillCommon(object):
         """
         if (volume['status'] != "available" or
                 volume['attach_status'] == fields.VolumeAttachStatus.ATTACHED):
-            LOG.error(_LE("Volume must be detached for clone operation."))
+            LOG.error("Volume must be detached for clone operation.")
             raise exception.VolumeAttached(volume_id=volume['id'])
 
     def create_cloned_volume(self, volume, src_vref):
@@ -224,11 +223,14 @@ class DotHillCommon(object):
             self.client.copy_volume(orig_name, dest_name,
                                     self.backend_name, self.backend_type)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Cloning of volume %s failed."),
+            LOG.exception("Cloning of volume %s failed.",
                           src_vref['id'])
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
+
+        if volume['size'] > src_vref['size']:
+            self.extend_volume(volume, volume['size'])
 
     def create_volume_from_snapshot(self, volume, snapshot):
         self.get_volume_stats(True)
@@ -244,11 +246,14 @@ class DotHillCommon(object):
             self.client.copy_volume(orig_name, dest_name,
                                     self.backend_name, self.backend_type)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Create volume failed from snapshot: %s"),
+            LOG.exception("Create volume failed from snapshot: %s",
                           snapshot['id'])
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
+
+        if volume['size'] > snapshot['volume_size']:
+            self.extend_volume(volume, volume['size'])
 
     def delete_volume(self, volume):
         LOG.debug("Deleting Volume: %s", volume['id'])
@@ -264,7 +269,7 @@ class DotHillCommon(object):
             # if the volume wasn't found, ignore the error
             if 'The volume was not found on this system.' in ex.args:
                 return
-            LOG.exception(_LE("Deletion of volume %s failed."), volume['id'])
+            LOG.exception("Deletion of volume %s failed.", volume['id'])
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
@@ -326,7 +331,7 @@ class DotHillCommon(object):
                                           connector_element)
             return data
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error mapping volume: %s"), volume_name)
+            LOG.exception("Error mapping volume: %s", volume_name)
             raise exception.Invalid(ex)
 
     def unmap_volume(self, volume, connector, connector_element):
@@ -342,7 +347,7 @@ class DotHillCommon(object):
                                      connector,
                                      connector_element)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error unmapping volume: %s"), volume_name)
+            LOG.exception("Error unmapping volume: %s", volume_name)
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
@@ -351,21 +356,21 @@ class DotHillCommon(object):
         try:
             return self.client.get_active_fc_target_ports()
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error getting active FC target ports."))
+            LOG.exception("Error getting active FC target ports.")
             raise exception.Invalid(ex)
 
     def get_active_iscsi_target_iqns(self):
         try:
             return self.client.get_active_iscsi_target_iqns()
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error getting active ISCSI target iqns."))
+            LOG.exception("Error getting active ISCSI target iqns.")
             raise exception.Invalid(ex)
 
     def get_active_iscsi_target_portals(self):
         try:
             return self.client.get_active_iscsi_target_portals()
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error getting active ISCSI target portals."))
+            LOG.exception("Error getting active ISCSI target portals.")
             raise exception.Invalid(ex)
 
     def create_snapshot(self, snapshot):
@@ -382,7 +387,7 @@ class DotHillCommon(object):
         try:
             self.client.create_snapshot(vol_name, snap_name)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Creation of snapshot failed for volume: %s"),
+            LOG.exception("Creation of snapshot failed for volume: %s",
                           snapshot['volume_id'])
             raise exception.Invalid(ex)
         finally:
@@ -399,7 +404,7 @@ class DotHillCommon(object):
             # if the volume wasn't found, ignore the error
             if 'The volume was not found on this system.' in ex.args:
                 return
-            LOG.exception(_LE("Deleting snapshot %s failed"), snapshot['id'])
+            LOG.exception("Deleting snapshot %s failed", snapshot['id'])
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
@@ -409,19 +414,21 @@ class DotHillCommon(object):
             volume_name = self._get_vol_name(volume['name_id'])
         else:
             volume_name = self._get_vol_name(volume['id'])
-        old_size = volume['size']
+        old_size = self.client.get_volume_size(volume_name)
         growth_size = int(new_size) - old_size
         LOG.debug("Extending Volume %(volume_name)s from %(old_size)s to "
-                  "%(new_size)s, by %(growth_size)s GB.",
+                  "%(new_size)s, by %(growth_size)s GiB.",
                   {'volume_name': volume_name,
                    'old_size': old_size,
                    'new_size': new_size,
                    'growth_size': growth_size, })
+        if growth_size < 1:
+            return
         self.client_login()
         try:
-            self.client.extend_volume(volume_name, "%dGB" % growth_size)
+            self.client.extend_volume(volume_name, "%dGiB" % growth_size)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Extension of volume %s failed."), volume['id'])
+            LOG.exception("Extension of volume %s failed.", volume['id'])
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
@@ -430,14 +437,14 @@ class DotHillCommon(object):
         try:
             return self.client.get_chap_record(initiator_name)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error getting chap record."))
+            LOG.exception("Error getting chap record.")
             raise exception.Invalid(ex)
 
     def create_chap_record(self, initiator_name, chap_secret):
         try:
             self.client.create_chap_record(initiator_name, chap_secret)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error creating chap record."))
+            LOG.exception("Error creating chap record.")
             raise exception.Invalid(ex)
 
     def migrate_volume(self, volume, host):
@@ -482,7 +489,7 @@ class DotHillCommon(object):
             self.client.modify_volume_name(dest_name, source_name)
             return (True, None)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error migrating volume: %s"), source_name)
+            LOG.exception("Error migrating volume: %s", source_name)
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
@@ -505,7 +512,7 @@ class DotHillCommon(object):
             self.client.modify_volume_name(target_vol_name,
                                            modify_target_vol_name)
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error manage existing volume."))
+            LOG.exception("Error manage existing volume.")
             raise exception.Invalid(ex)
         finally:
             self.client_logout()
@@ -523,7 +530,7 @@ class DotHillCommon(object):
             size = self.client.get_volume_size(target_vol_name)
             return size
         except exception.DotHillRequestError as ex:
-            LOG.exception(_LE("Error manage existing get volume size."))
+            LOG.exception("Error manage existing get volume size.")
             raise exception.Invalid(ex)
         finally:
             self.client_logout()

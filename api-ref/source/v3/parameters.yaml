@@ -7,9 +7,15 @@ x-openstack-request-id:
   type: string
 
 # variables in path
-admin_tenant_id:
+admin_project_id:
   description: |
-    The UUID of the administrative tenant.
+    The UUID of the administrative project.
+  in: path
+  required: false
+  type: string
+all_tenants:
+  description: |
+    Shows details for all projects.
   in: path
   required: false
   type: string
@@ -30,6 +36,12 @@ consistencygroup_id_2:
     The ID of the consistency group.
   in: path
   required: false
+  type: string
+encryption_id:
+  description: |
+    The ID of the encryption type.
+  in: path
+  required: true
   type: string
 force_3:
   description: |
@@ -63,6 +75,26 @@ hostname:
   in: path
   required: false
   type: string
+key_1:
+  description: |
+    The metadata key name for the metadata that you
+    want to remove.
+  in: path
+  required: true
+  type: string
+key_2:
+  description: |
+    The metadata key name for the metadata that you
+    want to see.
+  in: path
+  required: true
+  type: string
+project_id_path:
+  description: |
+    The UUID of the project in a multi-tenancy cloud.
+  in: path
+  required: false
+  type: string
 qos_id:
   description: |
     The ID of the QoS specification.
@@ -72,12 +104,6 @@ qos_id:
 snapshot_id_1:
   description: |
     The UUID of the snapshot.
-  in: path
-  required: false
-  type: string
-tenant_id:
-  description: |
-    The UUID of the tenant in a multi-tenancy cloud.
   in: path
   required: false
   type: string
@@ -94,11 +120,11 @@ user_id_1:
   in: path
   required: false
   type: string
-volume_id_1:
+volume_id_path:
   description: |
     The UUID of the volume.
   in: path
-  required: false
+  required: true
   type: string
 volume_type:
   description: |
@@ -122,7 +148,7 @@ action:
   type: string
 all-tenants:
   description: |
-    Shows details for all tenants. Admin only..
+    Shows details for all project. Admin only..
   in: query
   required: false
   type: string
@@ -165,6 +191,12 @@ marker:
   in: query
   required: false
   type: string
+message_id:
+  description: |
+    The UUID of the message.
+  in: query
+  required: true
+  type: string
 metadata_query:
   description: |
     Filters results by a metadata key and value pair.
@@ -185,6 +217,13 @@ name_volume:
   in: query
   required: false
   type: string
+offset:
+  description: |
+    Used in conjunction with ``limit`` to return a slice of items. ``offset``
+    is where to start in the list.
+  in: query
+  required: false
+  type: integer
 sort:
   description: |
     Comma-separated list of sort keys and optional
@@ -328,13 +367,13 @@ bootable:
   in: body
   required: true
   type: boolean
-bootable_1:
+bootable_response:
   description: |
     Enables or disables the bootable attribute. You
     can boot an instance from a bootable volume.
   in: body
-  required: false
-  type: boolean
+  required: true
+  type: string
 capabilities:
   description: |
     The capabilities for the back end.  The value is
@@ -346,6 +385,13 @@ capabilities:
 cgsnapshot_id:
   description: |
     The UUID of the consistency group snapshot.
+  in: body
+  required: false
+  type: string
+cipher:
+  description: |
+    The encryption algorithm or mode. For example, aes-xts-plain64. The default
+    value is None.
   in: body
   required: false
   type: string
@@ -392,10 +438,17 @@ container:
   in: body
   required: true
   type: string
+control_location:
+  description: |
+    Notional service where encryption is performed. Valid values are
+    "front-end" or "back-end". The default value is "front-end".
+  in: body
+  required: false
+  type: string
 cores:
   description: |
     The number of instance cores that are allowed for
-    each tenant.
+    each project.
   in: body
   required: true
   type: integer
@@ -430,6 +483,33 @@ delete-volumes:
   in: body
   required: false
   type: boolean
+deleted:
+  description: |
+    The resource is deleted or not.
+  in: body
+  required: true
+  type: boolean
+deleted_at:
+  description: |
+    The date and time when the resource was deleted.
+
+    The date and time stamp format is `ISO 8601
+    <https://en.wikipedia.org/wiki/ISO_8601>`_:
+
+    ::
+
+       CCYY-MM-DDThh:mm:ss±hh:mm
+
+    For example, ``2015-08-27T09:49:58-05:00``.
+
+    The ``±hh:mm`` value, if included, is the time zone as an offset
+    from UTC. In the previous example, the offset value is ``-05:00``.
+
+    If the ``deleted_at`` date and time stamp is not set, its value is
+    ``null``.
+  in: body
+  required: true
+  type: string
 description:
   description: |
     The backup description or null.
@@ -521,6 +601,12 @@ description_9:
   in: body
   required: true
   type: string
+display_name:
+  description: |
+    The name of volume backend capabilities.
+  in: body
+  required: true
+  type: string
 driver_version:
   description: |
     The driver version.
@@ -533,6 +619,25 @@ encrypted:
   in: body
   required: true
   type: boolean
+encryption:
+  description: |
+    The encryption information.
+  in: body
+  required: true
+  type: object
+encryption_id_body:
+  description: |
+    The UUID of the encryption.
+  in: body
+  required: true
+  type: string
+event_id:
+  description: |
+    The id of the event to this message, this id could
+    eventually be translated into ``user_message``.
+  in: body
+  required: true
+  type: string
 extra_specs:
   description: |
     A set of key and value pairs that contains the
@@ -559,7 +664,7 @@ fail_reason:
 fixed_ips:
   description: |
     The number of fixed IP addresses that are allowed
-    for each tenant. Must be equal to or greater than the number of
+    for each project. Must be equal to or greater than the number of
     allowed instances.
   in: body
   required: true
@@ -567,7 +672,7 @@ fixed_ips:
 floating_ips:
   description: |
     The number of floating IP addresses that are
-    allowed for each tenant.
+    allowed for each project.
   in: body
   required: true
   type: integer
@@ -631,6 +736,13 @@ group_types:
   in: body
   required: true
   type: array
+guaranteed_until:
+  description: |
+    The expire time of the message, this message could be
+    be deleted after this time.
+  in: body
+  required: false
+  type: string
 has_dependent_backups:
   description: |
     If this value is ``true``, the backup depends on
@@ -706,6 +818,12 @@ id_7:
   in: body
   required: true
   type: integer
+id_8:
+  description: |
+    The ID for the message.
+  in: body
+  required: true
+  type: integer
 imageRef:
   description: |
     The UUID of the image from which you want to
@@ -745,7 +863,7 @@ injected_file_path_bytes:
 injected_files:
   description: |
     The number of injected files that are allowed for
-    each tenant.
+    each project.
   in: body
   required: true
   type: integer
@@ -758,7 +876,7 @@ instance_uuid:
 instances:
   description: |
     The number of instances that are allowed for each
-    tenant.
+    project.
   in: body
   required: true
   type: integer
@@ -796,9 +914,17 @@ key_pairs:
   in: body
   required: true
   type: integer
+key_size:
+  description: |
+    Size of encryption key, in bits. For example, 128 or 256. The default value
+    is None.
+  in: body
+  required: false
+  type: integer
 keys:
   description: |
-    List of Keys.
+    List of Keys. For example, CryptsetupEncryptor, LuksEncryptor or
+    NoOpEncryptor.
   in: body
   required: true
   type: array
@@ -837,6 +963,12 @@ links_4:
     List of links related to the extension.
   in: body
   required: true
+  type: array
+links_5:
+  description: |
+    Links for the message.
+  in: body
+  required: false
   type: array
 location:
   description: |
@@ -877,6 +1009,13 @@ maxTotalVolumes:
   in: body
   required: true
   type: integer
+message_level:
+  description: |
+    The level of the message, possible value is
+    only 'ERROR' now.
+  in: body
+  required: true
+  type: string
 metadata:
   description: |
     One or more metadata key and value pairs for the
@@ -956,7 +1095,7 @@ mountpoint:
   description: |
     The attaching mount point.
   in: body
-  required: false
+  required: true
   type: string
 multiattach:
   description: |
@@ -1119,6 +1258,12 @@ os-attach:
   in: body
   required: true
   type: object
+os-detach:
+  description: |
+    The ``os-detach`` action.
+  in: body
+  required: true
+  type: object
 os-extend:
   description: |
     The ``os-extend`` action.
@@ -1259,6 +1404,18 @@ properties:
   in: body
   required: true
   type: object
+provider:
+  description: |
+    The class that provides encryption support.
+  in: body
+  required: true
+  type: string
+provider_optional:
+  description: |
+    The class that provides encryption support.
+  in: body
+  required: false
+  type: string
 qos_specs:
   description: |
     A ``qos_specs`` object.
@@ -1280,7 +1437,7 @@ quota_set:
 ram:
   description: |
     The amount of instance RAM in megabytes that are
-    allowed for each tenant.
+    allowed for each project.
   in: body
   required: true
   type: integer
@@ -1322,6 +1479,19 @@ replication_status:
   in: body
   required: true
   type: string
+replication_targets:
+  description: |
+    A list of volume backends used to replicate volumes
+    on this backend.
+  in: body
+  required: true
+  type: list
+request_id:
+  description: |
+    The id of the request during which the message was created.
+  in: body
+  required: true
+  type: string
 reserved:
   description: |
     Reserved volume size. Visible only if you set the
@@ -1336,6 +1506,25 @@ reserved_percentage:
   in: body
   required: true
   type: integer
+reset_status:
+  description: |
+    The ``reset_status`` action.
+  in: body
+  required: true
+  type: object
+resource_type:
+  description: |
+    The resource type corresponding to ``resource_uuid``.
+  in: body
+  required: false
+  type: string
+resource_uuid:
+  description: |
+    The UUID of the resource during whose operation the
+    message was created.
+  in: body
+  required: false
+  type: string
 restore:
   description: |
     A ``restore`` object.
@@ -1352,7 +1541,7 @@ security_group_rules:
 security_groups:
   description: |
     The number of security groups that are allowed
-    for each tenant.
+    for each project.
   in: body
   required: true
   type: integer
@@ -1497,6 +1686,18 @@ status_6:
   in: body
   required: false
   type: string
+status_7:
+  description: |
+    The ``status`` of the generic group snapshot.
+  in: body
+  required: false
+  type: string
+status_8:
+  description: |
+    The status of the generic group.
+  in: body
+  required: true
+  type: string
 storage_protocol:
   description: |
     The storage back end for the back-end volume. For
@@ -1519,6 +1720,18 @@ total_capacity:
   in: body
   required: true
   type: string
+total_count:
+  description: |
+    Total number of volumes.
+  in: body
+  required: true
+  type: integer
+total_size:
+  description: |
+    Total size of volumes in GB.
+  in: body
+  required: true
+  type: integer
 totalBackupGigabytesUsed:
   description: |
     The total number of backups gibibytes (GiB) used.
@@ -1590,6 +1803,12 @@ user_id:
   in: body
   required: true
   type: string
+user_message:
+  description: |
+    The translated readable message corresponding to ``event_id``.
+  in: body
+  required: false
+  type: string
 vendor_name:
   description: |
     The name of the vendor.
@@ -1605,6 +1824,12 @@ visibility:
 volume:
   description: |
     A ``volume`` object.
+  in: body
+  required: true
+  type: object
+volume-summary:
+  description: |
+    Dictionary of ``volume-summary`` objects.
   in: body
   required: true
   type: object
@@ -1706,6 +1931,12 @@ volume_type_5:
   in: body
   required: true
   type: array
+volume_type_id_body:
+  description: |
+    The UUID of the volume type.
+  in: body
+  required: true
+  type: string
 volume_types:
   description: |
     The list of volume types.  In an environment with

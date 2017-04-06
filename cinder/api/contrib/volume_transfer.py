@@ -14,6 +14,7 @@
 #    under the License.
 
 from oslo_log import log as logging
+from six.moves import http_client
 import webob
 from webob import exc
 
@@ -22,7 +23,7 @@ from cinder.api import extensions
 from cinder.api.openstack import wsgi
 from cinder.api.views import transfers as transfer_view
 from cinder import exception
-from cinder.i18n import _, _LI
+from cinder.i18n import _
 from cinder import transfer as transferAPI
 
 LOG = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ class VolumeTransferController(wsgi.Controller):
 
         return transfers
 
-    @wsgi.response(202)
+    @wsgi.response(http_client.ACCEPTED)
     def create(self, req, body):
         """Create a new volume transfer."""
         LOG.debug('Creating new volume transfer %s', body)
@@ -94,7 +95,7 @@ class VolumeTransferController(wsgi.Controller):
                                         remove_whitespaces=True)
             name = name.strip()
 
-        LOG.info(_LI("Creating transfer of volume %s"),
+        LOG.info("Creating transfer of volume %s",
                  volume_id)
 
         try:
@@ -107,7 +108,7 @@ class VolumeTransferController(wsgi.Controller):
                                              dict(new_transfer))
         return transfer
 
-    @wsgi.response(202)
+    @wsgi.response(http_client.ACCEPTED)
     def accept(self, req, id, body):
         """Accept a new volume transfer."""
         transfer_id = id
@@ -123,7 +124,7 @@ class VolumeTransferController(wsgi.Controller):
             msg = _("Incorrect request body format")
             raise exc.HTTPBadRequest(explanation=msg)
 
-        LOG.info(_LI("Accepting transfer %s"), transfer_id)
+        LOG.info("Accepting transfer %s", transfer_id)
 
         try:
             accepted_transfer = self.transfer_api.accept(context, transfer_id,
@@ -143,11 +144,11 @@ class VolumeTransferController(wsgi.Controller):
         """Delete a transfer."""
         context = req.environ['cinder.context']
 
-        LOG.info(_LI("Delete transfer with id: %s"), id)
+        LOG.info("Delete transfer with id: %s", id)
 
         # Not found exception will be handled at the wsgi level
         self.transfer_api.delete(context, transfer_id=id)
-        return webob.Response(status_int=202)
+        return webob.Response(status_int=http_client.ACCEPTED)
 
 
 class Volume_transfer(extensions.ExtensionDescriptor):

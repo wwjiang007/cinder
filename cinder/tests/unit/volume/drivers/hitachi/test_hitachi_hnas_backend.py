@@ -103,22 +103,6 @@ Export configuration:                       \n\
 127.0.0.1                                   \n\
 \n"
 
-iscsi_one_target = "\n\
-Alias               : cinder-default                                  \n\
-Globally unique name: iqn.2014-12.10.10.10.10:evstest1.cinder-default \n\
-Comment             :                                                 \n\
-Secret              : pxr6U37LZZJBoMc                                 \n\
-Authentication      : Enabled                                         \n\
-Logical units       : No logical units.                               \n\
-\n\
-  LUN   Logical Unit                                                  \n\
-  ----  --------------------------------                              \n\
-  0     cinder-lu                                                     \n\
-  1     volume-99da7ae7-1e7f-4d57-8bf...                              \n\
-\n\
-Access configuration:                                                 \n\
-"
-
 df_f_single_evs = "\n\
 ID       Label      Size          Used  Snapshots  Deduped         Avail  \
 Thin  ThinSize  ThinAvail               FS Type\n\
@@ -156,50 +140,26 @@ Node EVS ID    Type           Label Enabled Status          IP Address Port \n\
    1      3 Service        EVS-Test     Yes Online 192.168.100.100      ag2 \n\
 \n"
 
-iscsilu_list = "Name   : cinder-lu    \n\
+lu_list = "Name   : cinder-lu         \n\
 Comment:                              \n\
-Path   : /.cinder/cinder-lu.iscsi     \n\
+Path   : /.cinder/cinder-lu           \n\
 Size   : 2 GB                         \n\
 File System : fs-cinder               \n\
 File System Mounted : YES             \n\
 Logical Unit Mounted: No"
 
-iscsilu_list_tb = "Name   : test-lu   \n\
+lu_list_tb = "Name   : test-lu        \n\
 Comment:                              \n\
-Path   : /.cinder/test-lu.iscsi     \n\
+Path   : /.cinder/test-lu             \n\
 Size   : 2 TB                         \n\
 File System : fs-cinder               \n\
 File System Mounted : YES             \n\
 Logical Unit Mounted: No"
 
-hnas_fs_list = "%(l1)s\n\n%(l2)s\n\n " % {'l1': iscsilu_list,
-                                          'l2': iscsilu_list_tb}
+hnas_fs_list = "%(l1)s\n\n%(l2)s\n\n " % {'l1': lu_list,
+                                          'l2': lu_list_tb}
 
 add_targetsecret = "Target created successfully."
-
-iscsi_target_list = "\n\
-Alias               : cinder-GoldIsh\n\
-Globally unique name: iqn.2015-06.10.10.10.10:evstest1.cinder-goldish\n\
-Comment             :\n\
-Secret              : None\n\
-Authentication      : Enabled\n\
-Logical units       : No logical units.\n\
-Access configuration :\n\
-\n\
-Alias               : cinder-default\n\
-Globally unique name: iqn.2014-12.10.10.10.10:evstest1.cinder-default\n\
-Comment             :\n\
-Secret              : pxr6U37LZZJBoMc\n\
-Authentication      : Enabled\n\
-Logical units       : Logical units       :\n\
-\n\
-  LUN   Logical Unit\n\
-  ----  --------------------------------\n\
-  0     cinder-lu\n\
-  1     volume-99da7ae7-1e7f-4d57-8bf...\n\
-\n\
-Access configuration :\n\
-"
 
 backend_opts = {'mgmt_ip0': '0.0.0.0',
                 'cluster_admin_ip0': None,
@@ -267,14 +227,13 @@ class HDSHNASBackendTest(test.TestCase):
         self.hnas_backend = hnas_backend.HNASSSHBackend(backend_opts)
 
     def test_run_cmd(self):
-        self.mock_object(os.path, 'isfile',
-                         mock.Mock(return_value=True))
+        self.mock_object(os.path, 'isfile', return_value=True)
         self.mock_object(utils, 'execute')
         self.mock_object(time, 'sleep')
         self.mock_object(paramiko, 'SSHClient')
         self.mock_object(paramiko.RSAKey, 'from_private_key_file')
         self.mock_object(putils, 'ssh_execute',
-                         mock.Mock(return_value=(df_f, '')))
+                         return_value=(df_f, ''))
 
         out, err = self.hnas_backend._run_cmd('ssh', '0.0.0.0',
                                               'supervisor', 'supervisor',
@@ -294,13 +253,13 @@ class HDSHNASBackendTest(test.TestCase):
                       putils.ProcessExecutionError(stderr='Connection reset')]
 
         self.mock_object(os.path, 'isfile',
-                         mock.Mock(return_value=True))
+                         return_value=True)
         self.mock_object(utils, 'execute')
         self.mock_object(time, 'sleep')
         self.mock_object(paramiko, 'SSHClient')
         self.mock_object(paramiko.RSAKey, 'from_private_key_file')
         self.mock_object(putils, 'ssh_execute',
-                         mock.Mock(side_effect=exceptions))
+                         side_effect=exceptions)
 
         self.assertRaises(exception.HNASConnError, self.hnas_backend._run_cmd,
                           'ssh', '0.0.0.0', 'supervisor', 'supervisor', 'df',
@@ -308,63 +267,18 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_run_cmd_exception_without_retry(self):
         self.mock_object(os.path, 'isfile',
-                         mock.Mock(return_value=True))
+                         return_value=True)
         self.mock_object(utils, 'execute')
         self.mock_object(time, 'sleep')
         self.mock_object(paramiko, 'SSHClient')
         self.mock_object(paramiko.RSAKey, 'from_private_key_file')
         self.mock_object(putils, 'ssh_execute',
-                         mock.Mock(side_effect=putils.ProcessExecutionError
-                                   (stderr='Error')))
+                         side_effect=putils.ProcessExecutionError(
+                             stderr='Error'))
 
         self.assertRaises(putils.ProcessExecutionError,
                           self.hnas_backend._run_cmd, 'ssh', '0.0.0.0',
                           'supervisor', 'supervisor', 'df', '-a')
-
-    def test_get_targets_empty_list(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=('No targets', '')))
-
-        out = self.hnas_backend._get_targets('2')
-        self.assertEqual([], out)
-
-    def test_get_targets_not_found(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(iscsi_target_list, '')))
-
-        out = self.hnas_backend._get_targets('2', 'fake-volume')
-        self.assertEqual([], out)
-
-    def test__get_unused_luid_number_0(self):
-        tgt_info = {
-            'alias': 'cinder-default',
-            'secret': 'pxr6U37LZZJBoMc',
-            'iqn': 'iqn.2014-12.10.10.10.10:evstest1.cinder-default',
-            'lus': [
-                {'id': '1',
-                 'name': 'cinder-lu2'},
-                {'id': '2',
-                 'name': 'volume-test2'}
-            ],
-            'auth': 'Enabled'
-        }
-
-        out = self.hnas_backend._get_unused_luid(tgt_info)
-
-        self.assertEqual(0, out)
-
-    def test__get_unused_no_luns(self):
-        tgt_info = {
-            'alias': 'cinder-default',
-            'secret': 'pxr6U37LZZJBoMc',
-            'iqn': 'iqn.2014-12.10.10.10.10:evstest1.cinder-default',
-            'lus': [],
-            'auth': 'Enabled'
-        }
-
-        out = self.hnas_backend._get_unused_luid(tgt_info)
-
-        self.assertEqual(0, out)
 
     def test_get_version(self):
         expected_out = {
@@ -376,9 +290,7 @@ class HDSHNASBackendTest(test.TestCase):
         }
 
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[
-                             (cluster_getmac, ''),
-                             (version, '')]))
+                         side_effect=[(cluster_getmac, ''), (version, '')])
 
         out = self.hnas_backend.get_version()
 
@@ -386,7 +298,7 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_get_evs(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
+                         return_value=(evsfs_list, ''))
 
         out = self.hnas_backend.get_evs('fs-cinder')
 
@@ -394,9 +306,9 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_get_export_list(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(nfs_export, ''),
-                                                (evsfs_list, ''),
-                                                (evs_list, '')]))
+                         side_effect=[(nfs_export, ''),
+                                      (evsfs_list, ''),
+                                      (evs_list, '')])
 
         out = self.hnas_backend.get_export_list()
 
@@ -407,9 +319,9 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_get_export_list_data_not_available(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(nfs_export_not_available, ''),
-                                                (evsfs_list, ''),
-                                                (evs_list, '')]))
+                         side_effect=[(nfs_export_not_available, ''),
+                                      (evsfs_list, ''),
+                                      (evs_list, '')])
 
         out = self.hnas_backend.get_export_list()
 
@@ -422,9 +334,9 @@ class HDSHNASBackendTest(test.TestCase):
         size = float(250 * 1024)
         free = float(228 * 1024)
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(nfs_export_tb, ''),
-                                                (evsfs_list, ''),
-                                                (evs_list, '')]))
+                         side_effect=[(nfs_export_tb, ''),
+                                      (evsfs_list, ''),
+                                      (evs_list, '')])
 
         out = self.hnas_backend.get_export_list()
 
@@ -438,7 +350,7 @@ class HDSHNASBackendTest(test.TestCase):
         path2 = '/.cinder/path2'
 
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
+                         return_value=(evsfs_list, ''))
 
         self.hnas_backend.file_clone('fs-cinder', path1, path2)
 
@@ -451,7 +363,7 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_file_clone_wrong_fs(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
+                         return_value=(evsfs_list, ''))
 
         self.assertRaises(exception.InvalidParameterValue,
                           self.hnas_backend.file_clone, 'fs-fake', 'src',
@@ -462,7 +374,7 @@ class HDSHNASBackendTest(test.TestCase):
         expected_out2 = {'evs_number': '2'}
 
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsipaddr, '')))
+                         return_value=(evsipaddr, ''))
 
         out = self.hnas_backend.get_evs_info()
 
@@ -473,9 +385,8 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_get_fs_info(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(df_f, ''),
-                                                (evsfs_list, ''),
-                                                (hnas_fs_list, '')]))
+                         side_effect=[(df_f, ''), (evsfs_list, ''),
+                                      (hnas_fs_list, '')])
 
         out = self.hnas_backend.get_fs_info('fs-cinder')
 
@@ -483,346 +394,62 @@ class HDSHNASBackendTest(test.TestCase):
         self.assertEqual('fs-cinder', out['label'])
         self.assertEqual('228', out['available_size'])
         self.assertEqual('250', out['total_size'])
-        self.assertEqual(2050.0, out['provisioned_capacity'])
+        self.assertEqual(0, out['provisioned_capacity'])
 
     def test_get_fs_empty_return(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=('Not mounted', '')))
+                         return_value=('Not mounted', ''))
 
         out = self.hnas_backend.get_fs_info('fs-cinder')
         self.assertEqual({}, out)
 
     def test_get_fs_info_single_evs(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(df_f_single_evs, ''),
-                                                (evsfs_list, ''),
-                                                (hnas_fs_list, '')]))
+                         side_effect=[(df_f_single_evs, ''), (evsfs_list, ''),
+                                      (hnas_fs_list, '')])
 
         out = self.hnas_backend.get_fs_info('fs-cinder')
 
         self.assertEqual('fs-cinder', out['label'])
         self.assertEqual('228', out['available_size'])
         self.assertEqual('250', out['total_size'])
-        self.assertEqual(2050.0, out['provisioned_capacity'])
+        self.assertEqual(0, out['provisioned_capacity'])
 
     def test_get_fs_tb(self):
         available_size = float(228 * 1024 ** 2)
         total_size = float(250 * 1024 ** 2)
 
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(df_f_tb, ''),
-                                                (evsfs_list, ''),
-                                                (hnas_fs_list, '')]))
+                         side_effect=[(df_f_tb, ''), (evsfs_list, ''),
+                                      (hnas_fs_list, '')])
 
         out = self.hnas_backend.get_fs_info('fs-cinder')
 
         self.assertEqual('fs-cinder', out['label'])
         self.assertEqual(str(available_size), out['available_size'])
         self.assertEqual(str(total_size), out['total_size'])
-        self.assertEqual(2050.0, out['provisioned_capacity'])
+        self.assertEqual(0, out['provisioned_capacity'])
 
     def test_get_fs_single_evs_tb(self):
         available_size = float(228 * 1024 ** 2)
         total_size = float(250 * 1024 ** 2)
 
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(df_f_tb, ''),
-                                                (evsfs_list, ''),
-                                                (hnas_fs_list, '')]))
+                         side_effect=[(df_f_tb, ''), (evsfs_list, ''),
+                                      (hnas_fs_list, '')])
 
         out = self.hnas_backend.get_fs_info('fs-cinder')
 
         self.assertEqual('fs-cinder', out['label'])
         self.assertEqual(str(available_size), out['available_size'])
         self.assertEqual(str(total_size), out['total_size'])
-        self.assertEqual(2050.0, out['provisioned_capacity'])
-
-    def test_create_lu(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
-
-        self.hnas_backend.create_lu('fs-cinder', '128', 'cinder-lu')
-
-        calls = [mock.call('evsfs', 'list'), mock.call('console-context',
-                                                       '--evs', '2',
-                                                       'iscsi-lu', 'add',
-                                                       '-e', 'cinder-lu',
-                                                       'fs-cinder',
-                                                       '/.cinder/cinder-lu.'
-                                                       'iscsi', '128G')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_delete_lu(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
-
-        self.hnas_backend.delete_lu('fs-cinder', 'cinder-lu')
-
-        calls = [mock.call('evsfs', 'list'), mock.call('console-context',
-                                                       '--evs', '2',
-                                                       'iscsi-lu', 'del', '-d',
-                                                       '-f', 'cinder-lu')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_extend_lu(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
-
-        self.hnas_backend.extend_lu('fs-cinder', '128', 'cinder-lu')
-
-        calls = [mock.call('evsfs', 'list'), mock.call('console-context',
-                                                       '--evs', '2',
-                                                       'iscsi-lu', 'expand',
-                                                       'cinder-lu', '128G')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_cloned_lu(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
-
-        self.hnas_backend.create_cloned_lu('cinder-lu', 'fs-cinder', 'snap')
-
-        calls = [mock.call('evsfs', 'list'), mock.call('console-context',
-                                                       '--evs', '2',
-                                                       'iscsi-lu', 'clone',
-                                                       '-e', 'cinder-lu',
-                                                       'snap',
-                                                       '/.cinder/snap.iscsi')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_get_existing_lu_info(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsilu_list, '')]))
-
-        out = self.hnas_backend.get_existing_lu_info('cinder-lu', None, None)
-
-        self.assertEqual('cinder-lu', out['name'])
-        self.assertEqual('fs-cinder', out['filesystem'])
-        self.assertEqual(2.0, out['size'])
-
-    def test_get_existing_lu_info_tb(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsilu_list_tb, '')]))
-
-        out = self.hnas_backend.get_existing_lu_info('test-lu', None, None)
-
-        self.assertEqual('test-lu', out['name'])
-        self.assertEqual('fs-cinder', out['filesystem'])
-        self.assertEqual(2048.0, out['size'])
-
-    def test_rename_existing_lu(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
-        self.hnas_backend.rename_existing_lu('fs-cinder', 'cinder-lu',
-                                             'new-lu-name')
-
-        calls = [mock.call('evsfs', 'list'), mock.call('console-context',
-                                                       '--evs', '2',
-                                                       'iscsi-lu', 'mod', '-n',
-                                                       "'new-lu-name'",
-                                                       'cinder-lu')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_check_lu(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_target_list, '')]))
-
-        out = self.hnas_backend.check_lu('cinder-lu', 'fs-cinder')
-
-        self.assertEqual('cinder-lu', out['tgt']['lus'][0]['name'])
-        self.assertEqual('pxr6U37LZZJBoMc', out['tgt']['secret'])
-        self.assertTrue(out['mapped'])
-        calls = [mock.call('evsfs', 'list'), mock.call('console-context',
-                                                       '--evs', '2',
-                                                       'iscsi-target', 'list')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_check_lu_not_found(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_target_list, '')]))
-
-        # passing a volume fake-volume not mapped
-        out = self.hnas_backend.check_lu('fake-volume', 'fs-cinder')
-        self.assertFalse(out['mapped'])
-        self.assertEqual(0, out['id'])
-        self.assertIsNone(out['tgt'])
-
-    def test_add_iscsi_conn(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_target_list, ''),
-                                                (evsfs_list, '')]))
-
-        out = self.hnas_backend.add_iscsi_conn('cinder-lu', 'fs-cinder', 3260,
-                                               'cinder-default', 'initiator')
-
-        self.assertEqual('cinder-lu', out['lu_name'])
-        self.assertEqual('fs-cinder', out['fs'])
-        self.assertEqual('0', out['lu_id'])
-        self.assertEqual(3260, out['port'])
-        calls = [mock.call('evsfs', 'list'),
-                 mock.call('console-context', '--evs', '2', 'iscsi-target',
-                           'list')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_add_iscsi_conn_not_mapped_volume(self):
-        not_mapped = {'mapped': False,
-                      'id': 0,
-                      'tgt': None}
-
-        self.mock_object(self.hnas_backend, 'check_lu',
-                         mock.Mock(return_value=not_mapped))
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_target_list, ''),
-                                                ('', '')]))
-
-        out = self.hnas_backend.add_iscsi_conn('cinder-lu', 'fs-cinder', 3260,
-                                               'cinder-default', 'initiator')
-
-        self.assertEqual('cinder-lu', out['lu_name'])
-        self.assertEqual('fs-cinder', out['fs'])
-        self.assertEqual(2, out['lu_id'])
-        self.assertEqual(3260, out['port'])
-        calls = [mock.call('evsfs', 'list'),
-                 mock.call('console-context', '--evs', '2', 'iscsi-target',
-                           'list')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_del_iscsi_conn(self):
-        iqn = 'iqn.2014-12.10.10.10.10:evstest1.cinder-default'
-
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(iscsi_one_target, '')))
-
-        self.hnas_backend.del_iscsi_conn('2', iqn, '0')
-
-        calls = [mock.call('console-context', '--evs', '2', 'iscsi-target',
-                           'list', iqn),
-                 mock.call('console-context', '--evs', '2', 'iscsi-target',
-                           'dellu', '-f', iqn, '0')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_del_iscsi_conn_volume_not_found(self):
-        iqn = 'iqn.2014-12.10.10.10.10:evstest1.cinder-fake'
-
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(iscsi_one_target, '')))
-
-        self.hnas_backend.del_iscsi_conn('2', iqn, '10')
-
-        self.hnas_backend._run_cmd.assert_called_with('console-context',
-                                                      '--evs', '2',
-                                                      'iscsi-target', 'list',
-                                                      iqn)
-
-    def test_check_target(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_target_list, '')]))
-
-        out = self.hnas_backend.check_target('fs-cinder', 'cinder-default')
-
-        self.assertTrue(out['found'])
-        self.assertEqual('cinder-lu', out['tgt']['lus'][0]['name'])
-        self.assertEqual('cinder-default', out['tgt']['alias'])
-        self.assertEqual('pxr6U37LZZJBoMc', out['tgt']['secret'])
-
-    def test_check_target_not_found(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_target_list, '')]))
-
-        out = self.hnas_backend.check_target('fs-cinder', 'cinder-fake')
-
-        self.assertFalse(out['found'])
-        self.assertIsNone(out['tgt'])
-
-    def test_set_target_secret(self):
-        targetalias = 'cinder-default'
-        secret = 'pxr6U37LZZJBoMc'
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
-
-        self.hnas_backend.set_target_secret(targetalias, 'fs-cinder', secret)
-
-        calls = [mock.call('evsfs', 'list'),
-                 mock.call('console-context', '--evs', '2', 'iscsi-target',
-                           'mod', '-s', 'pxr6U37LZZJBoMc', '-a', 'enable',
-                           'cinder-default')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_set_target_secret_empty_target_list(self):
-        targetalias = 'cinder-default'
-        secret = 'pxr6U37LZZJBoMc'
-
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                ('does not exist', ''),
-                                                ('', '')]))
-
-        self.hnas_backend.set_target_secret(targetalias, 'fs-cinder', secret)
-
-        calls = [mock.call('console-context', '--evs', '2', 'iscsi-target',
-                           'mod', '-s', 'pxr6U37LZZJBoMc', '-a', 'enable',
-                           'cinder-default')]
-        self.hnas_backend._run_cmd.assert_has_calls(calls, any_order=False)
-
-    def test_get_target_secret(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_one_target, '')]))
-        out = self.hnas_backend.get_target_secret('cinder-default',
-                                                  'fs-cinder')
-
-        self.assertEqual('pxr6U37LZZJBoMc', out)
-
-        self.hnas_backend._run_cmd.assert_called_with('console-context',
-                                                      '--evs', '2',
-                                                      'iscsi-target', 'list',
-                                                      'cinder-default')
-
-    def test_get_target_secret_chap_disabled(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (target_chap_disable, '')]))
-        out = self.hnas_backend.get_target_secret('cinder-default',
-                                                  'fs-cinder')
-
-        self.assertEqual('', out)
-
-        self.hnas_backend._run_cmd.assert_called_with('console-context',
-                                                      '--evs', '2',
-                                                      'iscsi-target', 'list',
-                                                      'cinder-default')
-
-    def test_get_target_iqn(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (iscsi_one_target, ''),
-                                                (add_targetsecret, '')]))
-
-        out = self.hnas_backend.get_target_iqn('cinder-default', 'fs-cinder')
-
-        self.assertEqual('iqn.2014-12.10.10.10.10:evstest1.cinder-default',
-                         out)
-
-    def test_create_target(self):
-        self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(return_value=(evsfs_list, '')))
-
-        self.hnas_backend.create_target('cinder-default', 'fs-cinder',
-                                        'pxr6U37LZZJBoMc')
+        self.assertEqual(0, out['provisioned_capacity'])
 
     def test_get_cloned_file_relatives(self):
-        self.mock_object(self.hnas_backend, '_run_cmd', mock.Mock(
-            side_effect=[(evsfs_list, ''), (file_clone_stat, ''),
-                         (file_clone_stat_snap_file1, ''),
-                         (file_clone_stat_snap_file2, '')]))
+        self.mock_object(self.hnas_backend, '_run_cmd',
+                         side_effect=[(evsfs_list, ''), (file_clone_stat, ''),
+                                      (file_clone_stat_snap_file1, ''),
+                                      (file_clone_stat_snap_file2, '')])
         out = self.hnas_backend.get_cloned_file_relatives('cinder-lu',
                                                           'fs-cinder')
         self.assertEqual(file_relatives, out)
@@ -835,19 +462,18 @@ class HDSHNASBackendTest(test.TestCase):
                                                       'f26826ffffffffffffff]')
 
     def test_get_cloned_file_relatives_not_clone_except(self):
-        self.mock_object(self.hnas_backend, '_run_cmd', mock.Mock(
-            side_effect=[(evsfs_list, ''),
-                         putils.ProcessExecutionError(
-                             stderr='File is not a clone')]))
+        exc = putils.ProcessExecutionError(stderr='File is not a clone')
+        self.mock_object(self.hnas_backend, '_run_cmd',
+                         side_effect=[(evsfs_list, ''), exc])
 
         self.assertRaises(exception.ManageExistingInvalidReference,
                           self.hnas_backend.get_cloned_file_relatives,
                           'cinder-lu', 'fs-cinder', True)
 
     def test_get_cloned_file_relatives_not_clone_no_except(self):
-        self.mock_object(self.hnas_backend, '_run_cmd', mock.Mock(
-            side_effect=[(evsfs_list, ''), putils.ProcessExecutionError(
-                stderr='File is not a clone')]))
+        exc = putils.ProcessExecutionError(stderr='File is not a clone')
+        self.mock_object(self.hnas_backend, '_run_cmd',
+                         side_effect=[(evsfs_list, ''), exc])
 
         out = self.hnas_backend.get_cloned_file_relatives('cinder-lu',
                                                           'fs-cinder')
@@ -856,11 +482,10 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_check_snapshot_parent_true(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(
-                             side_effect=[(evsfs_list, ''),
-                                          (file_clone_stat, ''),
-                                          (file_clone_stat_snap_file1, ''),
-                                          (file_clone_stat_snap_file2, '')]))
+                         side_effect=[(evsfs_list, ''),
+                                      (file_clone_stat, ''),
+                                      (file_clone_stat_snap_file1, ''),
+                                      (file_clone_stat_snap_file2, '')])
         out = self.hnas_backend.check_snapshot_parent('cinder-lu',
                                                       'snapshot-lu-1',
                                                       'fs-cinder')
@@ -869,11 +494,10 @@ class HDSHNASBackendTest(test.TestCase):
 
     def test_check_snapshot_parent_false(self):
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(
-                             side_effect=[(evsfs_list, ''),
-                                          (file_clone_stat, ''),
-                                          (file_clone_stat_snap_file1, ''),
-                                          (file_clone_stat_snap_file2, '')]))
+                         side_effect=[(evsfs_list, ''),
+                                      (file_clone_stat, ''),
+                                      (file_clone_stat_snap_file1, ''),
+                                      (file_clone_stat_snap_file2, '')])
         out = self.hnas_backend.check_snapshot_parent('cinder-lu',
                                                       'snapshot-lu-3',
                                                       'fs-cinder')
@@ -884,8 +508,7 @@ class HDSHNASBackendTest(test.TestCase):
         export_out = '/export01-husvm'
 
         self.mock_object(self.hnas_backend, '_run_cmd',
-                         mock.Mock(side_effect=[(evsfs_list, ''),
-                                                (nfs_export, '')]))
+                         side_effect=[(evsfs_list, ''), (nfs_export, '')])
 
         out = self.hnas_backend.get_export_path(export_out, 'fs-cinder')
 

@@ -63,7 +63,7 @@ class VSPISCSIDriver(driver.ISCSIDriver):
 
     .. code-block:: none
 
-    1.0.0 - Initial driver.
+        1.0.0 - Initial driver.
 
     """
 
@@ -71,6 +71,8 @@ class VSPISCSIDriver(driver.ISCSIDriver):
 
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "Hitachi_VSP_CI"
+
+    SUPPORTED = False
 
     def __init__(self, *args, **kwargs):
         """Initialize instance variables."""

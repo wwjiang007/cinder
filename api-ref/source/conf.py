@@ -71,7 +71,7 @@ release = version_info.release_string()
 version = version_info.version_string()
 
 # Config logABug feature
-giturl = u'http://git.openstack.org/cgit/openstack/cinder/tree/api-ref/source'
+giturl = u'https://git.openstack.org/cgit/openstack/cinder/tree/api-ref/source'
 # source tree
 # html_context allows us to pass arbitrary values into the html template
 html_context = {"bug_tag": "api-ref",
@@ -159,10 +159,9 @@ html_theme_options = {
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
 # using the given strftime format.
 # html_last_updated_fmt = '%b %d, %Y'
-git_cmd = ["git", "log", "--pretty=format:'%ad, commit %h'", "--date=local",
+git_cmd = ["git", "log", "--pretty=format:%ad, commit %h", "--date=local",
            "-n1"]
-html_last_updated_fmt = subprocess.Popen(
-    git_cmd, stdout=subprocess.PIPE).communicate()[0]
+html_last_updated_fmt = subprocess.check_output(git_cmd).decode('utf-8')
 
 # If true, SmartyPants will be used to convert quotes and dashes to
 # typographically correct entities.

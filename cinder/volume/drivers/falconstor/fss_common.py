@@ -27,8 +27,7 @@ from oslo_utils import units
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
-from cinder.image import image_utils
+from cinder.i18n import _
 from cinder.volume.drivers.falconstor import rest_proxy
 from cinder.volume.drivers.san import san
 
@@ -38,6 +37,10 @@ FSS_OPTS = [
     cfg.IntOpt('fss_pool',
                default='',
                help='FSS pool id in which FalconStor volumes are stored.'),
+    cfg.StrOpt('fss_san_secondary_ip',
+               default='',
+               help='Specifies FSS secondary management IP to be used '
+                    'if san_ip is invalid or becomes inaccessible.'),
     cfg.BoolOpt('fss_debug',
                 default=False,
                 help="Enable HTTP debugging to FSS"),
@@ -60,11 +63,11 @@ class FalconstorBaseDriver(san.SanDriver):
         self.proxy = rest_proxy.RESTProxy(self.configuration)
         self._backend_name = (
             self.configuration.safe_get('volume_backend_name') or 'FalconStor')
-        self._storage_protocol = 'iSCSI'
+        self._storage_protocol = ''
 
     def do_setup(self, context):
         self.proxy.do_setup()
-        LOG.info(_LI('Activate FalconStor cinder volume driver.'))
+        LOG.info('Activate FalconStor cinder volume driver.')
 
     def check_for_setup_error(self):
         if self.proxy.session_id is None:
@@ -97,7 +100,7 @@ class FalconstorBaseDriver(san.SanDriver):
 
     def _check_multipath(self):
         if self.configuration.use_multipath_for_image_xfer:
-            if not self.configuration.san_secondary_ip:
+            if not self.configuration.fss_san_secondary_ip:
                 msg = (_('The san_secondary_ip param is null.'))
                 raise exception.VolumeBackendAPIException(data=msg)
             output = self.proxy._check_iocluster_state()
@@ -191,8 +194,9 @@ class FalconstorBaseDriver(san.SanDriver):
         try:
             self.proxy.delete_vdev(volume)
         except rest_proxy.FSSHTTPError as err:
-            with excutils.save_and_reraise_exception(reraise=False):
-                LOG.warning(_LW("Volume deletion failed with message: %s"),
+            with excutils.save_and_reraise_exception() as ctxt:
+                ctxt.reraise = False
+                LOG.warning("Volume deletion failed with message: %s",
                             err.reason)
 
     def create_snapshot(self, snapshot):
@@ -207,9 +211,10 @@ class FalconstorBaseDriver(san.SanDriver):
         try:
             self.proxy.delete_snapshot(snapshot)
         except rest_proxy.FSSHTTPError as err:
-            with excutils.save_and_reraise_exception(reraise=False):
+            with excutils.save_and_reraise_exception() as ctxt:
+                ctxt.reraise = False
                 LOG.error(
-                    _LE("Snapshot deletion failed with message: %s"),
+                    "Snapshot deletion failed with message: %s",
                     err.reason)
 
     def create_volume_from_snapshot(self, volume, snapshot):
@@ -224,11 +229,12 @@ class FalconstorBaseDriver(san.SanDriver):
                 extend_volume_name = self.proxy._get_fss_volume_name(volume)
                 self.proxy.extend_vdev(extend_volume_name, snap_size, vol_size)
             except rest_proxy.FSSHTTPError as err:
-                with excutils.save_and_reraise_exception(reraise=False):
-                    LOG.error(_LE(
+                with excutils.save_and_reraise_exception() as ctxt:
+                    ctxt.reraise = False
+                    LOG.error(
                         "Resizing %(id)s failed with message: %(msg)s. "
-                        "Cleaning volume."), {'id': volume["id"],
-                                              'msg': err.reason})
+                        "Cleaning volume.", {'id': volume["id"],
+                                             'msg': err.reason})
 
         if type(volume['metadata']) is dict:
             fss_metadata.update(volume['metadata'])
@@ -280,7 +286,7 @@ class FalconstorBaseDriver(san.SanDriver):
                 self._stats = data
 
             except Exception as exc:
-                LOG.error(_LE('Cannot get volume status %(exc)s.'),
+                LOG.error('Cannot get volume status %(exc)s.',
                           {'exc': exc})
         return self._stats
 
@@ -383,14 +389,3 @@ class FalconstorBaseDriver(san.SanDriver):
     def unmanage(self, volume):
         """Remove Cinder management from FSS volume"""
         self.proxy.unmanage(volume)
-
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
-        with image_utils.temporary_file() as tmp:
-            image_utils.fetch_verify_image(context, image_service,
-                                           image_id, tmp)
-        image_utils.fetch_to_raw(context,
-                                 image_service,
-                                 image_id,
-                                 tmp,
-                                 self.configuration.volume_dd_blocksize,
-                                 size=volume['size'])

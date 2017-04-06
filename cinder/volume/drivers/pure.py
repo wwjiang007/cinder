@@ -32,7 +32,7 @@ import six
 
 from cinder import context
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder import interface
 from cinder.objects import fields
 from cinder import utils
@@ -282,19 +282,14 @@ class PureBaseVolumeDriver(san.SanDriver):
         current_array = self._get_current_array()
         current_array.create_volume(vol_name, vol_size)
 
-        if volume['consistencygroup_id']:
-            self._add_volume_to_consistency_group(
-                volume['consistencygroup_id'],
-                vol_name
-            )
-
+        self._add_to_group_if_needed(volume, vol_name)
         self._enable_replication_if_needed(current_array, volume)
 
     @pure_driver_debug_trace
     def create_volume_from_snapshot(self, volume, snapshot):
         """Creates a volume from a snapshot."""
         vol_name = self._get_vol_name(volume)
-        if snapshot['cgsnapshot_id']:
+        if snapshot['group_snapshot'] or snapshot['cgsnapshot']:
             snap_name = self._get_pgroup_snap_name_from_snapshot(snapshot)
         else:
             snap_name = self._get_snap_name(snapshot)
@@ -312,11 +307,7 @@ class PureBaseVolumeDriver(san.SanDriver):
                                snapshot["volume_size"],
                                volume["size"])
 
-        if volume['consistencygroup_id']:
-            self._add_volume_to_consistency_group(
-                volume['consistencygroup_id'],
-                vol_name)
-
+        self._add_to_group_if_needed(volume, vol_name)
         self._enable_replication_if_needed(current_array, volume)
 
     def _enable_replication_if_needed(self, array, volume):
@@ -334,8 +325,8 @@ class PureBaseVolumeDriver(san.SanDriver):
                         ERR_MSG_ALREADY_BELONGS in err.text):
                     # Happens if the volume already added to PG.
                     ctxt.reraise = False
-                    LOG.warning(_LW("Adding Volume to Protection Group "
-                                    "failed with message: %s"), err.text)
+                    LOG.warning("Adding Volume to Protection Group "
+                                "failed with message: %s", err.text)
 
     @pure_driver_debug_trace
     def create_cloned_volume(self, volume, src_vref):
@@ -352,11 +343,7 @@ class PureBaseVolumeDriver(san.SanDriver):
                                src_vref["size"],
                                volume["size"])
 
-        if volume['consistencygroup_id']:
-            self._add_volume_to_consistency_group(
-                volume['consistencygroup_id'],
-                vol_name)
-
+        self._add_to_group_if_needed(volume, vol_name)
         self._enable_replication_if_needed(current_array, volume)
 
     def _extend_if_needed(self, array, vol_name, src_size, vol_size):
@@ -385,7 +372,7 @@ class PureBaseVolumeDriver(san.SanDriver):
                         ERR_MSG_NOT_EXIST in err.text):
                     # Happens if the volume does not exist.
                     ctxt.reraise = False
-                    LOG.warning(_LW("Volume deletion failed with message: %s"),
+                    LOG.warning("Volume deletion failed with message: %s",
                                 err.text)
 
     @pure_driver_debug_trace
@@ -417,8 +404,8 @@ class PureBaseVolumeDriver(san.SanDriver):
                         ERR_MSG_PENDING_ERADICATION in err.text):
                     # Happens if the snapshot does not exist.
                     ctxt.reraise = False
-                    LOG.warning(_LW("Unable to delete snapshot, assuming "
-                                    "already deleted. Error: %s"), err.text)
+                    LOG.warning("Unable to delete snapshot, assuming "
+                                "already deleted. Error: %s", err.text)
 
     def ensure_export(self, context, volume):
         pass
@@ -447,8 +434,8 @@ class PureBaseVolumeDriver(san.SanDriver):
             host_name = host["name"]
             result = self._disconnect_host(array, host_name, vol_name)
         else:
-            LOG.error(_LE("Unable to disconnect host from volume, could not "
-                          "determine Purity host"))
+            LOG.error("Unable to disconnect host from volume, could not "
+                      "determine Purity host")
             result = False
 
         return result
@@ -470,8 +457,8 @@ class PureBaseVolumeDriver(san.SanDriver):
                 if err.code == 400 and ERR_MSG_NOT_CONNECTED in err.text:
                     # Happens if the host and volume are not connected.
                     ctxt.reraise = False
-                    LOG.error(_LE("Disconnection failed with message: "
-                                  "%(msg)s."), {"msg": err.text})
+                    LOG.error("Disconnection failed with message: "
+                              "%(msg)s.", {"msg": err.text})
         connections = None
         try:
             connections = array.list_host_connections(host_name, private=True)
@@ -484,7 +471,7 @@ class PureBaseVolumeDriver(san.SanDriver):
         host_still_used = bool(connections)
 
         if GENERATED_NAME.match(host_name) and not host_still_used:
-            LOG.info(_LI("Attempting to delete unneeded host %(host_name)r."),
+            LOG.info("Attempting to delete unneeded host %(host_name)r.",
                      {"host_name": host_name})
             try:
                 array.delete_host(host_name)
@@ -555,7 +542,8 @@ class PureBaseVolumeDriver(san.SanDriver):
         # Add flags for supported features
         data['consistencygroup_support'] = True
         data['thin_provisioning_support'] = True
-        data['multiattach'] = True
+        data['multiattach'] = False
+        data['QoS_support'] = False
 
         # Add capacity info for scheduler
         data['total_capacity_gb'] = total_capacity
@@ -632,8 +620,8 @@ class PureBaseVolumeDriver(san.SanDriver):
         new_size = new_size * units.Gi
         current_array.extend_volume(vol_name, new_size)
 
-    def _add_volume_to_consistency_group(self, consistencygroup_id, vol_name):
-        pgroup_name = self._get_pgroup_name_from_id(consistencygroup_id)
+    def _add_volume_to_consistency_group(self, group_id, vol_name):
+        pgroup_name = self._get_pgroup_name_from_id(group_id)
         current_array = self._get_current_array()
         current_array.set_pgroup(pgroup_name, addvollist=[vol_name])
 
@@ -720,7 +708,7 @@ class PureBaseVolumeDriver(san.SanDriver):
                     # Treat these as a "success" case since we are trying
                     # to delete them anyway.
                     ctxt.reraise = False
-                    LOG.warning(_LW("Unable to delete Protection Group: %s"),
+                    LOG.warning("Unable to delete Protection Group: %s",
                                 err.text)
 
         for volume in volumes:
@@ -753,7 +741,7 @@ class PureBaseVolumeDriver(san.SanDriver):
     def create_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Creates a cgsnapshot."""
 
-        cg_id = cgsnapshot.consistencygroup_id
+        cg_id = self._get_group_id_from_snap(cgsnapshot)
         pgroup_name = self._get_pgroup_name_from_id(cg_id)
         pgsnap_suffix = self._get_pgroup_snap_suffix(cgsnapshot)
         current_array = self._get_current_array()
@@ -777,8 +765,8 @@ class PureBaseVolumeDriver(san.SanDriver):
                     # Treat these as a "success" case since we are trying
                     # to delete them anyway.
                     ctxt.reraise = False
-                    LOG.warning(_LW("Unable to delete Protection Group "
-                                    "Snapshot: %s"), err.text)
+                    LOG.warning("Unable to delete Protection Group "
+                                "Snapshot: %s", err.text)
 
     @pure_driver_debug_trace
     def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
@@ -832,6 +820,129 @@ class PureBaseVolumeDriver(san.SanDriver):
             existing_ref=existing_ref,
             reason=_("Unable to find Purity ref with name=%s") % ref_vol_name)
 
+    def _add_to_group_if_needed(self, volume, vol_name):
+        if volume['group_id']:
+            # If the query blows up just let it raise up the stack, the volume
+            # should be put into an error state
+            group = volume_utils.group_get_by_id(volume['group_id'])
+            if volume_utils.is_group_a_cg_snapshot_type(group):
+                self._add_volume_to_consistency_group(
+                    volume['group_id'],
+                    vol_name
+                )
+        elif volume['consistencygroup_id']:
+            self._add_volume_to_consistency_group(
+                volume['consistencygroup_id'],
+                vol_name
+            )
+
+    def create_group(self, ctxt, group):
+        """Creates a group.
+
+        :param ctxt: the context of the caller.
+        :param group: the Group object of the group to be created.
+        :returns: model_update
+        """
+        if volume_utils.is_group_a_cg_snapshot_type(group):
+            return self.create_consistencygroup(ctxt, group)
+
+        # If it wasn't a consistency group request ignore it and we'll rely on
+        # the generic group implementation.
+        raise NotImplementedError()
+
+    def delete_group(self, ctxt, group, volumes):
+        """Deletes a group.
+
+        :param ctxt: the context of the caller.
+        :param group: the Group object of the group to be deleted.
+        :param volumes: a list of Volume objects in the group.
+        :returns: model_update, volumes_model_update
+        """
+        if volume_utils.is_group_a_cg_snapshot_type(group):
+            return self.delete_consistencygroup(ctxt, group, volumes)
+
+        # If it wasn't a consistency group request ignore it and we'll rely on
+        # the generic group implementation.
+        raise NotImplementedError()
+
+    def update_group(self, ctxt, group,
+                     add_volumes=None, remove_volumes=None):
+        """Updates a group.
+
+        :param ctxt: the context of the caller.
+        :param group: the Group object of the group to be updated.
+        :param add_volumes: a list of Volume objects to be added.
+        :param remove_volumes: a list of Volume objects to be removed.
+        :returns: model_update, add_volumes_update, remove_volumes_update
+        """
+
+        if volume_utils.is_group_a_cg_snapshot_type(group):
+            return self.update_consistencygroup(ctxt,
+                                                group,
+                                                add_volumes,
+                                                remove_volumes)
+
+        # If it wasn't a consistency group request ignore it and we'll rely on
+        # the generic group implementation.
+        raise NotImplementedError()
+
+    def create_group_from_src(self, ctxt, group, volumes,
+                              group_snapshot=None, snapshots=None,
+                              source_group=None, source_vols=None):
+        """Creates a group from source.
+
+        :param ctxt: the context of the caller.
+        :param group: the Group object to be created.
+        :param volumes: a list of Volume objects in the group.
+        :param group_snapshot: the GroupSnapshot object as source.
+        :param snapshots: a list of snapshot objects in group_snapshot.
+        :param source_group: the Group object as source.
+        :param source_vols: a list of volume objects in the source_group.
+        :returns: model_update, volumes_model_update
+        """
+        if volume_utils.is_group_a_cg_snapshot_type(group):
+            return self.create_consistencygroup_from_src(ctxt,
+                                                         group,
+                                                         volumes,
+                                                         group_snapshot,
+                                                         snapshots,
+                                                         source_group,
+                                                         source_vols)
+
+        # If it wasn't a consistency group request ignore it and we'll rely on
+        # the generic group implementation.
+        raise NotImplementedError()
+
+    def create_group_snapshot(self, ctxt, group_snapshot, snapshots):
+        """Creates a group_snapshot.
+
+        :param ctxt: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be created.
+        :param snapshots: a list of Snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        if volume_utils.is_group_a_cg_snapshot_type(group_snapshot):
+            return self.create_cgsnapshot(ctxt, group_snapshot, snapshots)
+
+        # If it wasn't a consistency group request ignore it and we'll rely on
+        # the generic group implementation.
+        raise NotImplementedError()
+
+    def delete_group_snapshot(self, ctxt, group_snapshot, snapshots):
+        """Deletes a group_snapshot.
+
+        :param ctxt: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be deleted.
+        :param snapshots: a list of snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        if volume_utils.is_group_a_cg_snapshot_type(group_snapshot):
+            return self.delete_cgsnapshot(ctxt, group_snapshot, snapshots)
+
+        # If it wasn't a consistency group request ignore it and we'll rely on
+        # the generic group implementation.
+        raise NotImplementedError()
+
     @pure_driver_debug_trace
     def manage_existing(self, volume, existing_ref):
         """Brings an existing backend storage object under Cinder management.
@@ -853,7 +964,7 @@ class PureBaseVolumeDriver(san.SanDriver):
                          "from existing hosts before importing"
                          ) % {'driver': self.__class__.__name__})
         new_vol_name = self._get_vol_name(volume)
-        LOG.info(_LI("Renaming existing volume %(ref_name)s to %(new_name)s"),
+        LOG.info("Renaming existing volume %(ref_name)s to %(new_name)s",
                  {"ref_name": ref_vol_name, "new_name": new_vol_name})
         self._rename_volume_object(ref_vol_name,
                                    new_vol_name,
@@ -885,8 +996,8 @@ class PureBaseVolumeDriver(san.SanDriver):
                 if (err.code == 400 and
                         ERR_MSG_NOT_EXIST in err.text):
                     ctxt.reraise = raise_not_exist
-                    LOG.warning(_LW("Unable to rename %(old_name)s, error "
-                                    "message: %(error)s"),
+                    LOG.warning("Unable to rename %(old_name)s, error "
+                                "message: %(error)s",
                                 {"old_name": old_name, "error": err.text})
         return new_name
 
@@ -901,7 +1012,7 @@ class PureBaseVolumeDriver(san.SanDriver):
 
         vol_name = self._get_vol_name(volume)
         unmanaged_vol_name = vol_name + UNMANAGED_SUFFIX
-        LOG.info(_LI("Renaming existing volume %(ref_name)s to %(new_name)s"),
+        LOG.info("Renaming existing volume %(ref_name)s to %(new_name)s",
                  {"ref_name": vol_name, "new_name": unmanaged_vol_name})
         self._rename_volume_object(vol_name, unmanaged_vol_name)
 
@@ -927,9 +1038,9 @@ class PureBaseVolumeDriver(san.SanDriver):
         self._validate_manage_existing_ref(existing_ref, is_snap=True)
         ref_snap_name = existing_ref['name']
         new_snap_name = self._get_snap_name(snapshot)
-        LOG.info(_LI("Renaming existing snapshot %(ref_name)s to "
-                     "%(new_name)s"), {"ref_name": ref_snap_name,
-                                       "new_name": new_snap_name})
+        LOG.info("Renaming existing snapshot %(ref_name)s to "
+                 "%(new_name)s", {"ref_name": ref_snap_name,
+                                  "new_name": new_snap_name})
         self._rename_volume_object(ref_snap_name,
                                    new_snap_name,
                                    raise_not_exist=True)
@@ -958,9 +1069,9 @@ class PureBaseVolumeDriver(san.SanDriver):
         self._verify_manage_snap_api_requirements()
         snap_name = self._get_snap_name(snapshot)
         unmanaged_snap_name = snap_name + UNMANAGED_SUFFIX
-        LOG.info(_LI("Renaming existing snapshot %(ref_name)s to "
-                     "%(new_name)s"), {"ref_name": snap_name,
-                                       "new_name": unmanaged_snap_name})
+        LOG.info("Renaming existing snapshot %(ref_name)s to "
+                 "%(new_name)s", {"ref_name": snap_name,
+                                  "new_name": unmanaged_snap_name})
         self._rename_volume_object(snap_name, unmanaged_snap_name)
 
     def get_manageable_volumes(self, cinder_volumes, marker, limit, offset,
@@ -1097,15 +1208,31 @@ class PureBaseVolumeDriver(san.SanDriver):
         return "consisgroup-%s-cinder" % id
 
     @staticmethod
-    def _get_pgroup_snap_suffix(cgsnapshot):
-        return "cgsnapshot-%s-cinder" % cgsnapshot.id
+    def _get_pgroup_snap_suffix(group_snapshot):
+        return "cgsnapshot-%s-cinder" % group_snapshot['id']
+
+    @staticmethod
+    def _get_group_id_from_snap(group_snap):
+        # We don't really care what kind of group it is, if we are calling
+        # this look for a group_id and fall back to using a consistencygroup_id
+        id = None
+        try:
+            id = group_snap['group_id']
+        except AttributeError:
+            pass
+        if id is None:
+            try:
+                id = group_snap['consistencygroup_id']
+            except AttributeError:
+                pass
+        return id
 
     @classmethod
-    def _get_pgroup_snap_name(cls, cgsnapshot):
+    def _get_pgroup_snap_name(cls, group_snapshot):
         """Return the name of the pgroup snapshot that Purity will use"""
-        cg_id = cgsnapshot.consistencygroup_id
-        return "%s.%s" % (cls._get_pgroup_name_from_id(cg_id),
-                          cls._get_pgroup_snap_suffix(cgsnapshot))
+        group_id = cls._get_group_id_from_snap(group_snapshot)
+        return "%s.%s" % (cls._get_pgroup_name_from_id(group_id),
+                          cls._get_pgroup_snap_suffix(group_snapshot))
 
     @staticmethod
     def _get_pgroup_vol_snap_name(pg_name, pgsnap_suffix, volume_name):
@@ -1118,13 +1245,14 @@ class PureBaseVolumeDriver(san.SanDriver):
     def _get_pgroup_snap_name_from_snapshot(self, snapshot):
         """Return the name of the snapshot that Purity will use."""
 
-        # TODO(patrickeast): Remove DB calls once the cgsnapshot objects are
-        # available to use and can be associated with the snapshot objects.
-        ctxt = context.get_admin_context()
-        cgsnapshot = self.db.cgsnapshot_get(ctxt, snapshot.cgsnapshot_id)
+        group_snap = None
+        if snapshot.group_snapshot:
+            group_snap = snapshot.group_snapshot
+        elif snapshot.cgsnapshot:
+            group_snap = snapshot.cgsnapshot
 
         pg_vol_snap_name = "%(group_snap)s.%(volume_name)s-cinder" % {
-            'group_snap': self._get_pgroup_snap_name(cgsnapshot),
+            'group_snap': self._get_pgroup_snap_name(group_snap),
             'volume_name': snapshot.volume_name
         }
         return pg_vol_snap_name
@@ -1212,11 +1340,11 @@ class PureBaseVolumeDriver(san.SanDriver):
                 if (err.code == 400 and
                         ERR_MSG_COULD_NOT_BE_FOUND in err.text):
                     ctxt.reraise = False
-                    LOG.warning(_LW("Disable replication on volume failed: "
-                                    "already disabled: %s"), err.text)
+                    LOG.warning("Disable replication on volume failed: "
+                                "already disabled: %s", err.text)
                 else:
-                    LOG.error(_LE("Disable replication on volume failed with "
-                                  "message: %s"), err.text)
+                    LOG.error("Disable replication on volume failed with "
+                              "message: %s", err.text)
 
     @pure_driver_debug_trace
     def failover_host(self, context, volumes, secondary_id=None):
@@ -1380,9 +1508,9 @@ class PureBaseVolumeDriver(san.SanDriver):
                             ERR_MSG_ALREADY_INCLUDES
                             in err.text):
                         ctxt.reraise = False
-                        LOG.info(_LI("Skipping add target %(target_array)s"
-                                     " to protection group %(pgname)s"
-                                     " since it's already added."),
+                        LOG.info("Skipping add target %(target_array)s"
+                                 " to protection group %(pgname)s"
+                                 " since it's already added.",
                                  {"target_array": target_array.array_name,
                                   "pgname": pg_name})
 
@@ -1404,9 +1532,9 @@ class PureBaseVolumeDriver(san.SanDriver):
                     if (err.code == 400 and
                             ERR_MSG_ALREADY_ALLOWED in err.text):
                         ctxt.reraise = False
-                        LOG.info(_LI("Skipping allow pgroup %(pgname)s on "
-                                     "target array %(target_array)s since "
-                                     "it is already allowed."),
+                        LOG.info("Skipping allow pgroup %(pgname)s on "
+                                 "target array %(target_array)s since "
+                                 "it is already allowed.",
                                  {"pgname": pg_name,
                                   "target_array": target_array.array_name})
 
@@ -1476,16 +1604,16 @@ class PureBaseVolumeDriver(san.SanDriver):
                 if err.code == 400 and ERR_MSG_ALREADY_EXISTS in err.text:
                     # Happens if the PG already exists
                     ctxt.reraise = False
-                    LOG.warning(_LW("Skipping creation of PG %s since it "
-                                    "already exists."), pgname)
+                    LOG.warning("Skipping creation of PG %s since it "
+                                "already exists.", pgname)
                     # We assume PG has already been setup with correct
                     # replication settings.
                     return
                 if err.code == 400 and (
                         ERR_MSG_PENDING_ERADICATION in err.text):
                     ctxt.reraise = False
-                    LOG.warning(_LW("Protection group %s is deleted but not"
-                                    " eradicated - will recreate."), pgname)
+                    LOG.warning("Protection group %s is deleted but not"
+                                " eradicated - will recreate.", pgname)
                     source_array.eradicate_pgroup(pgname)
                     source_array.create_pgroup(pgname)
 
@@ -1540,8 +1668,8 @@ class PureBaseVolumeDriver(san.SanDriver):
                     if pg_snap:
                         break
                 except Exception:
-                    LOG.exception(_LE('Error finding replicated pg snapshot '
-                                      'on %(secondary)s.'),
+                    LOG.exception('Error finding replicated pg snapshot '
+                                  'on %(secondary)s.',
                                   {'secondary': array._backend_id})
 
             if not secondary_array:
@@ -1569,8 +1697,13 @@ class PureBaseVolumeDriver(san.SanDriver):
 
 @interface.volumedriver
 class PureISCSIDriver(PureBaseVolumeDriver, san.SanISCSIDriver):
+    """OpenStack Volume Driver to support Pure Storage FlashArray.
 
-    VERSION = "5.0.0"
+    This version of the driver enables the use of iSCSI for
+    the underlying storage connectivity with the FlashArray.
+    """
+
+    VERSION = "6.0.0"
 
     def __init__(self, *args, **kwargs):
         execute = kwargs.pop("execute", utils.execute)
@@ -1689,31 +1822,31 @@ class PureISCSIDriver(PureBaseVolumeDriver, san.SanISCSIDriver):
 
         if host:
             host_name = host["name"]
-            LOG.info(_LI("Re-using existing purity host %(host_name)r"),
+            LOG.info("Re-using existing purity host %(host_name)r",
                      {"host_name": host_name})
             if self.configuration.use_chap_auth:
                 if not GENERATED_NAME.match(host_name):
-                    LOG.error(_LE("Purity host %(host_name)s is not managed "
-                                  "by Cinder and can't have CHAP credentials "
-                                  "modified. Remove IQN %(iqn)s from the host "
-                                  "to resolve this issue."),
+                    LOG.error("Purity host %(host_name)s is not managed "
+                              "by Cinder and can't have CHAP credentials "
+                              "modified. Remove IQN %(iqn)s from the host "
+                              "to resolve this issue.",
                               {"host_name": host_name,
                                "iqn": connector["initiator"]})
                     raise exception.PureDriverException(
                         reason=_("Unable to re-use a host that is not "
                                  "managed by Cinder with use_chap_auth=True,"))
                 elif chap_username is None or chap_password is None:
-                    LOG.error(_LE("Purity host %(host_name)s is managed by "
-                                  "Cinder but CHAP credentials could not be "
-                                  "retrieved from the Cinder database."),
+                    LOG.error("Purity host %(host_name)s is managed by "
+                              "Cinder but CHAP credentials could not be "
+                              "retrieved from the Cinder database.",
                               {"host_name": host_name})
                     raise exception.PureDriverException(
                         reason=_("Unable to re-use host with unknown CHAP "
                                  "credentials configured."))
         else:
             host_name = self._generate_purity_host_name(connector["host"])
-            LOG.info(_LI("Creating host object %(host_name)r with IQN:"
-                         " %(iqn)s."), {"host_name": host_name, "iqn": iqn})
+            LOG.info("Creating host object %(host_name)r with IQN:"
+                     " %(iqn)s.", {"host_name": host_name, "iqn": iqn})
             try:
                 current_array.create_host(host_name, iqnlist=[iqn])
             except purestorage.PureHTTPError as err:
@@ -1751,8 +1884,14 @@ class PureISCSIDriver(PureBaseVolumeDriver, san.SanISCSIDriver):
 
 @interface.volumedriver
 class PureFCDriver(PureBaseVolumeDriver, driver.FibreChannelDriver):
+    """OpenStack Volume Driver to support Pure Storage FlashArray.
 
-    VERSION = "3.0.0"
+    This version of the driver enables the use of Fibre Channel for
+    the underlying storage connectivity with the FlashArray. It fully
+    supports the Cinder Fibre Channel Zone Manager.
+    """
+
+    VERSION = "4.0.0"
 
     def __init__(self, *args, **kwargs):
         execute = kwargs.pop("execute", utils.execute)
@@ -1774,7 +1913,7 @@ class PureFCDriver(PureBaseVolumeDriver, driver.FibreChannelDriver):
         ports = array.list_ports()
         return [port["wwn"] for port in ports if port["wwn"]]
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     @pure_driver_debug_trace
     def initialize_connection(self, volume, connector):
         """Allow connection to connector and return connection info."""
@@ -1808,12 +1947,12 @@ class PureFCDriver(PureBaseVolumeDriver, driver.FibreChannelDriver):
 
         if host:
             host_name = host["name"]
-            LOG.info(_LI("Re-using existing purity host %(host_name)r"),
+            LOG.info("Re-using existing purity host %(host_name)r",
                      {"host_name": host_name})
         else:
             host_name = self._generate_purity_host_name(connector["host"])
-            LOG.info(_LI("Creating host object %(host_name)r with WWN:"
-                         " %(wwn)s."), {"host_name": host_name, "wwn": wwns})
+            LOG.info("Creating host object %(host_name)r with WWN:"
+                     " %(wwn)s.", {"host_name": host_name, "wwn": wwns})
             try:
                 current_array.create_host(host_name, wwnlist=wwns)
             except purestorage.PureHTTPError as err:
@@ -1851,7 +1990,7 @@ class PureFCDriver(PureBaseVolumeDriver, driver.FibreChannelDriver):
 
         return init_targ_map
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     @pure_driver_debug_trace
     def terminate_connection(self, volume, connector, **kwargs):
         """Terminate connection."""

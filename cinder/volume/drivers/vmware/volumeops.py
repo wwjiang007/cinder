@@ -21,17 +21,18 @@ Implements operations on volumes residing on VMware datastores.
 from oslo_log import log as logging
 from oslo_utils import units
 from oslo_vmware import exceptions
-from oslo_vmware import pbm
 from oslo_vmware import vim_util
 from six.moves import urllib
 
-from cinder.i18n import _, _LE, _LI
+from cinder.i18n import _
 from cinder.volume.drivers.vmware import exceptions as vmdk_exceptions
 
 
 LOG = logging.getLogger(__name__)
 LINKED_CLONE_TYPE = 'linked'
 FULL_CLONE_TYPE = 'full'
+
+BACKING_UUID_KEY = 'instanceUuid'
 
 
 def split_datastore_path(datastore_path):
@@ -315,7 +316,7 @@ class VMwareVolumeOps(object):
                                         backing)
         LOG.debug("Initiated deletion of VM backing: %s.", backing)
         self._session.wait_for_task(task)
-        LOG.info(_LI("Deleted the VM backing: %s."), backing)
+        LOG.info("Deleted the VM backing: %s.", backing)
 
     # TODO(kartikaditya) Keep the methods not specific to volume in
     # a different file
@@ -561,8 +562,8 @@ class VMwareVolumeOps(object):
                                         newCapacityKb=size_in_kb,
                                         eagerZero=eager_zero)
         self._session.wait_for_task(task)
-        LOG.info(_LI("Successfully extended virtual disk: %(path)s to "
-                     "%(size)s GB."),
+        LOG.info("Successfully extended virtual disk: %(path)s to "
+                 "%(size)s GB.",
                  {'path': path, 'size': requested_size_in_gb})
 
     def _create_controller_config_spec(self, adapter_type):
@@ -704,6 +705,8 @@ class VMwareVolumeOps(object):
             create_spec.vmProfile = [vmProfile]
 
         if extra_config:
+            if BACKING_UUID_KEY in extra_config:
+                create_spec.instanceUuid = extra_config.pop(BACKING_UUID_KEY)
             create_spec.extraConfig = self._get_extra_config_option_values(
                 extra_config)
 
@@ -738,7 +741,7 @@ class VMwareVolumeOps(object):
                                         pool=resource_pool, host=host)
         task_info = self._session.wait_for_task(task)
         backing = task_info.result
-        LOG.info(_LI("Successfully created volume backing: %s."), backing)
+        LOG.info("Successfully created volume backing: %s.", backing)
         return backing
 
     def create_backing(self, name, size_kb, disk_type, folder, resource_pool,
@@ -904,8 +907,8 @@ class VMwareVolumeOps(object):
                                         backing, spec=relocate_spec)
         LOG.debug("Initiated relocation of volume backing: %s.", backing)
         self._session.wait_for_task(task)
-        LOG.info(_LI("Successfully relocated volume backing: %(backing)s "
-                     "to datastore: %(ds)s and resource pool: %(rp)s."),
+        LOG.info("Successfully relocated volume backing: %(backing)s "
+                 "to datastore: %(ds)s and resource pool: %(rp)s.",
                  {'backing': backing, 'ds': datastore, 'rp': resource_pool})
 
     def move_backing_to_folder(self, backing, folder):
@@ -922,9 +925,9 @@ class VMwareVolumeOps(object):
         LOG.debug("Initiated move of volume backing: %(backing)s into the "
                   "folder: %(fol)s.", {'backing': backing, 'fol': folder})
         self._session.wait_for_task(task)
-        LOG.info(_LI("Successfully moved volume "
-                     "backing: %(backing)s into the "
-                     "folder: %(fol)s."), {'backing': backing, 'fol': folder})
+        LOG.info("Successfully moved volume "
+                 "backing: %(backing)s into the "
+                 "folder: %(fol)s.", {'backing': backing, 'fol': folder})
 
     def create_snapshot(self, backing, name, description, quiesce=False):
         """Create snapshot of the backing with given name and description.
@@ -946,8 +949,8 @@ class VMwareVolumeOps(object):
                   "named: %(name)s.", {'backing': backing, 'name': name})
         task_info = self._session.wait_for_task(task)
         snapshot = task_info.result
-        LOG.info(_LI("Successfully created snapshot: %(snap)s for volume "
-                     "backing: %(backing)s."),
+        LOG.info("Successfully created snapshot: %(snap)s for volume "
+                 "backing: %(backing)s.",
                  {'snap': snapshot, 'backing': backing})
         return snapshot
 
@@ -1008,8 +1011,8 @@ class VMwareVolumeOps(object):
                   {'name': name, 'backing': backing})
         snapshot = self.get_snapshot(backing, name)
         if not snapshot:
-            LOG.info(_LI("Did not find the snapshot: %(name)s for backing: "
-                         "%(backing)s. Need not delete anything."),
+            LOG.info("Did not find the snapshot: %(name)s for backing: "
+                     "%(backing)s. Need not delete anything.",
                      {'name': name, 'backing': backing})
             return
         task = self._session.invoke_api(self._session.vim,
@@ -1019,8 +1022,8 @@ class VMwareVolumeOps(object):
                   "%(backing)s.",
                   {'name': name, 'backing': backing})
         self._session.wait_for_task(task)
-        LOG.info(_LI("Successfully deleted snapshot: %(name)s of backing: "
-                     "%(backing)s."), {'backing': backing, 'name': name})
+        LOG.info("Successfully deleted snapshot: %(name)s of backing: "
+                 "%(backing)s.", {'backing': backing, 'name': name})
 
     def _get_folder(self, backing):
         """Get parent folder of the backing.
@@ -1063,6 +1066,8 @@ class VMwareVolumeOps(object):
 
         if extra_config:
             config_spec = cf.create('ns0:VirtualMachineConfigSpec')
+            if BACKING_UUID_KEY in extra_config:
+                config_spec.instanceUuid = extra_config.pop(BACKING_UUID_KEY)
             config_spec.extraConfig = self._get_extra_config_option_values(
                 extra_config)
             clone_spec.config = config_spec
@@ -1116,7 +1121,7 @@ class VMwareVolumeOps(object):
         LOG.debug("Initiated clone of backing: %s.", name)
         task_info = self._session.wait_for_task(task)
         new_backing = task_info.result
-        LOG.info(_LI("Successfully created clone: %s."), new_backing)
+        LOG.info("Successfully created clone: %s.", new_backing)
         return new_backing
 
     def _reconfigure_backing(self, backing, reconfig_spec):
@@ -1189,7 +1194,7 @@ class VMwareVolumeOps(object):
         :param backing: VM to be renamed
         :param new_name: new VM name
         """
-        LOG.info(_LI("Renaming backing VM: %(backing)s to %(new_name)s."),
+        LOG.info("Renaming backing VM: %(backing)s to %(new_name)s.",
                  {'backing': backing,
                   'new_name': new_name})
         rename_task = self._session.invoke_api(self._session.vim,
@@ -1198,7 +1203,7 @@ class VMwareVolumeOps(object):
                                                newName=new_name)
         LOG.debug("Task: %s created for renaming VM.", rename_task)
         self._session.wait_for_task(rename_task)
-        LOG.info(_LI("Backing VM: %(backing)s renamed to %(new_name)s."),
+        LOG.info("Backing VM: %(backing)s renamed to %(new_name)s.",
                  {'backing': backing,
                   'new_name': new_name})
 
@@ -1259,6 +1264,8 @@ class VMwareVolumeOps(object):
     def update_backing_extra_config(self, backing, extra_config):
         cf = self._session.vim.client.factory
         reconfig_spec = cf.create('ns0:VirtualMachineConfigSpec')
+        if BACKING_UUID_KEY in extra_config:
+            reconfig_spec.instanceUuid = extra_config.pop(BACKING_UUID_KEY)
         reconfig_spec.extraConfig = self._get_extra_config_option_values(
             extra_config)
         self._reconfigure_backing(backing, reconfig_spec)
@@ -1266,6 +1273,15 @@ class VMwareVolumeOps(object):
                   "%(extra_config)s.",
                   {'backing': backing,
                    'extra_config': extra_config})
+
+    def update_backing_uuid(self, backing, uuid):
+        cf = self._session.vim.client.factory
+        reconfig_spec = cf.create('ns0:VirtualMachineConfigSpec')
+        reconfig_spec.instanceUuid = uuid
+        self._reconfigure_backing(backing, reconfig_spec)
+        LOG.debug("Backing: %(backing)s reconfigured with uuid: %(uuid)s.",
+                  {'backing': backing,
+                   'uuid': uuid})
 
     def delete_file(self, file_path, datacenter=None):
         """Delete file or folder on the datastore.
@@ -1282,7 +1298,7 @@ class VMwareVolumeOps(object):
                                         datacenter=datacenter)
         LOG.debug("Initiated deletion via task: %s.", task)
         self._session.wait_for_task(task)
-        LOG.info(_LI("Successfully deleted file: %s."), file_path)
+        LOG.info("Successfully deleted file: %s.", file_path)
 
     def create_datastore_folder(self, ds_name, folder_path, datacenter):
         """Creates a datastore folder.
@@ -1302,7 +1318,7 @@ class VMwareVolumeOps(object):
                                      fileManager,
                                      name=ds_folder_path,
                                      datacenter=datacenter)
-            LOG.info(_LI("Created datastore folder: %s."), folder_path)
+            LOG.info("Created datastore folder: %s.", folder_path)
         except exceptions.FileAlreadyExistsException:
             LOG.debug("Datastore folder: %s already exists.", folder_path)
 
@@ -1338,8 +1354,7 @@ class VMwareVolumeOps(object):
             if device.__class__.__name__ == "VirtualDisk":
                 return device
 
-        LOG.error(_LE("Virtual disk device of "
-                      "backing: %s not found."), backing)
+        LOG.error("Virtual disk device of backing: %s not found.", backing)
         raise vmdk_exceptions.VirtualDiskNotFoundException()
 
     def get_vmdk_path(self, backing):
@@ -1458,7 +1473,7 @@ class VMwareVolumeOps(object):
 
         LOG.debug("Initiated copying disk data via task: %s.", task)
         self._session.wait_for_task(task)
-        LOG.info(_LI("Successfully copied disk at: %(src)s to: %(dest)s."),
+        LOG.info("Successfully copied disk at: %(src)s to: %(dest)s.",
                  {'src': src_vmdk_file_path, 'dest': dest_vmdk_file_path})
 
     def move_vmdk_file(self, src_dc_ref, src_vmdk_file_path,
@@ -1502,17 +1517,7 @@ class VMwareVolumeOps(object):
                                         datacenter=dc_ref)
         LOG.debug("Initiated deleting vmdk file via task: %s.", task)
         self._session.wait_for_task(task)
-        LOG.info(_LI("Deleted vmdk file: %s."), vmdk_file_path)
-
-    def get_profile(self, backing):
-        """Query storage profile associated with the given backing.
-
-        :param backing: backing reference
-        :return: profile name
-        """
-        profile_ids = pbm.get_profiles(self._session, backing)
-        if profile_ids:
-            return pbm.get_profiles_by_ids(self._session, profile_ids)[0].name
+        LOG.info("Deleted vmdk file: %s.", vmdk_file_path)
 
     def _get_all_clusters(self):
         clusters = {}
@@ -1538,7 +1543,7 @@ class VMwareVolumeOps(object):
         clusters = self._get_all_clusters()
         for name in names:
             if name not in clusters:
-                LOG.error(_LE("Compute cluster: %s not found."), name)
+                LOG.error("Compute cluster: %s not found.", name)
                 raise vmdk_exceptions.ClusterNotFoundException(cluster=name)
             clusters_ref[name] = clusters[name]
 

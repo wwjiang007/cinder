@@ -192,7 +192,11 @@ class RemoteFsSnapDriverTestCase(test.TestCase):
         self._driver._write_info_file.assert_called_once_with(
             mock.sentinel.fake_info_path, expected_info)
 
-    def test_do_create_snapshot(self):
+    @mock.patch.object(remotefs.RemoteFSDriver,
+                       'secure_file_operations_enabled',
+                       return_value=True)
+    @mock.patch.object(os, 'stat')
+    def test_do_create_snapshot(self, _mock_stat, _mock_sec_enabled):
         self._driver._local_volume_dir = mock.Mock(
             return_value=self._fake_volume_path)
         fake_backing_path = os.path.join(
@@ -217,9 +221,12 @@ class RemoteFsSnapDriverTestCase(test.TestCase):
                     '-b', self._fake_volume.name,
                     '-F', mock.sentinel.backing_fmt,
                     self._fake_snapshot_path]
-
-        self._driver._execute.assert_any_call(*command1, run_as_root=True)
-        self._driver._execute.assert_any_call(*command2, run_as_root=True)
+        command3 = ['chown', '--reference=%s' % fake_backing_path,
+                    self._fake_snapshot_path]
+        calls = [mock.call(*command1, run_as_root=True),
+                 mock.call(*command2, run_as_root=True),
+                 mock.call(*command3, run_as_root=True)]
+        self._driver._execute.assert_has_calls(calls)
 
     def _test_create_snapshot(self, volume_in_use=False):
         fake_snapshot_info = {}
@@ -391,7 +398,8 @@ class RemoteFsSnapDriverTestCase(test.TestCase):
                               mock.sentinel.image_path,
                               fake_vol_name, basedir)
 
-        mock_qemu_img_info.assert_called_with(mock.sentinel.image_path)
+        mock_qemu_img_info.assert_called_with(mock.sentinel.image_path,
+                                              run_as_root=True)
 
     @ddt.data([None, '/fake_basedir'],
               ['/fake_basedir/cb2016/fake_vol_name', '/fake_basedir'],

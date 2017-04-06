@@ -29,7 +29,7 @@ import six
 from six.moves import urllib
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
 from cinder.objects import fields
@@ -66,11 +66,6 @@ RBD_OPTS = [
     cfg.StrOpt('rbd_secret_uuid',
                help='The libvirt uuid of the secret for the rbd_user '
                     'volumes'),
-    cfg.StrOpt('volume_tmp_dir',
-               help='Directory where temporary image files are stored '
-                    'when the volume driver does not write them directly '
-                    'to the volume.  Warning: this option is now deprecated, '
-                    'please use image_conversion_dir instead.'),
     cfg.IntOpt('rbd_max_clone_depth',
                default=5,
                help='Maximum number of nested volume clones that are '
@@ -123,7 +118,7 @@ class RBDVolumeProxy(object):
                                            snapshot=snapshot,
                                            read_only=read_only)
         except driver.rbd.Error:
-            LOG.exception(_LE("error opening rbd image %s"), name)
+            LOG.exception("error opening rbd image %s", name)
             driver._disconnect_from_rados(client, ioctx)
             raise
         self.driver = driver
@@ -164,8 +159,7 @@ class RADOSClient(object):
 
 
 @interface.volumedriver
-class RBDDriver(driver.TransferVD, driver.ExtendVD,
-                driver.CloneableImageVD, driver.SnapshotVD,
+class RBDDriver(driver.CloneableImageVD,
                 driver.MigrateVD, driver.ManageableVD, driver.BaseVD):
     """Implements RADOS block device (RBD) volume commands."""
 
@@ -243,7 +237,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
             replication_target = {'name': name,
                                   'conf': utils.convert_str(conf),
                                   'user': utils.convert_str(user)}
-            LOG.info(_LI('Adding replication target: %s.'), name)
+            LOG.info('Adding replication target: %s.', name)
             self._replication_targets.append(replication_target)
             self._target_names.append(name)
 
@@ -360,10 +354,6 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
             ports.append(port)
         return hosts, ports
 
-    def _iterate_cb(self, offset, length, exists):
-        if exists:
-            self._total_usage += length
-
     def _get_usage_info(self):
         with RADOSClient(self) as client:
             for t in self.RBDProxy().list(client.ioctx):
@@ -372,7 +362,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
                     # non-default volume_name_template settings.  Template
                     # must start with "volume".
                     with RBDVolumeProxy(self, t, read_only=True) as v:
-                        v.diff_iterate(0, v.size(), None, self._iterate_cb)
+                        self._total_usage += v.size()
 
     def _update_volume_stats(self):
         stats = {
@@ -402,7 +392,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
                 ret, outbuf, _outs = client.cluster.mon_command(
                     '{"prefix":"df", "format":"json"}', '')
                 if ret != 0:
-                    LOG.warning(_LW('Unable to get rados pool stats.'))
+                    LOG.warning('Unable to get rados pool stats.')
                 else:
                     outbuf = json.loads(outbuf)
                     pool_stats = [pool for pool in outbuf['pools'] if
@@ -421,7 +411,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
             stats['provisioned_capacity_gb'] = total_usage_gb
         except self.rados.Error:
             # just log and return unknown capacities
-            LOG.exception(_LE('error refreshing volume stats'))
+            LOG.exception('error refreshing volume stats')
         self._stats = stats
 
     def get_volume_stats(self, refresh=False):
@@ -750,7 +740,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
             try:
                 rbd_image = self.rbd.Image(client.ioctx, volume_name)
             except self.rbd.ImageNotFound:
-                LOG.info(_LI("volume %s no longer exists in backend"),
+                LOG.info("volume %s no longer exists in backend",
                          volume_name)
                 return
 
@@ -802,8 +792,8 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
                     # delete can be retried.
                     raise exception.VolumeIsBusy(msg, volume_name=volume_name)
                 except self.rbd.ImageNotFound:
-                    LOG.info(_LI("RBD volume %s not found, allowing delete "
-                                 "operation to proceed."), volume_name)
+                    LOG.info("RBD volume %s not found, allowing delete "
+                             "operation to proceed.", volume_name)
                     return
 
                 # If it is a clone, walk back up the parent chain deleting
@@ -837,19 +827,19 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
                 volume.unprotect_snap(snap_name)
             except self.rbd.InvalidArgument:
                 LOG.info(
-                    _LI("InvalidArgument: Unable to unprotect snapshot %s."),
+                    "InvalidArgument: Unable to unprotect snapshot %s.",
                     snap_name)
             except self.rbd.ImageNotFound:
                 LOG.info(
-                    _LI("ImageNotFound: Unable to unprotect snapshot %s."),
+                    "ImageNotFound: Unable to unprotect snapshot %s.",
                     snap_name)
             except self.rbd.ImageBusy:
                 children_list = self._get_children_info(volume, snap_name)
 
                 if children_list:
                     for (pool, image) in children_list:
-                        LOG.info(_LI('Image %(pool)s/%(image)s is dependent '
-                                     'on the snapshot %(snap)s.'),
+                        LOG.info('Image %(pool)s/%(image)s is dependent '
+                                 'on the snapshot %(snap)s.',
                                  {'pool': pool,
                                   'image': image,
                                   'snap': snap_name})
@@ -858,7 +848,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
             try:
                 volume.remove_snap(snap_name)
             except self.rbd.ImageNotFound:
-                LOG.info(_LI("Snapshot %s does not exist in backend."),
+                LOG.info("Snapshot %s does not exist in backend.",
                          snap_name)
 
     def _disable_replication(self, volume):
@@ -941,8 +931,8 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
                         'updates': {'replication_status': replication_status}}
             except Exception as e:
                 replication_status = fields.ReplicationStatus.FAILOVER_ERROR
-                LOG.error(_LE('Failed to failover volume %(volume)s with '
-                              'error: %(error)s.'),
+                LOG.error('Failed to failover volume %(volume)s with '
+                          'error: %(error)s.',
                           {'volume': volume.name, 'error': e})
         else:
             replication_status = fields.ReplicationStatus.NOT_CAPABLE
@@ -995,7 +985,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
 
     def failover_host(self, context, volumes, secondary_id=None):
         """Failover to replication target."""
-        LOG.info(_LI('RBD driver failover started.'))
+        LOG.info('RBD driver failover started.')
         if not self._is_replication_enabled:
             raise exception.UnableToFailOver(
                 reason=_('RBD: Replication is not enabled.'))
@@ -1015,7 +1005,7 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
                    for volume, is_demoted in zip(volumes, demotion_results)]
         self._active_backend_id = secondary_id
         self._active_config = remote
-        LOG.info(_LI('RBD driver failover completed.'))
+        LOG.info('RBD driver failover completed.')
         return secondary_id, updates
 
     def ensure_export(self, context, volume):
@@ -1129,13 +1119,8 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
         return ({}, False)
 
     def _image_conversion_dir(self):
-        tmpdir = (self.configuration.volume_tmp_dir or
-                  CONF.image_conversion_dir or
+        tmpdir = (CONF.image_conversion_dir or
                   tempfile.gettempdir())
-
-        if tmpdir == self.configuration.volume_tmp_dir:
-            LOG.warning(_LW('volume_tmp_dir is now deprecated, please use '
-                            'image_conversion_dir.'))
 
         # ensure temporary directory exists
         if not os.path.exists(tmpdir):
@@ -1167,6 +1152,14 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
             args.extend(self._ceph_args())
             self._try_execute(*args)
         self._resize(volume)
+        # We may need to re-enable replication because we have deleted the
+        # original image and created a new one using the command line import.
+        try:
+            self._enable_replication_if_needed(volume)
+        except Exception:
+            err_msg = (_('Failed to enable image replication'))
+            raise exception.ReplicationError(reason=err_msg,
+                                             volume_id=volume.id)
 
     def copy_volume_to_image(self, context, volume, image_service, image_meta):
         tmp_dir = self._image_conversion_dir()
@@ -1318,8 +1311,8 @@ class RBDDriver(driver.TransferVD, driver.ExtendVD,
                                        utils.convert_str(existing_name),
                                        utils.convert_str(wanted_name))
             except self.rbd.ImageNotFound:
-                LOG.error(_LE('Unable to rename the logical volume '
-                              'for volume %s.'), volume.id)
+                LOG.error('Unable to rename the logical volume '
+                          'for volume %s.', volume.id)
                 # If the rename fails, _name_id should be set to the new
                 # volume id and provider_location should be set to the
                 # one from the new volume as well.

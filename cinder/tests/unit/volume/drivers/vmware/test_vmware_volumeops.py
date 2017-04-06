@@ -576,12 +576,14 @@ class VolumeOpsTestCase(test.TestCase):
         profile_id = mock.sentinel.profile_id
         option_key = mock.sentinel.key
         option_value = mock.sentinel.value
-        extra_config = {option_key: option_value}
+        extra_config = {option_key: option_value,
+                        volumeops.BACKING_UUID_KEY: mock.sentinel.uuid}
         ret = self.vops._get_create_spec_disk_less(name, ds_name, profile_id,
                                                    extra_config)
 
         factory.create.side_effect = None
         self.assertEqual(name, ret.name)
+        self.assertEqual(mock.sentinel.uuid, ret.instanceUuid)
         self.assertEqual('[%s]' % ds_name, ret.files.vmPathName)
         self.assertEqual("vmx-08", ret.version)
         self.assertEqual(profile_id, ret.vmProfile[0].profileId)
@@ -959,7 +961,8 @@ class VolumeOpsTestCase(test.TestCase):
         rp = mock.sentinel.rp
         key = mock.sentinel.key
         value = mock.sentinel.value
-        extra_config = {key: value}
+        extra_config = {key: value,
+                        volumeops.BACKING_UUID_KEY: mock.sentinel.uuid}
         ret = self.vops._get_clone_spec(datastore, disk_move_type, snapshot,
                                         backing, disk_type, host, rp,
                                         extra_config)
@@ -968,6 +971,7 @@ class VolumeOpsTestCase(test.TestCase):
         self.assertFalse(ret.powerOn)
         self.assertFalse(ret.template)
         self.assertEqual(snapshot, ret.snapshot)
+        self.assertEqual(mock.sentinel.uuid, ret.config.instanceUuid)
         get_relocate_spec.assert_called_once_with(datastore, rp, host,
                                                   disk_move_type, disk_type,
                                                   None)
@@ -1172,11 +1176,29 @@ class VolumeOpsTestCase(test.TestCase):
         get_extra_config_option_values.return_value = option_values
 
         backing = mock.sentinel.backing
-        extra_config = mock.sentinel.extra_config
+        option_key = mock.sentinel.key
+        option_value = mock.sentinel.value
+        extra_config = {option_key: option_value,
+                        volumeops.BACKING_UUID_KEY: mock.sentinel.uuid}
         self.vops.update_backing_extra_config(backing, extra_config)
 
-        get_extra_config_option_values.assert_called_once_with(extra_config)
+        get_extra_config_option_values.assert_called_once_with(
+            {option_key: option_value})
+        self.assertEqual(mock.sentinel.uuid, reconfig_spec.instanceUuid)
         self.assertEqual(option_values, reconfig_spec.extraConfig)
+        reconfigure_backing.assert_called_once_with(backing, reconfig_spec)
+
+    @mock.patch('cinder.volume.drivers.vmware.volumeops.VMwareVolumeOps.'
+                '_reconfigure_backing')
+    def test_update_backing_uuid(self, reconfigure_backing):
+        reconfig_spec = mock.Mock()
+        self.session.vim.client.factory.create.return_value = reconfig_spec
+
+        backing = mock.sentinel.backing
+        uuid = mock.sentinel.uuid
+        self.vops.update_backing_uuid(backing, uuid)
+
+        self.assertEqual(mock.sentinel.uuid, reconfig_spec.instanceUuid)
         reconfigure_backing.assert_called_once_with(backing, reconfig_spec)
 
     def test_change_backing_profile(self):
@@ -1502,36 +1524,6 @@ class VolumeOpsTestCase(test.TestCase):
                                            name=vmdk_file_path,
                                            datacenter=dc_ref)
         self.session.wait_for_task.assert_called_once_with(task)
-
-    @mock.patch('oslo_vmware.pbm.get_profiles_by_ids')
-    @mock.patch('oslo_vmware.pbm.get_profiles')
-    def test_get_profile(self, get_profiles, get_profiles_by_ids):
-
-        profile_ids = [mock.sentinel.profile_id]
-        get_profiles.return_value = profile_ids
-
-        profile_name = mock.sentinel.profile_name
-        profile = mock.Mock()
-        profile.name = profile_name
-        get_profiles_by_ids.return_value = [profile]
-
-        backing = mock.sentinel.backing
-        self.assertEqual(profile_name, self.vops.get_profile(backing))
-        get_profiles.assert_called_once_with(self.session, backing)
-        get_profiles_by_ids.assert_called_once_with(self.session, profile_ids)
-
-    @mock.patch('oslo_vmware.pbm.get_profiles_by_ids')
-    @mock.patch('oslo_vmware.pbm.get_profiles')
-    def test_get_profile_with_no_profile(self, get_profiles,
-                                         get_profiles_by_ids):
-
-        get_profiles.return_value = []
-
-        backing = mock.sentinel.backing
-        self.assertIsNone(self.vops.get_profile(backing))
-
-        get_profiles.assert_called_once_with(self.session, backing)
-        self.assertFalse(get_profiles_by_ids.called)
 
     def test_extend_virtual_disk(self):
         """Test volumeops.extend_virtual_disk."""

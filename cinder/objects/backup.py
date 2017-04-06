@@ -130,7 +130,7 @@ class Backup(base.CinderPersistentObject, base.CinderObject,
     def decode_record(backup_url):
         """Deserialize backup metadata from string into a dictionary.
 
-        :raises: InvalidInput
+        :raises InvalidInput:
         """
         try:
             return jsonutils.loads(base64.decode_as_text(backup_url))
@@ -192,8 +192,8 @@ class BackupList(base.ObjectListBase, base.CinderObject):
                                   backups)
 
     @classmethod
-    def get_active_by_window(cls, context, begin, end):
-        backups = db.backup_get_active_by_window(context, begin, end)
+    def get_all_active_by_window(cls, context, begin, end):
+        backups = db.backup_get_all_active_by_window(context, begin, end)
         return base.obj_make_list(context, cls(context), objects.Backup,
                                   backups)
 

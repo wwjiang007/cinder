@@ -53,7 +53,7 @@ import six
 import webob.exc
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LW
+from cinder.i18n import _
 from cinder import keymgr
 
 
@@ -289,7 +289,7 @@ def monkey_patch():
     Example: 'cinder.api.ec2.cloud:' \
      cinder.openstack.common.notifier.api.notify_decorator'
 
-    Parameters of the decorator is as follows.
+    Parameters of the decorator are as follows.
     (See cinder.openstack.common.notifier.api.notify_decorator)
 
     :param name: name of the function
@@ -398,7 +398,7 @@ def robust_file_write(directory, filename, data):
             os.fsync(dirfd)
     except OSError:
         with excutils.save_and_reraise_exception():
-            LOG.error(_LE("Failed to write persistence file: %(path)s."),
+            LOG.error("Failed to write persistence file: %(path)s.",
                       {'path': os.path.join(directory, filename)})
             if os.path.isfile(tempname):
                 os.unlink(tempname)
@@ -535,7 +535,7 @@ def require_driver_initialized(driver):
     # we can't do anything if the driver didn't init
     if not driver.initialized:
         driver_name = driver.__class__.__name__
-        LOG.error(_LE("Volume driver %s not initialized"), driver_name)
+        LOG.error("Volume driver %s not initialized", driver_name)
         raise exception.DriverNotInitialized()
     else:
         log_unsupported_driver_warning(driver)
@@ -545,9 +545,9 @@ def log_unsupported_driver_warning(driver):
     """Annoy the log about unsupported drivers."""
     if not driver.supported:
         # Check to see if the driver is flagged as supported.
-        LOG.warning(_LW("Volume driver (%(driver_name)s %(version)s) is "
-                        "currently unsupported and may be removed in the "
-                        "next release of OpenStack.  Use at your own risk."),
+        LOG.warning("Volume driver (%(driver_name)s %(version)s) is "
+                    "currently unsupported and may be removed in the "
+                    "next release of OpenStack.  Use at your own risk.",
                     {'driver_name': driver.__class__.__name__,
                      'version': driver.get_version()},
                     resource={'type': 'driver',
@@ -592,11 +592,11 @@ def _get_disk_of_partition(devpath, st=None):
     return (devpath, st)
 
 
-def get_bool_param(param_string, params):
-    param = params.get(param_string, False)
+def get_bool_param(param_string, params, default=False):
+    param = params.get(param_string, default)
     if not strutils.is_valid_boolstr(param):
-        msg = _('Value %(param)s for %(param_string)s is not a '
-                'boolean.') % {'param': param, 'param_string': param_string}
+        msg = _("Value '%(param)s' for '%(param_string)s' is not "
+                "a boolean.") % {'param': param, 'param_string': param_string}
         raise exception.InvalidParameterValue(err=msg)
 
     return strutils.bool_from_string(param, strict=True)
@@ -933,7 +933,7 @@ def setup_tracing(trace_flags):
     """Set global variables for each trace flag.
 
     Sets variables TRACE_METHOD and TRACE_API, which represent
-    whether to log method and api traces.
+    whether to log methods or api traces.
 
     :param trace_flags: a list of strings
     """
@@ -944,7 +944,7 @@ def setup_tracing(trace_flags):
     except TypeError:  # Handle when trace_flags is None or a test mock
         trace_flags = []
     for invalid_flag in (set(trace_flags) - VALID_TRACE_FLAGS):
-        LOG.warning(_LW('Invalid trace flag: %s'), invalid_flag)
+        LOG.warning('Invalid trace flag: %s', invalid_flag)
     TRACE_METHOD = 'method' in trace_flags
     TRACE_API = 'api' in trace_flags
 
@@ -1072,3 +1072,34 @@ def validate_dictionary_string_length(specs):
 def service_expired_time(with_timezone=False):
     return (timeutils.utcnow(with_timezone=with_timezone) -
             datetime.timedelta(seconds=CONF.service_down_time))
+
+
+class DoNothing(str):
+    """Class that literrally does nothing.
+
+    We inherit from str in case it's called with json.dumps.
+    """
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __getattr__(self, name):
+        return self
+
+
+DO_NOTHING = DoNothing()
+
+
+def notifications_enabled(conf):
+    """Check if oslo notifications are enabled."""
+    notifications_driver = set(conf.oslo_messaging_notifications.driver)
+    return notifications_driver and notifications_driver != {'noop'}
+
+
+def if_notifications_enabled(f):
+    """Calls decorated method only if notifications are enabled."""
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        if notifications_enabled(CONF):
+            return f(*args, **kwargs)
+        return DO_NOTHING
+    return wrapped

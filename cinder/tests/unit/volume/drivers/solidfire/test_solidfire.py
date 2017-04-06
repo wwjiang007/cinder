@@ -823,6 +823,18 @@ class SolidFireVolumeTestCase(test.TestCase):
         self.assertEqual(99.0, sfv.cluster_stats['free_capacity_gb'])
         self.assertEqual(100.0, sfv.cluster_stats['total_capacity_gb'])
 
+    def test_update_cluster_status_mvip_unreachable(self):
+        self.mock_object(solidfire.SolidFireDriver,
+                         '_issue_api_request',
+                         self.fake_issue_api_request)
+        sfv = solidfire.SolidFireDriver(configuration=self.configuration)
+        with mock.patch.object(sfv,
+                               '_issue_api_request',
+                               side_effect=self.fake_issue_api_request_fails):
+            sfv._update_cluster_status()
+            self.assertEqual(0, sfv.cluster_stats['free_capacity_gb'])
+            self.assertEqual(0, sfv.cluster_stats['total_capacity_gb'])
+
     def test_manage_existing_volume(self):
         external_ref = {'name': 'existing volume', 'source-id': 5}
         testvol = {'project_id': 'testprjid',
@@ -1801,6 +1813,25 @@ class SolidFireVolumeTestCase(test.TestCase):
                               ctxt,
                               cgsnapshot,
                               snapshots)
+
+    def test_create_vol_from_cgsnap(self):
+        # cgsnaps on the backend yield numerous identically named snapshots.
+        # create_volume_from_snapshot now searches for the correct snapshot.
+        sfv = solidfire.SolidFireDriver(configuration=self.configuration)
+        source = {'cgsnapshot_id': 'typical_cgsnap_id',
+                  'volume_id': 'typical_vol_id',
+                  'id': 'no_id_4_u'}
+        name = (self.configuration.sf_volume_prefix
+                + source.get('cgsnapshot_id'))
+        with mock.patch.object(sfv,
+                               '_get_group_snapshot_by_name',
+                               return_value={}) as get,\
+            mock.patch.object(sfv,
+                              '_create_clone_from_sf_snapshot',
+                              return_value='model'):
+            result = sfv.create_volume_from_snapshot({}, source)
+            get.assert_called_once_with(name)
+            self.assertEqual('model', result)
 
     def test_getattr_failure(self):
         sfv = solidfire.SolidFireDriver(configuration=self.configuration)

@@ -16,7 +16,6 @@
 
 import copy
 import ddt
-import tempfile
 import uuid
 
 import mock
@@ -51,8 +50,6 @@ class FakeBackupException(Exception):
 class BaseBackupTest(test.TestCase):
     def setUp(self):
         super(BaseBackupTest, self).setUp()
-        vol_tmpdir = tempfile.mkdtemp()
-        self.flags(volumes_dir=vol_tmpdir)
         self.backup_mgr = importutils.import_object(CONF.backup_manager)
         self.backup_mgr.host = 'testhost'
         self.ctxt = context.get_admin_context()
@@ -81,7 +78,8 @@ class BaseBackupTest(test.TestCase):
                                 project_id=str(uuid.uuid4()),
                                 service=None,
                                 temp_volume_id=None,
-                                temp_snapshot_id=None):
+                                temp_snapshot_id=None,
+                                snapshot_id=None):
         """Create a backup entry in the DB.
 
         Return the entry ID
@@ -99,7 +97,7 @@ class BaseBackupTest(test.TestCase):
         kwargs['status'] = status
         kwargs['fail_reason'] = ''
         kwargs['service'] = service or CONF.backup_driver
-        kwargs['snapshot'] = False
+        kwargs['snapshot_id'] = snapshot_id
         kwargs['parent_id'] = None
         kwargs['size'] = size
         kwargs['object_count'] = object_count
@@ -291,7 +289,7 @@ class BackupTestCase(BaseBackupTest):
         self.assertTrue(self.volume_mocks['detach_volume'].called)
 
     @mock.patch('cinder.objects.backup.BackupList.get_all_by_host')
-    @mock.patch('cinder.manager.SchedulerDependentManager._add_to_threadpool')
+    @mock.patch('cinder.manager.ThreadPoolManager._add_to_threadpool')
     def test_init_host_with_service_inithost_offload(self,
                                                      mock_add_threadpool,
                                                      mock_get_all_by_host):
@@ -620,6 +618,31 @@ class BackupTestCase(BaseBackupTest):
         backup = db.backup_get(self.ctxt, backup.id)
         self.assertEqual(fields.BackupStatus.AVAILABLE, backup['status'])
         self.assertEqual(vol_size, backup['size'])
+
+    @mock.patch('cinder.backup.manager.BackupManager._run_backup')
+    @ddt.data((fields.SnapshotStatus.BACKING_UP, 'available'),
+              (fields.SnapshotStatus.BACKING_UP, 'in-use'),
+              (fields.SnapshotStatus.AVAILABLE, 'available'),
+              (fields.SnapshotStatus.AVAILABLE, 'in-use'))
+    @ddt.unpack
+    def test_create_backup_with_snapshot(self, snapshot_status, volume_status,
+                                         mock_run_backup):
+        vol_id = self._create_volume_db_entry(status=volume_status)
+        snapshot = self._create_snapshot_db_entry(volume_id=vol_id,
+                                                  status=snapshot_status)
+        backup = self._create_backup_db_entry(volume_id=vol_id,
+                                              snapshot_id=snapshot.id)
+        if snapshot_status == fields.SnapshotStatus.BACKING_UP:
+            self.backup_mgr.create_backup(self.ctxt, backup)
+
+            vol = objects.Volume.get_by_id(self.ctxt, vol_id)
+            snapshot = objects.Snapshot.get_by_id(self.ctxt, snapshot.id)
+
+            self.assertEqual(volume_status, vol.status)
+            self.assertEqual(fields.SnapshotStatus.AVAILABLE, snapshot.status)
+        else:
+            self.assertRaises(exception.InvalidSnapshot,
+                              self.backup_mgr.create_backup, self.ctxt, backup)
 
     @mock.patch('cinder.utils.brick_get_connector_properties')
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.get_backup_device')
@@ -1230,7 +1253,13 @@ class BackupTestCaseWithVerify(BaseBackupTest):
                                      (backup_driver.__module__,
                                       backup_driver.__class__.__name__,
                                       'verify'))
-        with mock.patch(_mock_backup_verify_class):
+
+        def mock_verify(backup_id):
+            backup = db.backup_get(self.ctxt, backup_id)
+            self.assertEqual(fields.BackupStatus.CREATING, backup['status'])
+
+        with mock.patch(_mock_backup_verify_class) as mock_backup_verify:
+            mock_backup_verify.side_effect = mock_verify
             self.backup_mgr.import_record(self.ctxt,
                                           imported_record,
                                           export['backup_service'],
@@ -1491,6 +1520,50 @@ class BackupAPITestCase(BaseBackupTest):
                                                  size=1)
         backup = self.api.create(self.ctxt, None, None, volume_id, None)
         self.assertEqual('testhost', backup.host)
+
+    @mock.patch.object(api.API, '_get_available_backup_service_host',
+                       return_value='fake_host')
+    @mock.patch('cinder.backup.rpcapi.BackupAPI.create_backup')
+    def test_create_backup_from_snapshot_with_volume_in_use(
+            self, mock_create, mock_get_service):
+        self.ctxt.user_id = 'fake_user'
+        self.ctxt.project_id = 'fake_project'
+        volume_id = self._create_volume_db_entry(status='in-use')
+        snapshot = self._create_snapshot_db_entry(volume_id=volume_id)
+        backup = self.api.create(self.ctxt, None, None, volume_id, None,
+                                 snapshot_id=snapshot.id)
+
+        self.assertEqual(fields.BackupStatus.CREATING, backup.status)
+        volume = objects.Volume.get_by_id(self.ctxt, volume_id)
+        snapshot = objects.Snapshot.get_by_id(self.ctxt, snapshot.id)
+        self.assertEqual(fields.SnapshotStatus.BACKING_UP, snapshot.status)
+        self.assertEqual('in-use', volume.status)
+
+    @mock.patch.object(api.API, '_get_available_backup_service_host',
+                       return_value='fake_host')
+    @mock.patch('cinder.backup.rpcapi.BackupAPI.create_backup')
+    @ddt.data(True, False)
+    def test_create_backup_resource_status(self, is_snapshot, mock_create,
+                                           mock_get_service):
+        self.ctxt.user_id = 'fake_user'
+        self.ctxt.project_id = 'fake_project'
+        volume_id = self._create_volume_db_entry(status='available')
+        snapshot = self._create_snapshot_db_entry(volume_id=volume_id)
+        if is_snapshot:
+            self.api.create(self.ctxt, None, None, volume_id, None,
+                            snapshot_id=snapshot.id)
+            volume = objects.Volume.get_by_id(self.ctxt, volume_id)
+            snapshot = objects.Snapshot.get_by_id(self.ctxt, snapshot.id)
+
+            self.assertEqual('backing-up', snapshot.status)
+            self.assertEqual('available', volume.status)
+        else:
+            self.api.create(self.ctxt, None, None, volume_id, None)
+            volume = objects.Volume.get_by_id(self.ctxt, volume_id)
+            snapshot = objects.Snapshot.get_by_id(self.ctxt, snapshot.id)
+
+            self.assertEqual('available', snapshot.status)
+            self.assertEqual('backing-up', volume.status)
 
     @mock.patch('cinder.backup.api.API._get_available_backup_service_host')
     @mock.patch('cinder.backup.rpcapi.BackupAPI.restore_backup')

@@ -17,6 +17,7 @@
 from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import uuidutils
+from six.moves import http_client
 import webob
 from webob import exc
 
@@ -25,7 +26,7 @@ from cinder.api.openstack import wsgi
 from cinder.api.v3.views import groups as views_groups
 from cinder import exception
 from cinder import group as group_api
-from cinder.i18n import _, _LI
+from cinder.i18n import _
 from cinder import rpc
 from cinder.volume import group_types
 
@@ -105,7 +106,7 @@ class GroupsController(wsgi.Controller):
                            {'error_message': error.msg,
                             'id': id})
             raise exc.HTTPBadRequest(explanation=error.msg)
-        return webob.Response(status_int=202)
+        return webob.Response(status_int=http_client.ACCEPTED)
 
     @wsgi.Controller.api_version(GROUP_API_VERSION)
     @wsgi.action("delete")
@@ -133,7 +134,7 @@ class GroupsController(wsgi.Controller):
                        % del_vol)
                 raise exc.HTTPBadRequest(explanation=msg)
 
-        LOG.info(_LI('Delete group with id: %s'), id,
+        LOG.info('Delete group with id: %s', id,
                  context=context)
 
         try:
@@ -146,7 +147,7 @@ class GroupsController(wsgi.Controller):
         except exception.InvalidGroup as error:
             raise exc.HTTPBadRequest(explanation=error.msg)
 
-        return webob.Response(status_int=202)
+        return webob.Response(status_int=http_client.ACCEPTED)
 
     @wsgi.Controller.api_version(GROUP_API_VERSION)
     def index(self, req):
@@ -188,7 +189,7 @@ class GroupsController(wsgi.Controller):
         return groups
 
     @wsgi.Controller.api_version(GROUP_API_VERSION)
-    @wsgi.response(202)
+    @wsgi.response(http_client.ACCEPTED)
     def create(self, req, body):
         """Create a new group."""
         LOG.debug('Creating new group %s', body)
@@ -207,7 +208,7 @@ class GroupsController(wsgi.Controller):
         if not uuidutils.is_uuid_like(group_type):
             req_group_type = group_types.get_group_type_by_name(context,
                                                                 group_type)
-            group_type = req_group_type.id
+            group_type = req_group_type['id']
         self._check_default_cgsnapshot_type(group_type)
         volume_types = group.get('volume_types')
         if not volume_types:
@@ -216,7 +217,7 @@ class GroupsController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=msg)
         availability_zone = group.get('availability_zone')
 
-        LOG.info(_LI("Creating group %(name)s."),
+        LOG.info("Creating group %(name)s.",
                  {'name': name},
                  context=context)
 
@@ -235,7 +236,7 @@ class GroupsController(wsgi.Controller):
 
     @wsgi.Controller.api_version(GROUP_CREATE_FROM_SRC_API_VERSION)
     @wsgi.action("create-from-src")
-    @wsgi.response(202)
+    @wsgi.response(http_client.ACCEPTED)
     def create_from_src(self, req, body):
         """Create a new group from a source.
 
@@ -267,16 +268,16 @@ class GroupsController(wsgi.Controller):
 
         group_type_id = None
         if group_snapshot_id:
-            LOG.info(_LI("Creating group %(name)s from group_snapshot "
-                         "%(snap)s."),
+            LOG.info("Creating group %(name)s from group_snapshot "
+                     "%(snap)s.",
                      {'name': name, 'snap': group_snapshot_id},
                      context=context)
             grp_snap = self.group_api.get_group_snapshot(context,
                                                          group_snapshot_id)
             group_type_id = grp_snap.group_type_id
         elif source_group_id:
-            LOG.info(_LI("Creating group %(name)s from "
-                         "source group %(source_group_id)s."),
+            LOG.info("Creating group %(name)s from "
+                     "source group %(source_group_id)s.",
                      {'name': name, 'source_group_id': source_group_id},
                      context=context)
             source_group = self.group_api.get(context, source_group_id)
@@ -340,9 +341,9 @@ class GroupsController(wsgi.Controller):
                     "can not be all empty in the request body.")
             raise exc.HTTPBadRequest(explanation=msg)
 
-        LOG.info(_LI("Updating group %(id)s with name %(name)s "
-                     "description: %(description)s add_volumes: "
-                     "%(add_volumes)s remove_volumes: %(remove_volumes)s."),
+        LOG.info("Updating group %(id)s with name %(name)s "
+                 "description: %(description)s add_volumes: "
+                 "%(add_volumes)s remove_volumes: %(remove_volumes)s.",
                  {'id': id, 'name': name,
                   'description': description,
                   'add_volumes': add_volumes,
@@ -361,7 +362,7 @@ class GroupsController(wsgi.Controller):
         except exception.InvalidGroup as error:
             raise exc.HTTPBadRequest(explanation=error.msg)
 
-        return webob.Response(status_int=202)
+        return webob.Response(status_int=http_client.ACCEPTED)
 
 
 def create_resource():

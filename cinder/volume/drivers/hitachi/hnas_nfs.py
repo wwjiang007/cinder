@@ -24,11 +24,12 @@ import socket
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_log import versionutils
 from oslo_utils import units
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
 from cinder import utils as cutils
@@ -83,12 +84,18 @@ class HNASNFSDriver(nfs.NfsDriver):
                        Fixed driver stats reporting
         Version 6.0.0: Deprecated hnas_svcX_vol_type configuration
                        Added list-manageable volumes/snapshots support
+                       Rename snapshots to link with its original volume
     """
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "Hitachi_HNAS_CI"
     VERSION = HNAS_NFS_VERSION
 
+    SUPPORTED = False
+
     def __init__(self, *args, **kwargs):
+        msg = _("The Hitachi NAS driver is deprecated and will be "
+                "removed in a future release.")
+        versionutils.report_deprecated_feature(LOG, msg)
         self._execute = None
         self.context = None
         self.configuration = kwargs.get('configuration', None)
@@ -104,7 +111,7 @@ class HNASNFSDriver(nfs.NfsDriver):
 
             # Trying to get HNAS configuration from cinder.conf
             self.config = hnas_utils.read_cinder_conf(
-                self.configuration, 'nfs')
+                self.configuration)
 
             # If HNAS configuration are not set on cinder.conf, tries to use
             # the deprecated XML configuration file
@@ -127,7 +134,7 @@ class HNASNFSDriver(nfs.NfsDriver):
         :returns: Tuple containing the service parameters (label,
         export path and export file system) or error if no configuration is
         found.
-        :raises: ParameterNotFound
+        :raises ParameterNotFound:
         """
         LOG.debug("_get_service: volume: %(vol)s", {'vol': volume})
         label = utils.extract_host(volume.host, level='pool')
@@ -138,13 +145,19 @@ class HNASNFSDriver(nfs.NfsDriver):
                       {'lbl': label, 'svc': svc['export']['fs']})
             service = (svc['hdp'], svc['export']['path'], svc['export']['fs'])
         else:
-            LOG.info(_LI("Available services: %(svc)s"),
+            LOG.info("Available services: %(svc)s",
                      {'svc': self.config['services'].keys()})
-            LOG.error(_LE("No configuration found for service: %(lbl)s"),
+            LOG.error("No configuration found for service: %(lbl)s",
                       {'lbl': label})
             raise exception.ParameterNotFound(param=label)
 
         return service
+
+    def _get_snapshot_name(self, snapshot):
+        snap_file_name = ("%(vol_name)s.%(snap_id)s" %
+                          {'vol_name': snapshot.volume.name,
+                           'snap_id': snapshot.id})
+        return snap_file_name
 
     @cutils.trace
     def extend_volume(self, volume, new_size):
@@ -152,20 +165,20 @@ class HNASNFSDriver(nfs.NfsDriver):
 
         :param volume: dictionary volume reference
         :param new_size: int size in GB to extend
-        :raises: InvalidResults
+        :raises InvalidResults:
         """
         nfs_mount = volume.provider_location
-        path = self._get_volume_path(nfs_mount, volume.name)
+        path = self._get_file_path(nfs_mount, volume.name)
 
         # Resize the image file on share to new size.
-        LOG.info(_LI("Checking file for resize."))
+        LOG.info("Checking file for resize.")
 
         if not self._is_file_size_equal(path, new_size):
-            LOG.info(_LI("Resizing file to %(sz)sG"), {'sz': new_size})
+            LOG.info("Resizing file to %(sz)sG", {'sz': new_size})
             image_utils.resize_image(path, new_size)
 
         if self._is_file_size_equal(path, new_size):
-            LOG.info(_LI("LUN %(id)s extended to %(size)s GB."),
+            LOG.info("LUN %(id)s extended to %(size)s GB.",
                      {'id': volume.id, 'size': new_size})
         else:
             msg = _("Resizing image file failed.")
@@ -190,10 +203,18 @@ class HNASNFSDriver(nfs.NfsDriver):
         :param snapshot: source snapshot
         :returns: the provider_location of the volume created
         """
-        self._clone_volume(snapshot.volume, volume.name, snapshot.name)
-        share = snapshot.volume.provider_location
+        nfs_mount = snapshot.volume.provider_location
+        snapshot_name = self._get_snapshot_name(snapshot)
 
-        return {'provider_location': share}
+        if self._file_not_present(nfs_mount, snapshot_name):
+            LOG.info("Creating volume %(vol)s from legacy "
+                     "snapshot %(snap)s.",
+                     {'vol': volume.name, 'snap': snapshot.name})
+            snapshot_name = snapshot.name
+
+        self._clone_volume(snapshot.volume, volume.name, snapshot_name)
+
+        return {'provider_location': nfs_mount}
 
     @cutils.trace
     def create_snapshot(self, snapshot):
@@ -202,7 +223,8 @@ class HNASNFSDriver(nfs.NfsDriver):
         :param snapshot: dictionary snapshot reference
         :returns: the provider_location of the snapshot created
         """
-        self._clone_volume(snapshot.volume, snapshot.name)
+        snapshot_name = self._get_snapshot_name(snapshot)
+        self._clone_volume(snapshot.volume, snapshot_name)
 
         share = snapshot.volume.provider_location
         LOG.debug('Share: %(shr)s', {'shr': share})
@@ -217,39 +239,48 @@ class HNASNFSDriver(nfs.NfsDriver):
         :param snapshot: dictionary snapshot reference
         """
         nfs_mount = snapshot.volume.provider_location
+        snapshot_name = self._get_snapshot_name(snapshot)
 
-        if self._volume_not_present(nfs_mount, snapshot.name):
-            return True
+        if self._file_not_present(nfs_mount, snapshot_name):
+            # Snapshot with new name does not exist. The verification
+            # for a file with legacy name will be done.
+            snapshot_name = snapshot.name
 
-        self._execute('rm', self._get_volume_path(nfs_mount, snapshot.name),
-                      run_as_root=True)
+            if self._file_not_present(nfs_mount, snapshot_name):
+                # The file does not exist. Nothing to do.
+                return
 
-    def _volume_not_present(self, nfs_mount, volume_name):
-        """Check if volume does not exist.
+        self._execute('rm', self._get_file_path(
+            nfs_mount, snapshot_name), run_as_root=True)
+
+    def _file_not_present(self, nfs_mount, volume_name):
+        """Check if file does not exist.
 
         :param nfs_mount: string path of the nfs share
         :param volume_name: string volume name
-        :returns: boolean (true for volume not present and false otherwise)
+        :returns: boolean (true for file not present and false otherwise)
         """
         try:
-            self._try_execute('ls',
-                              self._get_volume_path(nfs_mount, volume_name))
-        except processutils.ProcessExecutionError:
-            # If the volume isn't present
-            return True
+            self._execute('ls', self._get_file_path(nfs_mount, volume_name))
+        except processutils.ProcessExecutionError as e:
+            if "No such file or directory" in e.stderr:
+                # If the file isn't present
+                return True
+            else:
+                raise
 
         return False
 
-    def _get_volume_path(self, nfs_share, volume_name):
-        """Get volume path (local fs path) for given name on given nfs share.
+    def _get_file_path(self, nfs_share, file_name):
+        """Get file path (local fs path) for given name on given nfs share.
 
         :param nfs_share string, example 172.18.194.100:/var/nfs
-        :param volume_name string,
+        :param file_name string,
         example volume-91ee65ec-c473-4391-8c09-162b00c68a8c
         :returns: the local path according to the parameters
         """
         return os.path.join(self._get_mount_point_for_share(nfs_share),
-                            volume_name)
+                            file_name)
 
     @cutils.trace
     def create_cloned_volume(self, volume, src_vref):
@@ -259,6 +290,16 @@ class HNASNFSDriver(nfs.NfsDriver):
         :param src_vref: reference to the source volume
         :returns: the provider_location of the cloned volume
         """
+
+        # HNAS always creates cloned volumes in the same pool as the source
+        # volumes. So, it is not allowed to use different volume types for
+        # clone operations.
+        if volume.volume_type_id != src_vref.volume_type_id:
+            msg = _("Source and cloned volumes should have the same "
+                    "volume type.")
+            LOG.error(msg)
+            raise exception.InvalidVolumeType(msg)
+
         vol_size = volume.size
         src_vol_size = src_vref.size
 
@@ -286,7 +327,7 @@ class HNASNFSDriver(nfs.NfsDriver):
             'thin_provisioning_support': thin support (True),
             }
         """
-        LOG.info(_LI("Getting volume stats"))
+        LOG.info("Getting volume stats")
 
         _stats = super(HNASNFSDriver, self).get_volume_stats(refresh)
         _stats["vendor_name"] = 'Hitachi'
@@ -314,18 +355,18 @@ class HNASNFSDriver(nfs.NfsDriver):
     def do_setup(self, context):
         """Perform internal driver setup."""
         version_info = self.backend.get_version()
-        LOG.info(_LI("HNAS NFS driver."))
-        LOG.info(_LI("HNAS model: %(mdl)s"), {'mdl': version_info['model']})
-        LOG.info(_LI("HNAS version: %(ver)s"),
+        LOG.info("HNAS NFS driver.")
+        LOG.info("HNAS model: %(mdl)s", {'mdl': version_info['model']})
+        LOG.info("HNAS version: %(ver)s",
                  {'ver': version_info['version']})
-        LOG.info(_LI("HNAS hardware: %(hw)s"),
+        LOG.info("HNAS hardware: %(hw)s",
                  {'hw': version_info['hardware']})
-        LOG.info(_LI("HNAS S/N: %(sn)s"), {'sn': version_info['serial']})
+        LOG.info("HNAS S/N: %(sn)s", {'sn': version_info['serial']})
 
         self.context = context
         self._load_shares_config(
             getattr(self.configuration, self.driver_prefix + '_shares_config'))
-        LOG.info(_LI("Review shares: %(shr)s"), {'shr': self.shares})
+        LOG.info("Review shares: %(shr)s", {'shr': self.shares})
 
         elist = self.backend.get_export_list()
 
@@ -345,7 +386,7 @@ class HNASNFSDriver(nfs.NfsDriver):
             try:
                 out, err = self._execute('showmount', '-e', server_ip)
             except processutils.ProcessExecutionError:
-                LOG.exception(_LE("NFS server %(srv)s not reachable!"),
+                LOG.exception("NFS server %(srv)s not reachable!",
                               {'srv': server_ip})
                 raise
 
@@ -356,8 +397,8 @@ class HNASNFSDriver(nfs.NfsDriver):
             if (len(export_list) < 1 or
                     mountpoint_not_found or
                     not export_configured):
-                LOG.error(_LE("Configured share %(share)s is not present"
-                              "in %(srv)s."),
+                LOG.error("Configured share %(share)s is not present"
+                          "in %(srv)s.",
                           {'share': mountpoint, 'srv': server_ip})
                 msg = _('Section: %(svc_name)s') % {'svc_name': svc_name}
                 raise exception.InvalidParameterValue(err=msg)
@@ -376,7 +417,7 @@ class HNASNFSDriver(nfs.NfsDriver):
             self.pools.append(pool)
 
         LOG.debug("Configured pools: %(pool)s", {'pool': self.pools})
-        LOG.info(_LI("HNAS NFS Driver loaded successfully."))
+        LOG.info("HNAS NFS Driver loaded successfully.")
 
     def _clone_volume(self, src_vol, clone_name, src_name=None):
         """Clones mounted volume using the HNAS file_clone.
@@ -393,8 +434,8 @@ class HNASNFSDriver(nfs.NfsDriver):
             src_name = src_vol.name
 
         # volume-ID snapshot-ID, /cinder
-        LOG.info(_LI("Cloning with volume_name %(vname)s, clone_name %(cname)s"
-                     " ,export_path %(epath)s"),
+        LOG.info("Cloning with volume_name %(vname)s, clone_name %(cname)s"
+                 " ,export_path %(epath)s",
                  {'vname': src_name, 'cname': clone_name,
                      'epath': src_vol.provider_location})
 
@@ -418,7 +459,7 @@ class HNASNFSDriver(nfs.NfsDriver):
 
         volume.provider_location = fs_id
 
-        LOG.info(_LI("Volume service: %(label)s. Casted to: %(loc)s"),
+        LOG.info("Volume service: %(label)s. Casted to: %(loc)s",
                  {'label': fslabel, 'loc': volume.provider_location})
 
         self._do_create_volume(volume)
@@ -434,7 +475,7 @@ class HNASNFSDriver(nfs.NfsDriver):
         :param vol_ref: driver-specific information used to identify a volume
         :returns: a volume reference where share is in IP format or raises
          error
-         :raises: e.strerror
+        :raises e.strerror:
         """
 
         # First strip out share and convert to IP format.
@@ -443,7 +484,7 @@ class HNASNFSDriver(nfs.NfsDriver):
         try:
             vol_ref_share_ip = cutils.resolve_hostname(share_split[0])
         except socket.gaierror as e:
-            LOG.exception(_LE('Invalid hostname %(host)s'),
+            LOG.exception('Invalid hostname %(host)s',
                           {'host': share_split[0]})
             LOG.debug('error: %(err)s', {'err': e.strerror})
             raise
@@ -462,7 +503,7 @@ class HNASNFSDriver(nfs.NfsDriver):
 
         :param vol_ref: driver-specific information used to identify a volume
         :returns: NFS Share, NFS mount, volume path or raise error
-        :raises: ManageExistingInvalidReference
+        :raises ManageExistingInvalidReference:
         """
         # Check that the reference is valid.
         if 'source-name' not in vol_ref:
@@ -521,15 +562,15 @@ class HNASNFSDriver(nfs.NfsDriver):
         :param existing_vol_ref: driver-specific information used to identify a
         volume
         :returns: the provider location
-        :raises: VolumeBackendAPIException
+        :raises VolumeBackendAPIException:
         """
 
         # Attempt to find NFS share, NFS mount, and volume path from vol_ref.
         (nfs_share, nfs_mount, vol_name
          ) = self._get_share_mount_and_vol_from_vol_ref(existing_vol_ref)
 
-        LOG.info(_LI("Asked to manage NFS volume %(vol)s, "
-                     "with vol ref %(ref)s."),
+        LOG.info("Asked to manage NFS volume %(vol)s, "
+                 "with vol ref %(ref)s.",
                  {'vol': volume.id,
                   'ref': existing_vol_ref['source-name']})
 
@@ -570,7 +611,7 @@ class HNASNFSDriver(nfs.NfsDriver):
 
         :param volume: cinder volume reference
         :param nfs_share: NFS share passed to manage
-        :raises: ManageExistingVolumeTypeMismatch
+        :raises ManageExistingVolumeTypeMismatch:
         """
         pool_from_vol_type = hnas_utils.get_pool(self.config, volume)
 
@@ -615,7 +656,7 @@ class HNASNFSDriver(nfs.NfsDriver):
         :param volume: cinder volume to manage
         :param existing_vol_ref: existing volume to take under management
         :returns: the size of the volume or raise error
-        :raises: VolumeBackendAPIException
+        :raises VolumeBackendAPIException:
         """
         return self._manage_existing_get_size(existing_vol_ref)
 
@@ -641,13 +682,13 @@ class HNASNFSDriver(nfs.NfsDriver):
             self._try_execute("mv", vol_path, new_path,
                               run_as_root=False, check_exit_code=True)
 
-            LOG.info(_LI("The volume with path %(old)s is no longer being "
-                         "managed by Cinder. However, it was not deleted "
-                         "and can be found in the new path %(cr)s."),
+            LOG.info("The volume with path %(old)s is no longer being "
+                     "managed by Cinder. However, it was not deleted "
+                     "and can be found in the new path %(cr)s.",
                      {'old': vol_path, 'cr': new_path})
 
         except (OSError, ValueError):
-            LOG.exception(_LE("The NFS Volume %(cr)s does not exist."),
+            LOG.exception("The NFS Volume %(cr)s does not exist.",
                           {'cr': new_path})
 
     def _get_file_size(self, file_path):
@@ -680,7 +721,6 @@ class HNASNFSDriver(nfs.NfsDriver):
         return size
 
     def _check_snapshot_parent(self, volume, old_snap_name, share):
-
         volume_name = 'volume-' + volume.id
         (fs, path, fs_label) = self._get_service(volume)
         # 172.24.49.34:/nfs_cinder
@@ -691,6 +731,13 @@ class HNASNFSDriver(nfs.NfsDriver):
 
         return self.backend.check_snapshot_parent(volume_path, old_snap_name,
                                                   fs_label)
+
+    def _get_snapshot_origin_from_name(self, snap_name):
+        """Gets volume name from snapshot names"""
+        if 'unmanage' in snap_name:
+            return snap_name.split('.')[0][9:]
+
+        return snap_name.split('.')[0]
 
     @cutils.trace
     def manage_existing_snapshot(self, snapshot, existing_ref):
@@ -705,36 +752,38 @@ class HNASNFSDriver(nfs.NfsDriver):
         (nfs_share, nfs_mount, src_snapshot_name
          ) = self._get_share_mount_and_vol_from_vol_ref(existing_ref)
 
-        LOG.info(_LI("Asked to manage NFS snapshot %(snap)s for volume "
-                     "%(vol)s, with vol ref %(ref)s."),
+        LOG.info("Asked to manage NFS snapshot %(snap)s for volume "
+                 "%(vol)s, with vol ref %(ref)s.",
                  {'snap': snapshot.id,
                   'vol': snapshot.volume_id,
                   'ref': existing_ref['source-name']})
 
         volume = snapshot.volume
+        parent_name = self._get_snapshot_origin_from_name(src_snapshot_name)
 
-        # Check if the snapshot belongs to the volume
-        real_parent = self._check_snapshot_parent(volume, src_snapshot_name,
-                                                  nfs_share)
+        if parent_name != volume.name:
+            # Check if the snapshot belongs to the volume for the legacy case
+            if not self._check_snapshot_parent(
+                    volume, src_snapshot_name, nfs_share):
+                msg = (_("This snapshot %(snap)s doesn't belong "
+                         "to the volume parent %(vol)s.") %
+                       {'snap': src_snapshot_name, 'vol': volume.id})
+                raise exception.ManageExistingInvalidReference(
+                    existing_ref=existing_ref, reason=msg)
 
-        if not real_parent:
-            msg = (_("This snapshot %(snap)s doesn't belong "
-                     "to the volume parent %(vol)s.") %
-                   {'snap': snapshot.id, 'vol': volume.id})
-            raise exception.ManageExistingInvalidReference(
-                existing_ref=existing_ref, reason=msg)
+        snapshot_name = self._get_snapshot_name(snapshot)
 
-        if src_snapshot_name == snapshot.name:
+        if src_snapshot_name == snapshot_name:
             LOG.debug("New Cinder snapshot %(snap)s name matches reference "
-                      "name. No need to rename.", {'snap': snapshot.name})
+                      "name. No need to rename.", {'snap': snapshot_name})
         else:
             src_snap = os.path.join(nfs_mount, src_snapshot_name)
-            dst_snap = os.path.join(nfs_mount, snapshot.name)
+            dst_snap = os.path.join(nfs_mount, snapshot_name)
             try:
                 self._try_execute("mv", src_snap, dst_snap, run_as_root=False,
                                   check_exit_code=True)
-                LOG.info(_LI("Setting newly managed Cinder snapshot name "
-                         "to %(snap)s."), {'snap': snapshot.name})
+                LOG.info("Setting newly managed Cinder snapshot name "
+                         "to %(snap)s.", {'snap': snapshot_name})
                 self._set_rw_permissions_for_all(dst_snap)
             except (OSError, processutils.ProcessExecutionError) as err:
                 msg = (_("Failed to manage existing snapshot "
@@ -760,22 +809,28 @@ class HNASNFSDriver(nfs.NfsDriver):
         """
 
         path = self._get_mount_point_for_share(snapshot.provider_location)
+        snapshot_name = self._get_snapshot_name(snapshot)
 
-        new_name = "unmanage-" + snapshot.name
+        if self._file_not_present(snapshot.provider_location, snapshot_name):
+            LOG.info("Unmanaging legacy snapshot %(snap)s.",
+                     {'snap': snapshot.name})
+            snapshot_name = snapshot.name
 
-        old_path = os.path.join(path, snapshot.name)
+        new_name = "unmanage-" + snapshot_name
+
+        old_path = os.path.join(path, snapshot_name)
         new_path = os.path.join(path, new_name)
 
         try:
             self._execute("mv", old_path, new_path,
                           run_as_root=False, check_exit_code=True)
-            LOG.info(_LI("The snapshot with path %(old)s is no longer being "
-                         "managed by Cinder. However, it was not deleted and "
-                         "can be found in the new path %(cr)s."),
+            LOG.info("The snapshot with path %(old)s is no longer being "
+                     "managed by Cinder. However, it was not deleted and "
+                     "can be found in the new path %(cr)s.",
                      {'old': old_path, 'cr': new_path})
 
         except (OSError, ValueError):
-            LOG.exception(_LE("The NFS snapshot %(old)s does not exist."),
+            LOG.exception("The NFS snapshot %(old)s does not exist.",
                           {'old': old_path})
 
     def _get_volumes_from_export(self, export_path):
@@ -863,10 +918,12 @@ class HNASNFSDriver(nfs.NfsDriver):
 
             for resource in bend_rsrc[exp]:
                 # Ignoring resources of unwanted types
-                if ((resource_type == 'volume' and 'snapshot' in resource) or
-                        (resource_type == 'snapshot' and
-                            'volume' in resource)):
+                if ((resource_type == 'volume' and
+                        ('.' in resource or 'snapshot' in resource)) or
+                    (resource_type == 'snapshot' and '.' not in resource and
+                        'snapshot' not in resource)):
                     continue
+
                 path = '%s/%s' % (exp, resource)
                 mnt_path = '%s/%s' % (mnt_point, resource)
                 size = self._get_file_size(mnt_path)
@@ -877,9 +934,12 @@ class HNASNFSDriver(nfs.NfsDriver):
 
                 if resource_type == 'volume':
                     potential_id = utils.extract_id_from_volume_name(resource)
-                else:
+                elif 'snapshot' in resource:
+                    # This is for the snapshot legacy case
                     potential_id = utils.extract_id_from_snapshot_name(
                         resource)
+                else:
+                    potential_id = resource.split('.')[1]
 
                 # When a resource is already managed by cinder, it's not
                 # recommended to manage it again. So we set safe_to_manage =
@@ -898,24 +958,32 @@ class HNASNFSDriver(nfs.NfsDriver):
                 # source-reference, throw a warning message and fill the
                 # extra-info.
                 if resource_type == 'snapshot':
-                    path = path.split(':')[1]
-                    origin = self._get_snapshot_origin(path, exports[exp])
-
-                    if not origin:
-                        # if origin is empty, the file is not a clone
-                        continue
-                    elif len(origin) == 1:
-                        origin = origin[0].split('/')[2]
-                        origin = utils.extract_id_from_volume_name(origin)
+                    if 'snapshot' not in resource:
+                        origin = self._get_snapshot_origin_from_name(resource)
+                        if 'unmanage' in origin:
+                            origin = origin[16:]
+                        else:
+                            origin = origin[7:]
                         rsrc_inf['source_reference'] = {'id': origin}
                     else:
-                        LOG.warning(_LW("Could not determine the volume that "
-                                        "owns the snapshot %(snap)s"),
-                                    {'snap': resource})
-                        rsrc_inf['source_reference'] = {'id': 'unknown'}
-                        rsrc_inf['extra_info'] = ('Could not determine the '
-                                                  'volume that owns the '
-                                                  'snapshot')
+                        path = path.split(':')[1]
+                        origin = self._get_snapshot_origin(path, exports[exp])
+
+                        if not origin:
+                            # if origin is empty, the file is not a clone
+                            continue
+                        elif len(origin) == 1:
+                            origin = origin[0].split('/')[2]
+                            origin = utils.extract_id_from_volume_name(origin)
+                            rsrc_inf['source_reference'] = {'id': origin}
+                        else:
+                            LOG.warning("Could not determine the volume "
+                                        "that owns the snapshot %(snap)s",
+                                        {'snap': resource})
+                            rsrc_inf['source_reference'] = {'id': 'unknown'}
+                            rsrc_inf['extra_info'] = ('Could not determine '
+                                                      'the volume that owns '
+                                                      'the snapshot')
 
                 entries.append(rsrc_inf)
 

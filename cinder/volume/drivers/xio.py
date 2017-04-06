@@ -22,7 +22,6 @@ from six.moves import urllib
 
 from cinder import context
 from cinder import exception
-from cinder.i18n import _LE, _LI, _LW
 from cinder import interface
 from cinder.volume import driver
 from cinder.volume.drivers.san import san
@@ -95,15 +94,15 @@ class XIOISEDriver(driver.VolumeDriver):
         LOG.debug("XIOISEDriver check_for_setup_error called.")
         # The san_ip must always be set
         if self.configuration.san_ip == "":
-            LOG.error(_LE("san ip must be configured!"))
+            LOG.error("san ip must be configured!")
             RaiseXIODriverException()
         # The san_login must always be set
         if self.configuration.san_login == "":
-            LOG.error(_LE("san_login must be configured!"))
+            LOG.error("san_login must be configured!")
             RaiseXIODriverException()
         # The san_password must always be set
         if self.configuration.san_password == "":
-            LOG.error(_LE("san_password must be configured!"))
+            LOG.error("san_password must be configured!")
             RaiseXIODriverException()
         return
 
@@ -120,7 +119,7 @@ class XIOISEDriver(driver.VolumeDriver):
         if status != 200:
             # unsuccessful - this is fatal as we need the global id
             # to build REST requests.
-            LOG.error(_LE("Array query failed - No response (%d)!"), status)
+            LOG.error("Array query failed - No response (%d)!", status)
             RaiseXIODriverException()
         # Successfully fetched QUERY info. Parse out globalid along with
         # ipaddress for Controller 1 and Controller 2. We assign primary
@@ -135,7 +134,7 @@ class XIOISEDriver(driver.VolumeDriver):
         self.configuration.ise_qos = False
         capabilities = xml_tree.find('capabilities')
         if capabilities is None:
-            LOG.error(_LE("Array query failed. No capabilities in response!"))
+            LOG.error("Array query failed. No capabilities in response!")
             RaiseXIODriverException()
         for node in capabilities:
             if node.tag != 'capability':
@@ -153,19 +152,19 @@ class XIOISEDriver(driver.VolumeDriver):
                 support['thin-clones'] = True
         # Make sure ISE support necessary features
         if not support['clones']:
-            LOG.error(_LE("ISE FW version is not compatible with OpenStack!"))
+            LOG.error("ISE FW version is not compatible with OpenStack!")
             RaiseXIODriverException()
         # set up thin provisioning support
         self.configuration.san_thin_provision = support['thin-clones']
         # Fill in global id, primary and secondary ip addresses
         globalid = xml_tree.find('globalid')
         if globalid is None:
-            LOG.error(_LE("Array query failed. No global id in XML response!"))
+            LOG.error("Array query failed. No global id in XML response!")
             RaiseXIODriverException()
         self.ise_globalid = globalid.text
         controllers = xml_tree.find('controllers')
         if controllers is None:
-            LOG.error(_LE("Array query failed. No controllers in response!"))
+            LOG.error("Array query failed. No controllers in response!")
             RaiseXIODriverException()
         for node in controllers:
             if node.tag != 'controller':
@@ -204,7 +203,7 @@ class XIOISEDriver(driver.VolumeDriver):
             # this call will populate globalid
             self._send_query()
         if self.ise_globalid is None:
-            LOG.error(_LE("ISE globalid not set!"))
+            LOG.error("ISE globalid not set!")
             RaiseXIODriverException()
         return self.ise_globalid
 
@@ -215,7 +214,7 @@ class XIOISEDriver(driver.VolumeDriver):
             self.ise_primary_ip = self.configuration.san_ip
         if self.ise_primary_ip == '':
             # No IP - fatal.
-            LOG.error(_LE("Primary IP must be set!"))
+            LOG.error("Primary IP must be set!")
             RaiseXIODriverException()
         return self.ise_primary_ip
 
@@ -247,7 +246,8 @@ class XIOISEDriver(driver.VolumeDriver):
         # Override method to allow GET, PUT, POST, DELETE
         req.get_method = lambda: method
         try:
-            resp = urllib.request.urlopen(req)
+            # IP addr formed from code and cinder.conf so URL can be trusted
+            resp = urllib.request.urlopen(req)  # nosec
         except urllib.error.HTTPError as err:
             # HTTP error. Return HTTP status and content and let caller
             # handle retries.
@@ -411,7 +411,7 @@ class XIOISEDriver(driver.VolumeDriver):
                 if secondary_ip is '':
                     # if secondary is not setup yet, then assert
                     # connection on primary and secondary ip failed
-                    LOG.error(_LE("Connection to %s failed and no secondary!"),
+                    LOG.error("Connection to %s failed and no secondary!",
                               primary_ip)
                     RaiseXIODriverException()
                 # swap primary for secondary ip in URL
@@ -422,7 +422,7 @@ class XIOISEDriver(driver.VolumeDriver):
             # connection failed on both IPs - break out of the loop
             break
         # connection on primary and secondary ip failed
-        LOG.error(_LE("Could not connect to %(primary)s or %(secondary)s!"),
+        LOG.error("Could not connect to %(primary)s or %(secondary)s!",
                   {'primary': primary_ip, 'secondary': secondary_ip})
         RaiseXIODriverException()
 
@@ -463,7 +463,7 @@ class XIOISEDriver(driver.VolumeDriver):
         resp = self._send_cmd('GET', url)
         status = resp['status']
         if status != 200:
-            LOG.warning(_LW("IOnetworks GET failed (%d)"), status)
+            LOG.warning("IOnetworks GET failed (%d)", status)
             return chap
         # Got a good response. Parse out CHAP info.  First check if CHAP is
         # enabled and if so parse out username and password.
@@ -493,7 +493,7 @@ class XIOISEDriver(driver.VolumeDriver):
         status = resp['status']
         if status != 200:
             # Not good. Throw an exception.
-            LOG.error(_LE("Controller GET failed (%d)"), status)
+            LOG.error("Controller GET failed (%d)", status)
             RaiseXIODriverException()
         # Good response.  Parse out IQN that matches iscsi_ip_address
         # passed in from cinder.conf.  IQN is 'hidden' in globalid field.
@@ -518,7 +518,7 @@ class XIOISEDriver(driver.VolumeDriver):
                 if target_iqn != '':
                     return target_iqn
         # Did not find a matching IQN. Upsetting.
-        LOG.error(_LE("Failed to get IQN!"))
+        LOG.error("Failed to get IQN!")
         RaiseXIODriverException()
 
     def find_target_wwns(self):
@@ -531,7 +531,7 @@ class XIOISEDriver(driver.VolumeDriver):
         status = resp['status']
         if status != 200:
             # Not good. Throw an exception.
-            LOG.error(_LE("Controller GET failed (%d)"), status)
+            LOG.error("Controller GET failed (%d)", status)
             RaiseXIODriverException()
         # Good response. Parse out globalid (WWN) of endpoint that matches
         # protocol and type (array).
@@ -558,7 +558,7 @@ class XIOISEDriver(driver.VolumeDriver):
         status = resp['status']
         if status != 200:
             # Not good. Throw an exception.
-            LOG.error(_LE("Failed to get allocation information (%d)!"),
+            LOG.error("Failed to get allocation information (%d)!",
                       status)
             RaiseXIODriverException()
         # Good response. Parse out LUN.
@@ -569,7 +569,7 @@ class XIOISEDriver(driver.VolumeDriver):
             if luntag is not None:
                 return luntag.text
         # Did not find LUN. Throw an exception.
-        LOG.error(_LE("Failed to get LUN information!"))
+        LOG.error("Failed to get LUN information!")
         RaiseXIODriverException()
 
     def _get_volume_info(self, vol_name):
@@ -588,21 +588,21 @@ class XIOISEDriver(driver.VolumeDriver):
         url = '/storage/arrays/%s/volumes' % (self._get_ise_globalid())
         resp = self._send_cmd('GET', url, {'name': vol_name})
         if resp['status'] != 200:
-            LOG.warning(_LW("Could not get status for %(name)s (%(status)d)."),
+            LOG.warning("Could not get status for %(name)s (%(status)d).",
                         {'name': vol_name, 'status': resp['status']})
             return vol_info
         # Good response. Parse down to Volume tag in list of one.
         root = etree.fromstring(resp['content'])
         volume_node = root.find('volume')
         if volume_node is None:
-            LOG.warning(_LW("No volume node in XML content."))
+            LOG.warning("No volume node in XML content.")
             return vol_info
         # Location can be found as an attribute in the volume node tag.
         vol_info['location'] = volume_node.attrib['self']
         # Find status tag
         status = volume_node.find('status')
         if status is None:
-            LOG.warning(_LW("No status payload for volume %s."), vol_name)
+            LOG.warning("No status payload for volume %s.", vol_name)
             return vol_info
         # Fill in value and string from status tag attributes.
         vol_info['value'] = status.attrib['value']
@@ -627,7 +627,7 @@ class XIOISEDriver(driver.VolumeDriver):
         resp = self._send_cmd('GET', url, {'name': volume['name'],
                                            'hostname': hostname})
         if resp['status'] != 200:
-            LOG.error(_LE("Could not GET allocation information (%d)!"),
+            LOG.error("Could not GET allocation information (%d)!",
                       resp['status'])
             RaiseXIODriverException()
         # Good response. Find the allocation based on volume name.
@@ -687,12 +687,12 @@ class XIOISEDriver(driver.VolumeDriver):
         resp = self._send_cmd('POST', url, params)
         status = resp['status']
         if status == 201:
-            LOG.info(_LI("Volume %s presented."), volume['name'])
+            LOG.info("Volume %s presented.", volume['name'])
         elif status == 409:
-            LOG.warning(_LW("Volume %(name)s already presented (%(status)d)!"),
+            LOG.warning("Volume %(name)s already presented (%(status)d)!",
                         {'name': volume['name'], 'status': status})
         else:
-            LOG.error(_LE("Failed to present volume %(name)s (%(status)d)!"),
+            LOG.error("Failed to present volume %(name)s (%(status)d)!",
                       {'name': volume['name'], 'status': status})
             RaiseXIODriverException()
         # Fetch LUN. In theory the LUN should be what caller requested.
@@ -718,8 +718,8 @@ class XIOISEDriver(driver.VolumeDriver):
         resp = self._send_cmd('GET', url, {'hostname': hostname})
         status = resp['status']
         if status != 200:
-            LOG.error(_LE("Failed to get allocation information: "
-                          "%(host)s (%(status)d)!"),
+            LOG.error("Failed to get allocation information: "
+                      "%(host)s (%(status)d)!",
                       {'host': hostname, 'status': status})
             RaiseXIODriverException()
         # Good response. Count the number of allocations.
@@ -752,7 +752,7 @@ class XIOISEDriver(driver.VolumeDriver):
         resp = self._send_cmd('GET', url, params)
         status = resp['status']
         if resp['status'] != 200:
-            LOG.error(_LE("Could not find any hosts (%s)"), status)
+            LOG.error("Could not find any hosts (%s)", status)
             RaiseXIODriverException()
         # Good response. Try to match up a host based on end point string.
         host_tree = etree.fromstring(resp['content'])
@@ -809,7 +809,7 @@ class XIOISEDriver(driver.VolumeDriver):
         resp = self._send_cmd('POST', url, params)
         status = resp['status']
         if status != 201 and status != 409:
-            LOG.error(_LE("POST for host create failed (%s)!"), status)
+            LOG.error("POST for host create failed (%s)!", status)
             RaiseXIODriverException()
         # Successfully created host entry. Return host name.
         return hostname
@@ -836,7 +836,7 @@ class XIOISEDriver(driver.VolumeDriver):
         if vol_info['value'] == '0':
             LOG.debug('Source volume %s ready.', volume_name)
         else:
-            LOG.error(_LE("Source volume %s not ready!"), volume_name)
+            LOG.error("Source volume %s not ready!", volume_name)
             RaiseXIODriverException()
         # Prepare snapshot
         # get extra_specs and qos specs from source volume
@@ -862,7 +862,7 @@ class XIOISEDriver(driver.VolumeDriver):
                                          args, retries)
         if resp['status'] != 202:
             # clone prepare failed - bummer
-            LOG.error(_LE("Prepare clone failed for %s."), clone['name'])
+            LOG.error("Prepare clone failed for %s.", clone['name'])
             RaiseXIODriverException()
         # clone prepare request accepted
         # make sure not to continue until clone prepared
@@ -874,13 +874,13 @@ class XIOISEDriver(driver.VolumeDriver):
         if PREPARED_STATUS in clone_info['details']:
             LOG.debug('Clone %s prepared.', clone['name'])
         else:
-            LOG.error(_LE("Clone %s not in prepared state!"), clone['name'])
+            LOG.error("Clone %s not in prepared state!", clone['name'])
             RaiseXIODriverException()
         # Clone prepared, now commit the create
         resp = self._send_cmd('PUT', clone_info['location'],
                               {clone_type: 'true'})
         if resp['status'] != 201:
-            LOG.error(_LE("Commit clone failed: %(name)s (%(status)d)!"),
+            LOG.error("Commit clone failed: %(name)s (%(status)d)!",
                       {'name': clone['name'], 'status': resp['status']})
             RaiseXIODriverException()
         # Clone create request accepted. Make sure not to return until clone
@@ -891,9 +891,9 @@ class XIOISEDriver(driver.VolumeDriver):
         clone_info = self._wait_for_completion(self._help_wait_for_status,
                                                args, retries)
         if OPERATIONAL_STATUS in clone_info['string']:
-            LOG.info(_LI("Clone %s created."), clone['name'])
+            LOG.info("Clone %s created.", clone['name'])
         else:
-            LOG.error(_LE("Commit failed for %s!"), clone['name'])
+            LOG.error("Commit failed for %s!", clone['name'])
             RaiseXIODriverException()
         return
 
@@ -957,7 +957,7 @@ class XIOISEDriver(driver.VolumeDriver):
         status = resp['status']
         if status != 200:
             # Request failed. Return what we have, which isn't much.
-            LOG.warning(_LW("Could not get pool information (%s)!"), status)
+            LOG.warning("Could not get pool information (%s)!", status)
             return (pools, vol_cnt)
         # Parse out available (free) and used. Add them up to get total.
         xml_tree = etree.fromstring(resp['content'])
@@ -1146,7 +1146,7 @@ class XIOISEDriver(driver.VolumeDriver):
                                'IOPSmax': qos['maxIOPS'],
                                'IOPSburst': qos['burstIOPS']})
         if resp['status'] != 201:
-            LOG.error(_LE("Failed to create volume: %(name)s (%(status)s)"),
+            LOG.error("Failed to create volume: %(name)s (%(status)s)",
                       {'name': volume['name'], 'status': resp['status']})
             RaiseXIODriverException()
         # Good response. Make sure volume is in operational state before
@@ -1159,9 +1159,9 @@ class XIOISEDriver(driver.VolumeDriver):
                                              args, retries)
         if OPERATIONAL_STATUS in vol_info['string']:
             # Ready.
-            LOG.info(_LI("Volume %s created"), volume['name'])
+            LOG.info("Volume %s created", volume['name'])
         else:
-            LOG.error(_LE("Failed to create volume %s."), volume['name'])
+            LOG.error("Failed to create volume %s.", volume['name'])
             RaiseXIODriverException()
         return
 
@@ -1192,7 +1192,7 @@ class XIOISEDriver(driver.VolumeDriver):
         # in response. Used for DELETE call below.
         vol_info = self._get_volume_info(volume['name'])
         if vol_info['location'] == '':
-            LOG.warning(_LW("%s not found!"), volume['name'])
+            LOG.warning("%s not found!", volume['name'])
             return
         # Make DELETE call.
         args = {}
@@ -1203,7 +1203,7 @@ class XIOISEDriver(driver.VolumeDriver):
         retries = self.configuration.ise_completion_retries
         resp = self._wait_for_completion(self._help_call_method, args, retries)
         if resp['status'] != 204:
-            LOG.warning(_LW("DELETE call failed for %s!"), volume['name'])
+            LOG.warning("DELETE call failed for %s!", volume['name'])
             return
         # DELETE call successful, now wait for completion.
         # We do that by waiting for the REST call to return Volume Not Found.
@@ -1216,11 +1216,11 @@ class XIOISEDriver(driver.VolumeDriver):
                                              args, retries)
         if NOTFOUND_STATUS in vol_info['string']:
             # Volume no longer present on the backend.
-            LOG.info(_LI("Successfully deleted %s."), volume['name'])
+            LOG.info("Successfully deleted %s.", volume['name'])
             return
         # If we come here it means the volume is still present
         # on the backend.
-        LOG.error(_LE("Timed out deleting %s!"), volume['name'])
+        LOG.error("Timed out deleting %s!", volume['name'])
         return
 
     def delete_volume(self, volume):
@@ -1239,7 +1239,7 @@ class XIOISEDriver(driver.VolumeDriver):
         # in response. Used for PUT call below.
         vol_info = self._get_volume_info(volume['name'])
         if vol_info['location'] == '':
-            LOG.error(_LE("modify volume: %s does not exist!"), volume['name'])
+            LOG.error("modify volume: %s does not exist!", volume['name'])
             RaiseXIODriverException()
         # Make modify volume REST call using PUT.
         # Location from above is used as identifier.
@@ -1248,7 +1248,7 @@ class XIOISEDriver(driver.VolumeDriver):
         if status == 201:
             LOG.debug("Volume %s modified.", volume['name'])
             return True
-        LOG.error(_LE("Modify volume PUT failed: %(name)s (%(status)d)."),
+        LOG.error("Modify volume PUT failed: %(name)s (%(status)d).",
                   {'name': volume['name'], 'status': status})
         RaiseXIODriverException()
 
@@ -1257,7 +1257,7 @@ class XIOISEDriver(driver.VolumeDriver):
         LOG.debug("extend_volume called")
         ret = self._modify_volume(volume, {'size': new_size})
         if ret is True:
-            LOG.info(_LI("volume %(name)s extended to %(size)d."),
+            LOG.info("volume %(name)s extended to %(size)d.",
                      {'name': volume['name'], 'size': new_size})
         return
 
@@ -1269,14 +1269,14 @@ class XIOISEDriver(driver.VolumeDriver):
                                            'IOPSmax': qos['maxIOPS'],
                                            'IOPSburst': qos['burstIOPS']})
         if ret is True:
-            LOG.info(_LI("Volume %s retyped."), volume['name'])
+            LOG.info("Volume %s retyped.", volume['name'])
         return True
 
     def manage_existing(self, volume, ise_volume_ref):
         """Convert an existing ISE volume to a Cinder volume."""
         LOG.debug("X-IO manage_existing called")
         if 'source-name' not in ise_volume_ref:
-            LOG.error(_LE("manage_existing: No source-name in ref!"))
+            LOG.error("manage_existing: No source-name in ref!")
             RaiseXIODriverException()
         # copy the source-name to 'name' for modify volume use
         ise_volume_ref['name'] = ise_volume_ref['source-name']
@@ -1288,20 +1288,20 @@ class XIOISEDriver(driver.VolumeDriver):
                                    'IOPSmax': qos['maxIOPS'],
                                    'IOPSburst': qos['burstIOPS']})
         if ret is True:
-            LOG.info(_LI("Volume %s converted."), ise_volume_ref['name'])
+            LOG.info("Volume %s converted.", ise_volume_ref['name'])
         return ret
 
     def manage_existing_get_size(self, volume, ise_volume_ref):
         """Get size of an existing ISE volume."""
         LOG.debug("X-IO manage_existing_get_size called")
         if 'source-name' not in ise_volume_ref:
-            LOG.error(_LE("manage_existing_get_size: No source-name in ref!"))
+            LOG.error("manage_existing_get_size: No source-name in ref!")
             RaiseXIODriverException()
         ref_name = ise_volume_ref['source-name']
         # get volume status including size
         vol_info = self._get_volume_info(ref_name)
         if vol_info['location'] == '':
-            LOG.error(_LE("manage_existing_get_size: %s does not exist!"),
+            LOG.error("manage_existing_get_size: %s does not exist!",
                       ref_name)
             RaiseXIODriverException()
         return int(vol_info['size'])
@@ -1311,7 +1311,7 @@ class XIOISEDriver(driver.VolumeDriver):
         LOG.debug("X-IO unmanage called")
         vol_info = self._get_volume_info(volume['name'])
         if vol_info['location'] == '':
-            LOG.error(_LE("unmanage: Volume %s does not exist!"),
+            LOG.error("unmanage: Volume %s does not exist!",
                       volume['name'])
             RaiseXIODriverException()
         # This is a noop. ISE does not store any Cinder specific information.
@@ -1330,7 +1330,7 @@ class XIOISEDriver(driver.VolumeDriver):
             host = self._find_host(endpoints)
             if host['name'] == '':
                 # host still not found, this is fatal.
-                LOG.error(_LE("Host could not be found!"))
+                LOG.error("Host could not be found!")
                 RaiseXIODriverException()
         elif host['type'].upper() != 'OPENSTACK':
             # Make sure host type is marked as OpenStack host
@@ -1338,7 +1338,7 @@ class XIOISEDriver(driver.VolumeDriver):
             resp = self._send_cmd('PUT', host['locator'], params)
             status = resp['status']
             if status != 201 and status != 409:
-                LOG.error(_LE("Host PUT failed (%s)."), status)
+                LOG.error("Host PUT failed (%s).", status)
                 RaiseXIODriverException()
         # We have a host object.
         target_lun = ''
@@ -1400,7 +1400,7 @@ class XIOISEISCSIDriver(driver.ISCSIDriver):
 
         # The iscsi_ip_address must always be set.
         if self.configuration.iscsi_ip_address == '':
-            LOG.error(_LE("iscsi_ip_address must be set!"))
+            LOG.error("iscsi_ip_address must be set!")
             RaiseXIODriverException()
         # Setup common driver
         self.driver = XIOISEDriver(configuration=self.configuration)
@@ -1571,7 +1571,7 @@ class XIOISEFCDriver(driver.FibreChannelDriver):
     def unmanage(self, volume):
         return self.driver.unmanage(volume)
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     def initialize_connection(self, volume, connector):
         hostname = ''
         if 'host' in connector:
@@ -1589,7 +1589,7 @@ class XIOISEFCDriver(driver.FibreChannelDriver):
         return {'driver_volume_type': 'fibre_channel',
                 'data': data}
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector, **kwargs):
         # now we are ready to tell ISE to delete presentations
         hostname = self.driver.ise_unpresent(volume, connector['wwpns'])

@@ -36,7 +36,7 @@ from six.moves import range
 from six.moves import urllib
 
 from cinder import exception
-from cinder.i18n import _, _LE
+from cinder.i18n import _
 
 
 glance_opts = [
@@ -72,7 +72,7 @@ def _parse_image_ref(image_href):
 
     :param image_href: href of an image
     :returns: a tuple of the form (image_id, netloc, use_ssl)
-    :raises ValueError
+    :raises ValueError:
 
     """
     url = urllib.parse.urlparse(image_href)
@@ -198,9 +198,9 @@ class GlanceClientWrapper(object):
             except retry_excs as e:
                 netloc = self.netloc
                 extra = "retrying"
-                error_msg = _LE("Error contacting glance server "
-                                "'%(netloc)s' for '%(method)s', "
-                                "%(extra)s.")
+                error_msg = _("Error contacting glance server "
+                              "'%(netloc)s' for '%(method)s', "
+                              "%(extra)s.")
                 if attempt == num_attempts:
                     extra = 'done trying'
                     LOG.exception(error_msg, {'netloc': netloc,
@@ -400,8 +400,8 @@ class GlanceImageService(object):
     def delete(self, context, image_id):
         """Delete the given image.
 
-        :raises: ImageNotFound if the image does not exist.
-        :raises: NotAuthorized if the user is not an owner.
+        :raises ImageNotFound: if the image does not exist.
+        :raises NotAuthorized: if the user is not an owner.
 
         """
         try:

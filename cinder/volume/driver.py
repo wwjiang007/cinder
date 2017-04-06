@@ -26,7 +26,7 @@ from oslo_utils import excutils
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LW
+from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import objects
 from cinder.objects import fields
@@ -266,6 +266,11 @@ volume_opts = [
                      "working CI system and testing are marked as unsupported "
                      "until CI is working again.  This also marks a driver as "
                      "deprecated and may be removed in the next release."),
+    cfg.StrOpt('backend_availability_zone',
+               default=None,
+               help='Availability zone for this volume backend. If not set, '
+                    'the storage_availability_zone option value is used as '
+                    'the default for all backends.'),
 ]
 
 # for backward compatibility
@@ -335,6 +340,10 @@ class BaseVD(object):
     # the unsupported driver started.
     SUPPORTED = True
 
+    # Methods checked to detect a driver implements a replication feature
+    REPLICATION_FEATURE_CHECKERS = {'v2.1': 'failover_host',
+                                    'a/a': 'failover_completed'}
+
     def __init__(self, execute=utils.execute, *args, **kwargs):
         # NOTE(vish): db is set by Manager
         self.db = kwargs.get('db')
@@ -346,6 +355,16 @@ class BaseVD(object):
             self.configuration.append_config_values(volume_opts)
             self.configuration.append_config_values(iser_opts)
             utils.setup_tracing(self.configuration.safe_get('trace_flags'))
+
+            # NOTE(geguileo): Don't allow to start if we are enabling
+            # replication on a cluster service with a backend that doesn't
+            # support the required mechanism for Active-Active.
+            replication_devices = self.configuration.safe_get(
+                'replication_device')
+            if (self.cluster_name and replication_devices and
+                    not self.supports_replication_feature('a/a')):
+                raise exception.Invalid(_("Driver doesn't support clustered "
+                                          "replication."))
 
         self.driver_utils = driver_utils.VolumeDriverUtils(
             self._driver_data_namespace(), self.db)
@@ -405,8 +424,8 @@ class BaseVD(object):
                         self._is_non_recoverable(ex.stderr, non_recoverable):
                     raise
 
-                LOG.exception(_LE("Recovering from a failed execute.  "
-                                  "Try number %s"), tries)
+                LOG.exception("Recovering from a failed execute. "
+                              "Try number %s", tries)
                 time.sleep(tries ** 2)
 
     def _detach_volume(self, context, attach_info, volume, properties,
@@ -439,8 +458,8 @@ class BaseVD(object):
                 LOG.debug("volume %s: removing export", volume['id'])
                 self.remove_export(context, volume)
             except Exception as ex:
-                LOG.exception(_LE("Error detaching volume %(volume)s, "
-                                  "due to remove export failure."),
+                LOG.exception("Error detaching volume %(volume)s, "
+                              "due to remove export failure.",
                               {"volume": volume['id']})
                 raise exception.RemoveExportException(volume=volume['id'],
                                                       reason=ex)
@@ -461,8 +480,8 @@ class BaseVD(object):
         # flag in the interface is for anticipation that it will be enabled
         # in the future.
         if remote:
-            LOG.error(_LE("Detaching snapshot from a remote node "
-                          "is not supported."))
+            LOG.error("Detaching snapshot from a remote node "
+                      "is not supported.")
             raise exception.NotSupportedOperation(
                 operation=_("detach snapshot from remote node"))
         else:
@@ -482,8 +501,8 @@ class BaseVD(object):
                 LOG.debug("Snapshot %s: removing export.", snapshot.id)
                 self.remove_export_snapshot(context, snapshot)
             except Exception as ex:
-                LOG.exception(_LE("Error detaching snapshot %(snapshot)s, "
-                                  "due to remove export failure."),
+                LOG.exception("Error detaching snapshot %(snapshot)s, "
+                              "due to remove export failure.",
                               {"snapshot": snapshot.id})
                 raise exception.RemoveExportException(volume=snapshot.id,
                                                       reason=ex)
@@ -513,8 +532,8 @@ class BaseVD(object):
                 self._throttle = throttling.BlkioCgroup(int(bps_limit),
                                                         cgroup_name)
             except processutils.ProcessExecutionError as err:
-                LOG.warning(_LW('Failed to activate volume copy throttling: '
-                                '%(err)s'), {'err': err})
+                LOG.warning('Failed to activate volume copy throttling: '
+                            '%(err)s', {'err': err})
         throttling.Throttle.set_default(self._throttle)
 
     def get_version(self):
@@ -718,9 +737,9 @@ class BaseVD(object):
             if ':' in vendor_name:
                 old_name = vendor_name
                 vendor_name = vendor_name.replace(':', '_')
-                LOG.warning(_LW('The colon in vendor name was replaced '
-                                'by underscore. Updated vendor name is '
-                                '%(name)s".'), {'name': vendor_name})
+                LOG.warning('The colon in vendor name was replaced '
+                            'by underscore. Updated vendor name is '
+                            '%(name)s".', {'name': vendor_name})
 
             for key in vendor_prop:
                 # If key has colon in vendor name field, we replace it to
@@ -732,10 +751,10 @@ class BaseVD(object):
                     updated_vendor_prop[new_key] = vendor_prop[key]
                     continue
                 if not key.startswith(vendor_name + ':'):
-                    LOG.warning(_LW('Vendor unique property "%(property)s" '
-                                    'must start with vendor prefix with colon '
-                                    '"%(prefix)s". The property was '
-                                    'not registered on capabilities list.'),
+                    LOG.warning('Vendor unique property "%(property)s" '
+                                'must start with vendor prefix with colon '
+                                '"%(prefix)s". The property was '
+                                'not registered on capabilities list.',
                                 {'prefix': vendor_name + ':',
                                  'property': key})
                     continue
@@ -933,9 +952,9 @@ class BaseVD(object):
                         rpcapi.terminate_connection(context, volume,
                                                     properties, force=True)
                     except Exception:
-                        LOG.warning(_LW("Failed terminating the connection "
-                                        "of volume %(volume_id)s, but it is "
-                                        "acceptable."),
+                        LOG.warning("Failed terminating the connection "
+                                    "of volume %(volume_id)s, but it is "
+                                    "acceptable.",
                                     {'volume_id': volume['id']})
         else:
             # Call local driver's create_export and initialize_connection.
@@ -950,9 +969,9 @@ class BaseVD(object):
                     volume.save()
             except exception.CinderException as ex:
                 if model_update:
-                    LOG.exception(_LE("Failed updating model of volume "
-                                      "%(volume_id)s with driver provided "
-                                      "model %(model)s"),
+                    LOG.exception("Failed updating model of volume "
+                                  "%(volume_id)s with driver provided "
+                                  "model %(model)s",
                                   {'volume_id': volume['id'],
                                    'model': model_update})
                     raise exception.ExportFailure(reason=ex)
@@ -989,7 +1008,7 @@ class BaseVD(object):
                                         properties, force=True,
                                         remote=remote)
                 except Exception:
-                    LOG.exception(_LE('Error detaching volume %s'),
+                    LOG.exception('Error detaching volume %s',
                                   volume['id'])
             raise
 
@@ -1005,8 +1024,8 @@ class BaseVD(object):
         # flag in the interface is for anticipation that it will be enabled
         # in the future.
         if remote:
-            LOG.error(_LE("Attaching snapshot from a remote node "
-                          "is not supported."))
+            LOG.error("Attaching snapshot from a remote node "
+                      "is not supported.")
             raise exception.NotSupportedOperation(
                 operation=_("attach snapshot from remote node"))
         else:
@@ -1026,9 +1045,9 @@ class BaseVD(object):
                     snapshot.save()
             except exception.CinderException as ex:
                 if model_update:
-                    LOG.exception(_LE("Failed updating model of snapshot "
-                                      "%(snapshot_id)s with driver provided "
-                                      "model %(model)s."),
+                    LOG.exception("Failed updating model of snapshot "
+                                  "%(snapshot_id)s with driver provided "
+                                  "model %(model)s.",
                                   {'snapshot_id': snapshot.id,
                                    'model': model_update})
                     raise exception.ExportFailure(reason=ex)
@@ -1075,7 +1094,7 @@ class BaseVD(object):
             unavailable = not connector.check_valid_device(host_device,
                                                            root_access)
         except Exception:
-            LOG.exception(_LE('Could not validate device %s'), host_device)
+            LOG.exception('Could not validate device %s', host_device)
 
         if unavailable:
             raise exception.DeviceUnavailable(path=host_device,
@@ -1410,9 +1429,10 @@ class BaseVD(object):
 
     def _create_temp_volume(self, context, volume):
         kwargs = {
-            'size': volume['size'],
-            'display_name': 'backup-vol-%s' % volume['id'],
-            'host': volume['host'],
+            'size': volume.size,
+            'display_name': 'backup-vol-%s' % volume.id,
+            'host': volume.host,
+            'cluster_name': volume.cluster_name,
             'user_id': context.user_id,
             'project_id': context.project_id,
             'status': 'creating',
@@ -1701,6 +1721,38 @@ class BaseVD(object):
         #               'replication_extended_status': 'whatever',...}},]
         raise NotImplementedError()
 
+    def failover(self, context, volumes, secondary_id=None):
+        """Like failover but for a host that is clustered.
+
+        Most of the time this will be the exact same behavior as failover_host,
+        so if it's not overwritten, it is assumed to be the case.
+        """
+        return self.failover_host(context, volumes, secondary_id)
+
+    def failover_completed(self, context, active_backend_id=None):
+        """This method is called after failover for clustered backends."""
+        raise NotImplementedError()
+
+    @classmethod
+    def _is_base_method(cls, method_name):
+        method = getattr(cls, method_name)
+        return method.__module__ == getattr(BaseVD, method_name).__module__
+
+    @classmethod
+    def supports_replication_feature(cls, feature):
+        """Check if driver class supports replication features.
+
+        Feature is a string that must be one of:
+            - v2.1
+            - a/a
+        """
+        if feature not in cls.REPLICATION_FEATURE_CHECKERS:
+            return False
+
+        # Check if method is being implemented/overwritten by the driver
+        method_name = cls.REPLICATION_FEATURE_CHECKERS[feature]
+        return not cls._is_base_method(method_name)
+
     def get_replication_updates(self, context):
         """Old replication update method, deprecate."""
         raise NotImplementedError()
@@ -1709,7 +1761,7 @@ class BaseVD(object):
         """Creates a group.
 
         :param context: the context of the caller.
-        :param group: the dictionary of the group to be created.
+        :param group: the Group object of the group to be created.
         :returns: model_update
 
         model_update will be in this format: {'status': xxx, ......}.
@@ -1730,14 +1782,13 @@ class BaseVD(object):
         """Deletes a group.
 
         :param context: the context of the caller.
-        :param group: the dictionary of the group to be deleted.
-        :param volumes: a list of volume dictionaries in the group.
+        :param group: the Group object of the group to be deleted.
+        :param volumes: a list of Volume objects in the group.
         :returns: model_update, volumes_model_update
 
-        param volumes is retrieved directly from the db. It is a list of
-        cinder.db.sqlalchemy.models.Volume to be precise. It cannot be
-        assigned to volumes_model_update. volumes_model_update is a list of
-        dictionaries. It has to be built by the driver. An entry will be
+        param volumes is a list of objects retrieved from the db. It cannot
+        be assigned to volumes_model_update. volumes_model_update is a list
+        of dictionaries. It has to be built by the driver. An entry will be
         in this format: {'id': xxx, 'status': xxx, ......}. model_update
         will be in this format: {'status': xxx, ......}.
 
@@ -1775,9 +1826,9 @@ class BaseVD(object):
         """Updates a group.
 
         :param context: the context of the caller.
-        :param group: the dictionary of the group to be updated.
-        :param add_volumes: a list of volume dictionaries to be added.
-        :param remove_volumes: a list of volume dictionaries to be removed.
+        :param group: the Group object of the group to be updated.
+        :param add_volumes: a list of Volume objects to be added.
+        :param remove_volumes: a list of Volume objects to be removed.
         :returns: model_update, add_volumes_update, remove_volumes_update
 
         model_update is a dictionary that the driver wants the manager
@@ -1790,8 +1841,8 @@ class BaseVD(object):
         volume entry can be updated. If None is returned, the volume will
         remain its original status. Also note that you cannot directly
         assign add_volumes to add_volumes_update as add_volumes is a list of
-        cinder.db.sqlalchemy.models.Volume objects and cannot be used for
-        db update directly. Same with remove_volumes.
+        volume objects and cannot be used for db update directly. Same with
+        remove_volumes.
 
         If the driver throws an exception, the status of the group as well as
         those of the volumes to be added/removed will be set to 'error'.
@@ -1807,17 +1858,16 @@ class BaseVD(object):
         :param group: the Group object to be created.
         :param volumes: a list of Volume objects in the group.
         :param group_snapshot: the GroupSnapshot object as source.
-        :param snapshots: a list of snapshot objects in group_snapshot.
+        :param snapshots: a list of Snapshot objects in group_snapshot.
         :param source_group: the Group object as source.
-        :param source_vols: a list of volume objects in the source_group.
+        :param source_vols: a list of Volume objects in the source_group.
         :returns: model_update, volumes_model_update
 
         The source can be group_snapshot or a source_group.
 
-        param volumes is retrieved directly from the db. It is a list of
-        cinder.db.sqlalchemy.models.Volume to be precise. It cannot be
-        assigned to volumes_model_update. volumes_model_update is a list of
-        dictionaries. It has to be built by the driver. An entry will be
+        param volumes is a list of objects retrieved from the db. It cannot
+        be assigned to volumes_model_update. volumes_model_update is a list
+        of dictionaries. It has to be built by the driver. An entry will be
         in this format: {'id': xxx, 'status': xxx, ......}. model_update
         will be in this format: {'status': xxx, ......}.
 
@@ -1877,7 +1927,7 @@ class BaseVD(object):
 
         :param context: the context of the caller.
         :param group_snapshot: the GroupSnapshot object to be deleted.
-        :param snapshots: a list of snapshot objects in the group_snapshot.
+        :param snapshots: a list of Snapshot objects in the group_snapshot.
         :returns: model_update, snapshots_model_update
 
         param snapshots is a list of objects. It cannot be assigned to
@@ -2188,9 +2238,8 @@ class ManageableSnapshotsVD(object):
         pass
 
 
-class VolumeDriver(ConsistencyGroupVD, TransferVD, ManageableVD,
-                   ExtendVD, CloneableImageVD, ManageableSnapshotsVD,
-                   SnapshotVD, LocalVD, MigrateVD, BaseVD):
+class VolumeDriver(ManageableVD, CloneableImageVD, ManageableSnapshotsVD,
+                   MigrateVD, BaseVD):
     def check_for_setup_error(self):
         raise NotImplementedError()
 
@@ -2563,8 +2612,7 @@ class ISCSIDriver(VolumeDriver):
     def _do_iscsi_discovery(self, volume):
         # TODO(justinsb): Deprecate discovery and use stored info
         # NOTE(justinsb): Discovery won't work with CHAP-secured targets (?)
-        LOG.warning(_LW("ISCSI provider_location not "
-                        "stored, using discovery"))
+        LOG.warning("ISCSI provider_location not stored, using discovery")
 
         volume_name = volume['name']
 
@@ -2577,7 +2625,7 @@ class ISCSIDriver(VolumeDriver):
                                         volume['host'].split('@')[0],
                                         run_as_root=True)
         except processutils.ProcessExecutionError as ex:
-            LOG.error(_LE("ISCSI discovery attempt failed for:%s"),
+            LOG.error("ISCSI discovery attempt failed for:%s",
                       volume['host'].split('@')[0])
             LOG.debug("Error from iscsiadm -m discovery: %s", ex.stderr)
             return None
@@ -2766,8 +2814,8 @@ class ISCSIDriver(VolumeDriver):
         # iSCSI drivers require the initiator information
         required = 'initiator'
         if required not in connector:
-            LOG.error(_LE('The volume driver requires %(data)s '
-                          'in the connector.'), {'data': required})
+            LOG.error('The volume driver requires %(data)s '
+                      'in the connector.', {'data': required})
             raise exception.InvalidConnectorException(missing=required)
 
     def terminate_connection(self, volume, connector, **kwargs):
@@ -2920,9 +2968,9 @@ class FibreChannelDriver(VolumeDriver):
     def validate_connector_has_setting(connector, setting):
         """Test for non-empty setting in connector."""
         if setting not in connector or not connector[setting]:
-            LOG.error(_LE(
+            LOG.error(
                 "FibreChannelDriver validate_connector failed. "
-                "No '%(setting)s'. Make sure HBA state is Online."),
+                "No '%(setting)s'. Make sure HBA state is Online.",
                 {'setting': setting})
             raise exception.InvalidConnectorException(missing=setting)
 

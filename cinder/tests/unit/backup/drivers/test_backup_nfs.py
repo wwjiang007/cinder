@@ -66,7 +66,7 @@ class BackupNFSShareTestCase(test.TestCase):
     def test_check_configuration_no_backup_share(self):
         self.override_config('backup_share', None)
         self.mock_object(nfs.NFSBackupDriver, '_init_backup_repo_path',
-                         mock.Mock(return_value=FAKE_BACKUP_PATH))
+                         return_value=FAKE_BACKUP_PATH)
 
         with mock.patch.object(nfs.NFSBackupDriver, '_check_configuration'):
             driver = nfs.NFSBackupDriver(self.ctxt)
@@ -159,7 +159,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         mock_remotefsclient.get_mount_point = mock.Mock(
             return_value=self.temp_dir)
         self.mock_object(remotefs_brick, 'RemoteFsClient',
-                         mock.Mock(return_value=mock_remotefsclient))
+                         return_value=mock_remotefsclient)
         # Remove tempdir.
         self.addCleanup(shutil.rmtree, self.temp_dir)
         for _i in range(0, 32):
@@ -204,17 +204,27 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         backup = objects.Backup.get_by_id(self.ctxt, FAKE_BACKUP_ID)
         self.assertEqual(backup['container'], UPDATED_CONTAINER_NAME)
 
+    @mock.patch('cinder.backup.drivers.posix.PosixBackupDriver.'
+                'update_container_name',
+                return_value='testcontainer1')
     @mock.patch('cinder.backup.drivers.nfs.NFSBackupDriver.'
                 '_send_progress_end')
     @mock.patch('cinder.backup.drivers.nfs.NFSBackupDriver.'
                 '_send_progress_notification')
-    def test_backup_default_container_notify(self, _send_progress,
-                                             _send_progress_end):
+    def test_backup_container_notify_1(self, _send_progress,
+                                       _send_progress_end,
+                                       _mock_update_container_name):
+        # This unit test writes data to disk.  It should be
+        # updated to not do that.
+
         volume_id = fake.VOLUME_ID
         self._create_backup_db_entry(volume_id=volume_id,
-                                     container=None)
+                                     container='testcontainer1')
+
         # If the backup_object_number_per_notification is set to 1,
         # the _send_progress method will be called for sure.
+        _send_progress.reset_mock()
+        _send_progress_end.reset_mock()
         CONF.set_override("backup_object_number_per_notification", 1)
         CONF.set_override("backup_enable_progress_timer", False)
         service = nfs.NFSBackupDriver(self.ctxt)
@@ -224,17 +234,52 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self.assertTrue(_send_progress.called)
         self.assertTrue(_send_progress_end.called)
 
+    @mock.patch('cinder.backup.drivers.posix.PosixBackupDriver.'
+                'update_container_name',
+                return_value='testcontainer2')
+    @mock.patch('cinder.backup.drivers.nfs.NFSBackupDriver.'
+                '_send_progress_end')
+    @mock.patch('cinder.backup.drivers.nfs.NFSBackupDriver.'
+                '_send_progress_notification')
+    def test_backup_container_notify_2(self, _send_progress,
+                                       _send_progress_end,
+                                       _mock_update_container_name):
+        # This unit test writes data to disk.  It should be
+        # updated to not do that.
+
+        volume_id = fake.VOLUME_ID
+        self._create_backup_db_entry(volume_id=volume_id,
+                                     container='testcontainer2')
+
         # If the backup_object_number_per_notification is increased to
         # another value, the _send_progress method will not be called.
         _send_progress.reset_mock()
         _send_progress_end.reset_mock()
         CONF.set_override("backup_object_number_per_notification", 10)
+        CONF.set_override("backup_enable_progress_timer", False)
         service = nfs.NFSBackupDriver(self.ctxt)
         self.volume_file.seek(0)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
         self.assertFalse(_send_progress.called)
         self.assertTrue(_send_progress_end.called)
+
+    @mock.patch('cinder.backup.drivers.posix.PosixBackupDriver.'
+                'update_container_name',
+                return_value='testcontainer3')
+    @mock.patch('cinder.backup.drivers.nfs.NFSBackupDriver.'
+                '_send_progress_end')
+    @mock.patch('cinder.backup.drivers.nfs.NFSBackupDriver.'
+                '_send_progress_notification')
+    def test_backup_container_notify_3(self, _send_progress,
+                                       _send_progress_end,
+                                       _mock_update_container_name):
+        # This unit test writes data to disk.  It should be
+        # updated to not do that.
+
+        volume_id = fake.VOLUME_ID
+        self._create_backup_db_entry(volume_id=volume_id,
+                                     container='testcontainer3')
 
         # If the timer is enabled, the _send_progress will be called,
         # since the timer can trigger the progress notification.
@@ -626,7 +671,9 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         fake_data = bytearray(size)
         if six.PY2:
             # On Python 2, zlib.compressor() accepts buffer, but not bytearray
-            fake_data = buffer(fake_data)
+            # NOTE(jsbryant): Pep8 fails on py3 based installations as buffer()
+            # was removed. 'noqa' used here to avoid that failure.
+            fake_data = buffer(fake_data)  # noqa
         return fake_data
 
     def test_prepare_output_data_effective_compression(self):

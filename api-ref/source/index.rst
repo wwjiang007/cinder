@@ -5,11 +5,11 @@ Block Storage API
 Contents:
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
 
-    v1/index
     v2/index
     v3/index
+    Block Storage API v1 (DEPRECATED) <v1/index>
 
 
 Indices and tables

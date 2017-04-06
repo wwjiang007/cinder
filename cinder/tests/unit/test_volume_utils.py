@@ -21,6 +21,7 @@ import io
 import mock
 import six
 
+import ddt
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_utils import units
@@ -34,6 +35,7 @@ from cinder.objects import fields
 from cinder import test
 from cinder.tests.unit.backup import fake_backup
 from cinder.tests.unit import fake_constants as fake
+from cinder.tests.unit import fake_group
 from cinder.tests.unit import fake_snapshot
 from cinder.tests.unit import fake_volume
 from cinder import utils
@@ -95,7 +97,8 @@ class NotifyUsageTestCase(test.TestCase):
             mock.sentinel.snapshot,
             'test_suffix')
         self.assertIsNone(output)
-        mock_usage.assert_called_once_with(mock.sentinel.snapshot)
+        mock_usage.assert_called_once_with(mock.sentinel.snapshot,
+                                           mock.sentinel.context)
         mock_rpc.get_notifier.assert_called_once_with('snapshot', 'host1')
         mock_rpc.get_notifier.return_value.info.assert_called_once_with(
             mock.sentinel.context,
@@ -116,6 +119,7 @@ class NotifyUsageTestCase(test.TestCase):
             host='host2')
         self.assertIsNone(output)
         mock_usage.assert_called_once_with(mock.sentinel.snapshot,
+                                           mock.sentinel.context,
                                            a='b', c='d')
         mock_rpc.get_notifier.assert_called_once_with('snapshot', 'host2')
         mock_rpc.get_notifier.return_value.info.assert_called_once_with(
@@ -123,15 +127,15 @@ class NotifyUsageTestCase(test.TestCase):
             'snapshot.test_suffix',
             mock_usage.return_value)
 
-    @mock.patch('cinder.objects.Volume.get_by_id')
-    def test_usage_from_snapshot(self, volume_get_by_id):
+    @mock.patch('cinder.db.volume_get')
+    def test_usage_from_snapshot(self, volume_get):
         raw_volume = {
             'id': fake.VOLUME_ID,
             'availability_zone': 'nova'
         }
         ctxt = context.get_admin_context()
         volume_obj = fake_volume.fake_volume_obj(ctxt, **raw_volume)
-        volume_get_by_id.return_value = volume_obj
+        volume_get.return_value = volume_obj
         raw_snapshot = {
             'project_id': fake.PROJECT_ID,
             'user_id': fake.USER_ID,
@@ -149,7 +153,7 @@ class NotifyUsageTestCase(test.TestCase):
         }
 
         snapshot_obj = fake_snapshot.fake_snapshot_obj(ctxt, **raw_snapshot)
-        usage_info = volume_utils._usage_from_snapshot(snapshot_obj)
+        usage_info = volume_utils._usage_from_snapshot(snapshot_obj, ctxt)
         expected_snapshot = {
             'tenant_id': fake.PROJECT_ID,
             'user_id': fake.USER_ID,
@@ -166,8 +170,8 @@ class NotifyUsageTestCase(test.TestCase):
         }
         self.assertDictEqual(expected_snapshot, usage_info)
 
-    @mock.patch('cinder.objects.Volume.get_by_id')
-    def test_usage_from_deleted_snapshot(self, volume_get_by_id):
+    @mock.patch('cinder.db.volume_get')
+    def test_usage_from_deleted_snapshot(self, volume_get):
         raw_volume = {
             'id': fake.VOLUME_ID,
             'availability_zone': 'nova',
@@ -175,8 +179,7 @@ class NotifyUsageTestCase(test.TestCase):
         }
         ctxt = context.get_admin_context()
         volume_obj = fake_volume.fake_volume_obj(ctxt, **raw_volume)
-        volume_get_by_id.side_effect = exception.VolumeNotFound(
-            volume_id=fake.VOLUME_ID)
+        volume_get.return_value = volume_obj
 
         raw_snapshot = {
             'project_id': fake.PROJECT_ID,
@@ -195,11 +198,11 @@ class NotifyUsageTestCase(test.TestCase):
         }
 
         snapshot_obj = fake_snapshot.fake_snapshot_obj(ctxt, **raw_snapshot)
-        usage_info = volume_utils._usage_from_snapshot(snapshot_obj)
+        usage_info = volume_utils._usage_from_snapshot(snapshot_obj, ctxt)
         expected_snapshot = {
             'tenant_id': fake.PROJECT_ID,
             'user_id': fake.USER_ID,
-            'availability_zone': '',
+            'availability_zone': 'nova',
             'volume_id': fake.VOLUME_ID,
             'volume_size': 1,
             'snapshot_id': fake.SNAPSHOT_ID,
@@ -688,6 +691,7 @@ class CopyVolumeTestCase(test.TestCase):
                                               1073741824, mock.ANY)
 
 
+@ddt.ddt
 class VolumeUtilsTestCase(test.TestCase):
     def test_null_safe_str(self):
         self.assertEqual('', volume_utils.null_safe_str(None))
@@ -993,3 +997,53 @@ class VolumeUtilsTestCase(test.TestCase):
         create_key.assert_called_once_with(ctxt,
                                            algorithm='aes',
                                            length=256)
+
+    @ddt.data('<is> True', '<is> true', '<is> yes')
+    def test_is_replicated_spec_true(self, enabled):
+        res = volume_utils.is_replicated_spec({'replication_enabled': enabled})
+        self.assertTrue(res)
+
+    @ddt.data({}, None, {'key': 'value'})
+    def test_is_replicated_no_specs(self, extra_specs):
+        res = volume_utils.is_replicated_spec(extra_specs)
+        self.assertFalse(res)
+
+    @ddt.data('<is> False', '<is> false', '<is> f', 'baddata', 'bad data')
+    def test_is_replicated_spec_false(self, enabled):
+        res = volume_utils.is_replicated_spec({'replication_enabled': enabled})
+        self.assertFalse(res)
+
+    @mock.patch('cinder.db.group_get')
+    def test_group_get_by_id(self, mock_db_group_get):
+        expected = mock.Mock()
+        mock_db_group_get.return_value = expected
+        group_id = fake.GROUP_ID
+        actual = volume_utils.group_get_by_id(group_id)
+        self.assertEqual(expected, actual)
+
+    @mock.patch('cinder.db.group_get')
+    def test_group_get_by_id_group_not_found(self, mock_db_group_get):
+        group_id = fake.GROUP_ID
+        mock_db_group_get.side_effect = exception.GroupNotFound(
+            group_id=group_id)
+        self.assertRaises(
+            exception.GroupNotFound,
+            volume_utils.group_get_by_id,
+            group_id
+        )
+
+    @ddt.data('<is> False', None, 'notASpecValueWeCareAbout')
+    def test_is_group_a_cg_snapshot_type_is_false(self, spec_value):
+        with mock.patch('cinder.volume.group_types'
+                        '.get_group_type_specs') as mock_get_specs:
+            mock_get_specs.return_value = spec_value
+            group = fake_group.fake_group_obj(
+                None, group_type_id=fake.GROUP_TYPE_ID)
+            self.assertFalse(volume_utils.is_group_a_cg_snapshot_type(group))
+
+    @mock.patch('cinder.volume.group_types.get_group_type_specs')
+    def test_is_group_a_cg_snapshot_type_is_true(self, mock_get_specs):
+        mock_get_specs.return_value = '<is> True'
+        group = fake_group.fake_group_obj(
+            None, group_type_id=fake.GROUP_TYPE_ID)
+        self.assertTrue(volume_utils.is_group_a_cg_snapshot_type(group))

@@ -1,6 +1,5 @@
 .. -*- rst -*-
 
-===============
 Group snapshots
 ===============
 
@@ -9,9 +8,9 @@ deletes group snapshots.
 
 
 Delete group snapshot
-=====================
+~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v3/{tenant_id}/group_snapshots/{group_snapshot_id}
+.. rest_method::  DELETE /v3/{project_id}/group_snapshots/{group_snapshot_id}
 
 Deletes a group snapshot.
 
@@ -24,14 +23,14 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - group_snapshot_id: group_snapshot_id
 
 
 Show group snapshot details
-===========================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/group_snapshots/{group_snapshot_id}
+.. rest_method::  GET /v3/{project_id}/group_snapshots/{group_snapshot_id}
 
 Shows details for a group snapshot.
 
@@ -45,7 +44,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - group_snapshot_id: group_snapshot_id
 
 
@@ -54,7 +53,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_7
    - description: description
    - created_at: created_at
    - group_id: group_id
@@ -69,9 +68,9 @@ Response Example
 
 
 List group snapshots with details
-=================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/group_snapshots/detail
+.. rest_method::  GET /v3/{project_id}/group_snapshots/detail
 
 Lists all group snapshots with details.
 
@@ -84,7 +83,12 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - sort_key: sort_key
+   - sort_dir: sort_dir
+   - limit: limit
+   - offset: offset
+   - marker: marker
 
 
 Response Parameters
@@ -92,7 +96,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_7
    - description: description
    - created_at: created_at
    - group_id: group_id
@@ -106,9 +110,9 @@ Response Example
    :language: javascript
 
 List group snapshots
-====================
+~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v3/{tenant_id}/group_snapshots
+.. rest_method::  GET /v3/{project_id}/group_snapshots
 
 Lists all group snapshots.
 
@@ -122,7 +126,12 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - sort_key: sort_key
+   - sort_dir: sort_dir
+   - limit: limit
+   - offset: offset
+   - marker: marker
 
 
 Response Parameters
@@ -142,9 +151,9 @@ Response Example
 
 
 Create group snapshot
-=====================
+~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v3/{tenant_id}/group_snapshots
+.. rest_method::  POST /v3/{project_id}/group_snapshots
 
 Creates a group snapshot.
 
@@ -160,7 +169,7 @@ Request
    - name: name
    - description: description
    - group_id: group_id
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -173,9 +182,37 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - status: status
+   - status: status_7
    - description: description
    - created_at: created_at
    - group_id: group_id
    - id: id
    - name: name
+
+
+Reset group snapshot status
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. rest_method::  PUT /v3/{project_id}/group_snapshots/{group_snapshot_id}/action
+
+Resets the status for a group snapshot. Specifies the ``reset_status`` action in the request body.
+
+Normal response codes: 202
+Error response codes: badRequest(400), itemNotFound(404)
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - reset_status: reset_status
+   - status: status
+   - project_id: project_id
+   - group_snapshot_id: group_snapshot_id
+
+Request Example
+---------------
+
+.. literalinclude:: ./samples/group-snapshot-reset-status-request.json
+   :language: javascript

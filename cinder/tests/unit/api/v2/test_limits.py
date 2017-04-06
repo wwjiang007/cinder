@@ -246,7 +246,7 @@ class LimitMiddlewareTest(BaseLimitTestSuite):
 
     def test_limit_class(self):
         """Test that middleware selected correct limiter class."""
-        assert isinstance(self.app._limiter, TestLimiter)
+        self.assertIsInstance(self.app._limiter, TestLimiter)
 
     def test_good_request(self):
         """Test successful GET request through middleware."""
@@ -304,6 +304,10 @@ class LimitTest(BaseLimitTestSuite):
         self.assertEqual(4, limit.next_request)
         self.assertEqual(4, limit.last_request)
 
+    def test_invalid_limit(self):
+        """Test that invalid limits are properly checked on construction."""
+        self.assertRaises(ValueError, limits.Limit, "GET", "*", ".*", 0, 1)
+
 
 class ParseLimitsTest(BaseLimitTestSuite):
 
@@ -342,7 +346,7 @@ class ParseLimitsTest(BaseLimitTestSuite):
                                             '(POST, /bar*, /bar.*, 5, second);'
                                             '(Say, /derp*, /derp.*, 1, day)')
         except ValueError as e:
-            assert False, six.text_type(e)
+            self.assertFalse(six.text_type(e))
 
         # Make sure the number of returned limits are correct
         self.assertEqual(4, len(l))
@@ -764,9 +768,11 @@ class LimitsViewBuilderTest(test.TestCase):
                              "remaining": 10,
                              "unit": "DAY",
                              "resetTime": 1311272226}]
-        self.absolute_limits = {"metadata_items": 1,
-                                "injected_files": 5,
-                                "injected_file_content_bytes": 5}
+        self.absolute_limits = {"gigabytes": 1,
+                                "backup_gigabytes": 2,
+                                "volumes": 3,
+                                "snapshots": 4,
+                                "backups": 5}
 
     def test_build_limits(self):
         tdate = "2011-07-21T18:17:06"
@@ -785,10 +791,11 @@ class LimitsViewBuilderTest(test.TestCase):
                                             "remaining": 10,
                                             "unit": "DAY",
                                             "next-available": tdate}]}],
-                       "absolute": {"maxServerMeta": 1,
-                                    "maxImageMeta": 1,
-                                    "maxPersonality": 5,
-                                    "maxPersonalitySize": 5}}}
+                       "absolute": {"maxTotalVolumeGigabytes": 1,
+                                    "maxTotalBackupGigabytes": 2,
+                                    "maxTotalVolumes": 3,
+                                    "maxTotalSnapshots": 4,
+                                    "maxTotalBackups": 5}}}
 
         output = self.view_builder.build(self.rate_limits,
                                          self.absolute_limits)

@@ -23,7 +23,7 @@ from oslo_utils import importutils
 storops = importutils.try_import('storops')
 
 from cinder import exception
-from cinder.i18n import _, _LW
+from cinder.i18n import _
 from cinder.volume.drivers.dell_emc.vnx import const
 from cinder.volume import volume_types
 
@@ -37,6 +37,9 @@ INTERVAL_5_SEC = 5
 INTERVAL_20_SEC = 20
 INTERVAL_30_SEC = 30
 INTERVAL_60_SEC = 60
+
+SNAP_EXPIRATION_HOUR = '1h'
+
 
 VNX_OPTS = [
     cfg.StrOpt('storage_vnx_authentication_type',
@@ -160,7 +163,7 @@ class ExtraSpecs(object):
                 value = enum_class.parse(value)
             except ValueError:
                 reason = (_("The value %(value)s for key %(key)s in extra "
-                            "specs is invalid."),
+                            "specs is invalid.") %
                           {'key': key, 'value': value})
                 raise exception.InvalidVolumeType(reason=reason)
         return value
@@ -198,9 +201,9 @@ class ExtraSpecs(object):
         :param enabler_status: Instance of VNXEnablerStatus
         """
         if "storagetype:pool" in self.specs:
-            LOG.warning(_LW("Extra spec key 'storagetype:pool' is obsoleted "
-                            "since driver version 5.1.0. This key will be "
-                            "ignored."))
+            LOG.warning("Extra spec key 'storagetype:pool' is obsoleted "
+                        "since driver version 5.1.0. This key will be "
+                        "ignored.")
 
         if (self._provision == storops.VNXProvisionEnum.DEDUPED and
                 self._tier is not None):
@@ -414,7 +417,7 @@ class ReplicationDeviceList(list):
             device = self._device_map[backend_id]
         except KeyError:
             device = None
-            LOG.warning(_LW('Unable to find secondary device named: %s'),
+            LOG.warning('Unable to find secondary device named: %s',
                         backend_id)
         return device
 
@@ -437,6 +440,15 @@ class ReplicationDeviceList(list):
 
     def __getitem__(self, item):
         return self.list[item]
+
+    @classmethod
+    def get_backend_ids(cls, config):
+        """Returns all configured device_id."""
+        rep_list = cls(config)
+        backend_ids = []
+        for item in rep_list.devices:
+            backend_ids.append(item.backend_id)
+        return backend_ids
 
 
 class VNXMirrorView(object):
@@ -480,7 +492,7 @@ class VNXMirrorView(object):
         mv = self.primary_client.get_mirror(mirror_name)
         if not mv.existed:
             # We will skip the mirror operations if not existed
-            LOG.warning(_LW('Mirror view %s was deleted already.'),
+            LOG.warning('Mirror view %s was deleted already.',
                         mirror_name)
             return
         self.fracture_image(mirror_name)

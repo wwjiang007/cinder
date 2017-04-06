@@ -28,7 +28,7 @@ from oslo_utils import excutils
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder import ssh_utils
 from cinder import utils
 import cinder.zonemanager.drivers.cisco.fc_zone_constants as ZoneConstant
@@ -90,8 +90,8 @@ class CiscoFCZoneClientCLI(object):
                  ' | no-more'])
         except exception.CiscoZoningCliException:
             with excutils.save_and_reraise_exception():
-                LOG.error(_LE("Failed getting active zone set "
-                              "from fabric %s"), self.switch_ip)
+                LOG.error("Failed getting active zone set "
+                          "from fabric %s", self.switch_ip)
         try:
             for line in switch_data:
                 # Split on non-word characters,
@@ -159,7 +159,7 @@ class CiscoFCZoneClientCLI(object):
         :param active_zone_set: Active zone set dict retrieved from
                                 get_active_zone_set method
         :param zone_status: Status of the zone
-        :raises: CiscoZoningCliException
+        :raises CiscoZoningCliException:
         """
         LOG.debug("Add Zones - Zones passed: %s", zones)
 
@@ -174,24 +174,6 @@ class CiscoFCZoneClientCLI(object):
                      ['zoneset', 'name', cfg_name, 'vsan', fabric_vsan]]
 
         for zone in zones.keys():
-            # if zone exists, its an update. Delete & insert
-            LOG.debug("Update call")
-            if zone in zone_list:
-                # Response from get_active_zone_set strips colons from WWPNs
-                current_zone = set(zone_list[zone])
-                new_wwpns = map(lambda x: x.lower().replace(':', ''),
-                                zones[zone])
-                new_zone = set(new_wwpns)
-
-                if current_zone != new_zone:
-                    try:
-                        self.delete_zones(zone, activate, fabric_vsan,
-                                          active_zone_set, zone_status)
-                    except exception.CiscoZoningCliException:
-                        with excutils.save_and_reraise_exception():
-                            LOG.error(_LE("Deleting zone failed %s"), zone)
-                    LOG.debug("Deleted Zone before insert : %s", zone)
-
             zone_cmds.append(['zone', 'name', zone])
 
             for member in zones[zone]:
@@ -211,6 +193,72 @@ class CiscoFCZoneClientCLI(object):
             msg = _("Creating and activating zone set failed: "
                     "(Zone set=%(zoneset)s error=%(err)s)."
                     ) % {'zoneset': cfg_name, 'err': six.text_type(e)}
+            LOG.error(msg)
+            raise exception.CiscoZoningCliException(reason=msg)
+
+    def update_zones(self, zones, activate, fabric_vsan, operation,
+                     active_zone_set, zone_status):
+        """Update the zone configuration.
+
+        This method will update the zone configuration passed by user.
+
+        :param zones: zone names mapped to members. Zone members
+                      are colon separated but case-insensitive
+
+        .. code-block:: python
+
+            {   zonename1:[zonememeber1, zonemember2,...],
+                zonename2:[zonemember1, zonemember2,...]...}
+
+            e.g:
+
+            {
+                'openstack50060b0000c26604201900051ee8e329':
+                        ['50:06:0b:00:00:c2:66:04',
+                         '20:19:00:05:1e:e8:e3:29']
+            }
+
+        :param activate: True will activate the zone config.
+        :param operation: zone add or zone remove
+        :param fabric_vsan: Virtual San #
+        :param active_zone_set: Active zone set dict retrieved from
+                                get_active_zone_set method
+        :param zone_status: Status of the zone
+        :raises CiscoZoningCliException:
+        """
+
+        LOG.debug("Update Zones - Operation: %(op)s - Zones "
+                  "passed: %(zones)s",
+                  {'op': operation, 'zones': zones})
+
+        cfg_name = active_zone_set[ZoneConstant.ACTIVE_ZONE_CONFIG]
+
+        zone_cmds = [['conf'],
+                     ['zoneset', 'name', cfg_name, 'vsan', fabric_vsan]]
+        zone_mod_cmd = []
+        if operation == ZoneConstant.ZONE_ADD:
+            zone_mod_cmd = ['member', 'pwwn']
+        elif operation == ZoneConstant.ZONE_REMOVE:
+            zone_mod_cmd = ['no', 'member', 'pwwn']
+
+        for zone, zone_members in zones.items():
+            zone_cmds.append(['zone', 'name', zone])
+            for member in zone_members:
+                zone_cmds.append(zone_mod_cmd + [member])
+        zone_cmds.append(['end'])
+
+        try:
+            LOG.debug("Update zones: Config cmd to run: %s", zone_cmds)
+            self._ssh_execute(zone_cmds, True, 1)
+
+            if activate:
+                self.activate_zoneset(cfg_name, fabric_vsan, zone_status)
+            self._cfg_save()
+        except Exception as e:
+
+            msg = (_("Updating and activating zone set failed: "
+                     "(Zone set=%(zoneset)s error=%(err)s).")
+                   % {'zoneset': cfg_name, 'err': six.text_type(e)})
             LOG.error(msg)
             raise exception.CiscoZoningCliException(reason=msg)
 
@@ -238,8 +286,8 @@ class CiscoFCZoneClientCLI(object):
                 [ZoneConstant.GET_ZONE_STATUS, self.fabric_vsan])
         except exception.CiscoZoningCliException:
             with excutils.save_and_reraise_exception():
-                LOG.error(_LE("Failed getting zone status "
-                              "from fabric %s"), self.switch_ip)
+                LOG.error("Failed getting zone status "
+                          "from fabric %s", self.switch_ip)
         try:
             for line in switch_data:
                 # Split on non-word characters,
@@ -319,13 +367,13 @@ class CiscoFCZoneClientCLI(object):
                                                 self.fabric_vsan])
         except exception.CiscoZoningCliException:
             with excutils.save_and_reraise_exception():
-                LOG.error(_LE("Failed collecting fcns database "
-                              "info for fabric %s"), self.switch_ip)
+                LOG.error("Failed collecting fcns database "
+                          "info for fabric %s", self.switch_ip)
 
         if (cli_output):
             return_list = self._parse_ns_output(cli_output)
 
-        LOG.info(_LI("Connector returning fcnsinfo-%s"), return_list)
+        LOG.info("Connector returning fcnsinfo-%s", return_list)
 
         return return_list
 
@@ -391,7 +439,7 @@ class CiscoFCZoneClientCLI(object):
 
         except Exception:
             with excutils.save_and_reraise_exception():
-                LOG.warning(_LW("Error running SSH command: %s"), command)
+                LOG.warning("Error running SSH command: %s", command)
 
     def _ssh_execute(self, cmd_list, check_exit_code=True, attempts=1):
         """Execute cli with status update.
@@ -444,7 +492,7 @@ class CiscoFCZoneClientCLI(object):
                         else:
                             return True
                     except Exception as e:
-                        LOG.exception(_LE('Error executing SSH command.'))
+                        LOG.exception('Error executing SSH command.')
                         last_exception = e
                         greenthread.sleep(random.randint(20, 500) / 100.0)
                 LOG.debug("Handling error case after SSH: %s", last_exception)
@@ -462,7 +510,7 @@ class CiscoFCZoneClientCLI(object):
                         cmd=command)
         except Exception:
             with excutils.save_and_reraise_exception():
-                LOG.exception(_LE("Error executing command via ssh."))
+                LOG.exception("Error executing command via ssh.")
         finally:
             if stdin:
                 stdin.flush()

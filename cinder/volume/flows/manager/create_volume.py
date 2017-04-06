@@ -10,6 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
 import traceback
 
 from oslo_concurrency import processutils
@@ -21,12 +22,14 @@ from taskflow.patterns import linear_flow
 from taskflow.types import failure as ft
 
 from cinder import context as cinder_context
+from cinder import coordination
 from cinder import exception
 from cinder import flow_utils
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder.image import glance
 from cinder.image import image_utils
 from cinder import objects
+from cinder.objects import consistencygroup
 from cinder import utils
 from cinder.volume.flows import common
 from cinder.volume import utils as volume_utils
@@ -58,7 +61,7 @@ class OnFailureRescheduleTask(flow_utils.CinderTask):
     this volume elsewhere.
     """
 
-    def __init__(self, reschedule_context, db, scheduler_rpcapi,
+    def __init__(self, reschedule_context, db, driver, scheduler_rpcapi,
                  do_reschedule):
         requires = ['filter_properties', 'request_spec', 'volume',
                     'context']
@@ -67,6 +70,7 @@ class OnFailureRescheduleTask(flow_utils.CinderTask):
         self.do_reschedule = do_reschedule
         self.scheduler_rpcapi = scheduler_rpcapi
         self.db = db
+        self.driver = driver
         self.reschedule_context = reschedule_context
         # These exception types will trigger the volume to be set into error
         # status rather than being rescheduled.
@@ -115,7 +119,7 @@ class OnFailureRescheduleTask(flow_utils.CinderTask):
             volume.save()
         except exception.CinderException:
             # Don't let updating the state cause the rescheduling to fail.
-            LOG.exception(_LE("Volume %s: update volume state failed."),
+            LOG.exception("Volume %s: update volume state failed.",
                           volume.id)
 
     def _reschedule(self, context, cause, request_spec, filter_properties,
@@ -151,6 +155,16 @@ class OnFailureRescheduleTask(flow_utils.CinderTask):
 
         LOG.debug("Volume %s: re-scheduled", volume.id)
 
+        # NOTE(dulek): Here we should be sure that rescheduling occurred and
+        # host field will be erased. Just in case volume was already created at
+        # the backend, we attempt to delete it.
+        try:
+            self.driver.delete_volume(volume)
+        except Exception:
+            # Most likely the volume weren't created at the backend. We can
+            # safely ignore this.
+            pass
+
     def revert(self, context, result, flow_failures, volume, **kwargs):
         # NOTE(dulek): Revert is occurring and manager need to know if
         # rescheduling happened. We're returning boolean flag that will
@@ -161,7 +175,7 @@ class OnFailureRescheduleTask(flow_utils.CinderTask):
         # error and return.
         if not self.do_reschedule:
             common.error_out(volume)
-            LOG.error(_LE("Volume %s: create failed"), volume.id)
+            LOG.error("Volume %s: create failed", volume.id)
             return False
 
         # Check if we have a cause which can tell us not to reschedule and
@@ -169,7 +183,7 @@ class OnFailureRescheduleTask(flow_utils.CinderTask):
         for failure in flow_failures.values():
             if failure.check(*self.no_reschedule_types):
                 common.error_out(volume)
-                LOG.error(_LE("Volume %s: create failed"), volume.id)
+                LOG.error("Volume %s: create failed", volume.id)
                 return False
 
         # Use a different context when rescheduling.
@@ -182,8 +196,7 @@ class OnFailureRescheduleTask(flow_utils.CinderTask):
                 self._post_reschedule(volume)
                 return True
             except exception.CinderException:
-                LOG.exception(_LE("Volume %s: rescheduling failed"),
-                              volume.id)
+                LOG.exception("Volume %s: rescheduling failed", volume.id)
 
         return False
 
@@ -214,7 +227,7 @@ class ExtractVolumeRefTask(flow_utils.CinderTask):
 
         reason = _('Volume create failed while extracting volume ref.')
         common.error_out(volume, reason)
-        LOG.error(_LE("Volume %s: create failed"), volume.id)
+        LOG.error("Volume %s: create failed", volume.id)
 
 
 class ExtractVolumeSpecTask(flow_utils.CinderTask):
@@ -342,8 +355,8 @@ class NotifyVolumeActionTask(flow_utils.CinderTask):
             # If notification sending of volume database entry reading fails
             # then we shouldn't error out the whole workflow since this is
             # not always information that must be sent for volumes to operate
-            LOG.exception(_LE("Failed notifying about the volume"
-                              " action %(event)s for volume %(volume_id)s"),
+            LOG.exception("Failed notifying about the volume"
+                          " action %(event)s for volume %(volume_id)s",
                           {'event': self.event_suffix, 'volume_id': volume.id})
 
 
@@ -435,6 +448,7 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         snapshot = objects.Snapshot.get_by_id(context, snapshot_id)
         model_update = self.driver.create_volume_from_snapshot(volume,
                                                                snapshot)
+        self._cleanup_cg_in_volume(volume)
         # NOTE(harlowja): Subtasks would be useful here since after this
         # point the volume has already been created and further failures
         # will not destroy the volume (although they could in the future).
@@ -444,10 +458,9 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                                                         snapshot.volume_id)
             make_bootable = originating_vref.bootable
         except exception.CinderException as ex:
-            LOG.exception(_LE("Failed fetching snapshot %(snapshot_id)s "
-                              "bootable"
-                              " flag using the provided glance snapshot "
-                              "%(snapshot_ref_id)s volume reference"),
+            LOG.exception("Failed fetching snapshot %(snapshot_id)s bootable"
+                          " flag using the provided glance snapshot "
+                          "%(snapshot_ref_id)s volume reference",
                           {'snapshot_id': snapshot_id,
                            'snapshot_ref_id': snapshot.volume_id})
             raise exception.MetadataUpdateFailure(reason=ex)
@@ -462,8 +475,8 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
             volume.bootable = True
             volume.save()
         except exception.CinderException as ex:
-            LOG.exception(_LE("Failed updating volume %(volume_id)s bootable "
-                              "flag to true"), {'volume_id': volume.id})
+            LOG.exception("Failed updating volume %(volume_id)s bootable "
+                          "flag to true", {'volume_id': volume.id})
             raise exception.MetadataUpdateFailure(reason=ex)
 
     def _create_from_source_volume(self, context, volume, source_volid,
@@ -476,6 +489,7 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         # that use the source volume are underway.
         srcvol_ref = objects.Volume.get_by_id(context, source_volid)
         model_update = self.driver.create_cloned_volume(volume, srcvol_ref)
+        self._cleanup_cg_in_volume(volume)
         # NOTE(harlowja): Subtasks would be useful here since after this
         # point the volume has already been created and further failures
         # will not destroy the volume (although they could in the future).
@@ -495,6 +509,7 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         srcvol_ref = objects.Volume.get_by_id(context, source_replicaid)
         model_update = self.driver.create_replica_test_volume(volume,
                                                               srcvol_ref)
+        self._cleanup_cg_in_volume(volume)
         # NOTE(harlowja): Subtasks would be useful here since after this
         # point the volume has already been created and further failures
         # will not destroy the volume (although they could in the future).
@@ -520,17 +535,17 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                 self.driver.copy_image_to_volume(
                     context, volume, image_service, image_id)
         except processutils.ProcessExecutionError as ex:
-            LOG.exception(_LE("Failed to copy image %(image_id)s to volume: "
-                              "%(volume_id)s"),
+            LOG.exception("Failed to copy image %(image_id)s to volume: "
+                          "%(volume_id)s",
                           {'volume_id': volume.id, 'image_id': image_id})
             raise exception.ImageCopyFailure(reason=ex.stderr)
         except exception.ImageUnacceptable as ex:
-            LOG.exception(_LE("Failed to copy image to volume: %(volume_id)s"),
+            LOG.exception("Failed to copy image to volume: %(volume_id)s",
                           {'volume_id': volume.id})
             raise exception.ImageUnacceptable(ex)
         except Exception as ex:
-            LOG.exception(_LE("Failed to copy image %(image_id)s to "
-                              "volume: %(volume_id)s"),
+            LOG.exception("Failed to copy image %(image_id)s to "
+                          "volume: %(volume_id)s",
                           {'volume_id': volume.id, 'image_id': image_id})
             if not isinstance(ex, exception.ImageCopyFailure):
                 raise exception.ImageCopyFailure(reason=ex)
@@ -591,7 +606,7 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
 
         if (image_meta.get('container_format') != 'bare' or
                 image_meta.get('disk_format') != 'raw'):
-            LOG.info(_LI("Requested image %(id)s is not in raw format."),
+            LOG.info("Requested image %(id)s is not in raw format.",
                      {'id': image_meta.get('id')})
             return None, False
 
@@ -613,13 +628,13 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                     image_owner = m['value']
             if (image_meta['owner'] != volume['project_id'] and
                     image_meta['owner'] != image_owner):
-                LOG.info(_LI("Skipping image volume %(id)s because "
-                             "it is not accessible by current Tenant."),
+                LOG.info("Skipping image volume %(id)s because "
+                         "it is not accessible by current Tenant.",
                          {'id': image_volume.id})
                 continue
 
-            LOG.info(_LI("Will clone a volume from the image volume "
-                         "%(id)s."), {'id': image_volume.id})
+            LOG.info("Will clone a volume from the image volume "
+                     "%(id)s.", {'id': image_volume.id})
             break
         else:
             LOG.debug("No accessible image volume for image %(id)s found.",
@@ -627,9 +642,11 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
             return None, False
 
         try:
-            return self.driver.create_cloned_volume(volume, image_volume), True
+            ret = self.driver.create_cloned_volume(volume, image_volume)
+            self._cleanup_cg_in_volume(volume)
+            return ret, True
         except (NotImplementedError, exception.CinderException):
-            LOG.exception(_LE('Failed to clone image volume %(id)s.'),
+            LOG.exception('Failed to clone image volume %(id)s.',
                           {'id': image_volume['id']})
             return None, False
 
@@ -642,13 +659,14 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         # clone image 'path' resumable and revertable in the correct
         # manner.
         model_update = self.driver.create_volume(volume) or {}
+        self._cleanup_cg_in_volume(volume)
         model_update['status'] = 'downloading'
         try:
             volume.update(model_update)
             volume.save()
         except exception.CinderException:
-            LOG.exception(_LE("Failed updating volume %(volume_id)s with "
-                              "%(updates)s"),
+            LOG.exception("Failed updating volume %(volume_id)s with "
+                          "%(updates)s",
                           {'volume_id': volume.id,
                            'updates': model_update})
         self._copy_image_to_volume(context, volume, image_id, image_location,
@@ -686,60 +704,27 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                 )
                 return model_update, True
         except NotImplementedError:
-            LOG.warning(_LW('Backend does not support creating image-volume '
-                            'clone. Image will be downloaded from Glance.'))
+            LOG.warning('Backend does not support creating image-volume '
+                        'clone. Image will be downloaded from Glance.')
         except exception.CinderException as e:
-            LOG.warning(_LW('Failed to create volume from image-volume cache, '
-                            'image will be downloaded from Glance. Error: '
-                            '%(exception)s'), {'exception': e})
+            LOG.warning('Failed to create volume from image-volume cache, '
+                        'image will be downloaded from Glance. Error: '
+                        '%(exception)s', {'exception': e})
         return None, False
 
-    def _create_from_image(self, context, volume,
-                           image_location, image_id, image_meta,
-                           image_service, **kwargs):
-        LOG.debug("Cloning %(volume_id)s from image %(image_id)s "
-                  " at location %(image_location)s.",
-                  {'volume_id': volume.id,
-                   'image_location': image_location, 'image_id': image_id})
-
-        virtual_size = image_meta.get('virtual_size')
-        if virtual_size:
-            virtual_size = image_utils.check_virtual_size(virtual_size,
-                                                          volume.size,
-                                                          image_id)
-
-        # Create the volume from an image.
-        #
-        # First see if the driver can clone the image directly.
-        #
-        # NOTE (singn): two params need to be returned
-        # dict containing provider_location for cloned volume
-        # and clone status.
-        # NOTE (lixiaoy1): Currently all images are raw data, we can't
-        # use clone_image to copy data if new volume is encrypted.
-        volume_is_encrypted = volume.encryption_key_id is not None
-        cloned = False
-        model_update = None
-        if not volume_is_encrypted:
-            model_update, cloned = self.driver.clone_image(context,
-                                                           volume,
-                                                           image_location,
-                                                           image_meta,
-                                                           image_service)
-
-        # Try and clone the image if we have it set as a glance location.
-        if not cloned and 'cinder' in CONF.allowed_direct_url_schemes:
-            model_update, cloned = self._clone_image_volume(context,
-                                                            volume,
-                                                            image_location,
-                                                            image_meta)
+    @coordination.synchronized('{image_id}')
+    def _create_from_image_cache_or_download(self, context, volume,
+                                             image_location, image_id,
+                                             image_meta, image_service):
         # Try and use the image cache.
         should_create_cache_entry = False
-        if self.image_volume_cache and not cloned:
+        cloned = False
+        model_update = None
+        if self.image_volume_cache:
             internal_context = cinder_context.get_internal_tenant_context()
             if not internal_context:
-                LOG.info(_LI('Unable to get Cinder internal context, will '
-                             'not use image-volume cache.'))
+                LOG.info('Unable to get Cinder internal context, will '
+                         'not use image-volume cache.')
             else:
                 model_update, cloned = self._create_from_image_cache(
                     context,
@@ -749,16 +734,18 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                     image_meta
                 )
                 # Don't cache encrypted volume.
-                if not cloned and not volume_is_encrypted:
+                if not cloned and not volume.encryption_key_id:
                     should_create_cache_entry = True
 
         # Fall back to default behavior of creating volume,
         # download the image data and copy it into the volume.
         original_size = volume.size
+        backend_name = volume_utils.extract_host(volume.service_topic_queue)
         try:
             if not cloned:
                 with image_utils.TemporaryImages.fetch(
-                        image_service, context, image_id) as tmp_image:
+                        image_service, context, image_id,
+                        backend_name) as tmp_image:
                     # Try to create the volume as the minimal size, then we can
                     # extend once the image has been downloaded.
                     data = image_utils.qemu_img_info(tmp_image)
@@ -799,13 +786,75 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                 volume.size = original_size
                 volume.save()
 
+        return model_update
+
+    def _create_from_image(self, context, volume,
+                           image_location, image_id, image_meta,
+                           image_service, **kwargs):
+        LOG.debug("Cloning %(volume_id)s from image %(image_id)s "
+                  " at location %(image_location)s.",
+                  {'volume_id': volume.id,
+                   'image_location': image_location, 'image_id': image_id})
+
+        # NOTE(e0ne): check for free space in image_conversion_dir before
+        # image downloading.
+        if (CONF.image_conversion_dir and not
+                os.path.exists(CONF.image_conversion_dir)):
+            os.makedirs(CONF.image_conversion_dir)
+        image_utils.check_available_space(CONF.image_conversion_dir,
+                                          image_meta['size'], image_id)
+
+        virtual_size = image_meta.get('virtual_size')
+        if virtual_size:
+            virtual_size = image_utils.check_virtual_size(virtual_size,
+                                                          volume.size,
+                                                          image_id)
+
+        # Create the volume from an image.
+        #
+        # First see if the driver can clone the image directly.
+        #
+        # NOTE (singn): two params need to be returned
+        # dict containing provider_location for cloned volume
+        # and clone status.
+        # NOTE (lixiaoy1): Currently all images are raw data, we can't
+        # use clone_image to copy data if new volume is encrypted.
+        volume_is_encrypted = volume.encryption_key_id is not None
+        cloned = False
+        model_update = None
+        if not volume_is_encrypted:
+            model_update, cloned = self.driver.clone_image(context,
+                                                           volume,
+                                                           image_location,
+                                                           image_meta,
+                                                           image_service)
+
+        # Try and clone the image if we have it set as a glance location.
+        if not cloned and 'cinder' in CONF.allowed_direct_url_schemes:
+            model_update, cloned = self._clone_image_volume(context,
+                                                            volume,
+                                                            image_location,
+                                                            image_meta)
+
+        # Try and use the image cache, and download if not cached.
+        if not cloned:
+            model_update = self._create_from_image_cache_or_download(
+                context,
+                volume,
+                image_location,
+                image_id,
+                image_meta,
+                image_service)
+
         self._handle_bootable_volume_glance_meta(context, volume,
                                                  image_id=image_id,
                                                  image_meta=image_meta)
         return model_update
 
     def _create_raw_volume(self, volume, **kwargs):
-        return self.driver.create_volume(volume)
+        ret = self.driver.create_volume(volume)
+        self._cleanup_cg_in_volume(volume)
+        return ret
 
     def execute(self, context, volume, volume_spec):
         volume_spec = dict(volume_spec)
@@ -816,13 +865,22 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         # we can't do anything if the driver didn't init
         if not self.driver.initialized:
             driver_name = self.driver.__class__.__name__
-            LOG.error(_LE("Unable to create volume. "
-                          "Volume driver %s not initialized"), driver_name)
+            LOG.error("Unable to create volume. "
+                      "Volume driver %s not initialized", driver_name)
             raise exception.DriverNotInitialized()
 
+        # NOTE(xyang): Populate consistencygroup_id and consistencygroup
+        # fields before passing to the driver. This is to support backward
+        # compatibility of consistencygroup.
+        if volume.group_id:
+            volume.consistencygroup_id = volume.group_id
+            cg = consistencygroup.ConsistencyGroup()
+            cg.from_group(volume.group)
+            volume.consistencygroup = cg
+
         create_type = volume_spec.pop('type', None)
-        LOG.info(_LI("Volume %(volume_id)s: being created as %(create_type)s "
-                     "with specification: %(volume_spec)s"),
+        LOG.info("Volume %(volume_id)s: being created as %(create_type)s "
+                 "with specification: %(volume_spec)s",
                  {'volume_spec': volume_spec, 'volume_id': volume_id,
                   'create_type': create_type})
         if create_type == 'raw':
@@ -846,16 +904,28 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         # Persist any model information provided on creation.
         try:
             if model_update:
-                volume.update(model_update)
-                volume.save()
+                with volume.obj_as_admin():
+                    volume.update(model_update)
+                    volume.save()
         except exception.CinderException:
             # If somehow the update failed we want to ensure that the
             # failure is logged (but not try rescheduling since the volume at
             # this point has been created).
-            LOG.exception(_LE("Failed updating model of volume %(volume_id)s "
-                              "with creation provided model %(model)s"),
+            LOG.exception("Failed updating model of volume %(volume_id)s "
+                          "with creation provided model %(model)s",
                           {'volume_id': volume_id, 'model': model_update})
             raise
+
+    def _cleanup_cg_in_volume(self, volume):
+        # NOTE(xyang): Cannot have both group_id and consistencygroup_id.
+        # consistencygroup_id needs to be removed to avoid DB reference
+        # error because there isn't an entry in the consistencygroups table.
+        if (('group_id' in volume and volume.group_id) and
+                ('consistencygroup_id' in volume and
+                 volume.consistencygroup_id)):
+            volume.consistencygroup_id = None
+            if 'consistencygroup' in volume:
+                volume.consistencygroup = None
 
 
 class CreateVolumeOnFinishTask(NotifyVolumeActionTask):
@@ -893,12 +963,12 @@ class CreateVolumeOnFinishTask(NotifyVolumeActionTask):
             # Now use the parent to notify.
             super(CreateVolumeOnFinishTask, self).execute(context, volume)
         except exception.CinderException:
-            LOG.exception(_LE("Failed updating volume %(volume_id)s with "
-                              "%(update)s"), {'volume_id': volume.id,
-                                              'update': update})
+            LOG.exception("Failed updating volume %(volume_id)s with "
+                          "%(update)s", {'volume_id': volume.id,
+                                         'update': update})
         # Even if the update fails, the volume is ready.
-        LOG.info(_LI("Volume %(volume_name)s (%(volume_id)s): "
-                     "created successfully"),
+        LOG.info("Volume %(volume_name)s (%(volume_id)s): "
+                 "created successfully",
                  {'volume_name': volume_spec['volume_name'],
                   'volume_id': volume.id})
 
@@ -943,9 +1013,8 @@ def get_flow(context, manager, db, driver, scheduler_rpcapi, host, volume,
     # status when reverting the flow. Meanwhile, no need to revert process of
     # ExtractVolumeRefTask.
     do_reschedule = allow_reschedule and request_spec and retry
-    volume_flow.add(OnFailureRescheduleTask(reschedule_context, db,
-                                            scheduler_rpcapi,
-                                            do_reschedule))
+    volume_flow.add(OnFailureRescheduleTask(reschedule_context, db, driver,
+                                            scheduler_rpcapi, do_reschedule))
 
     LOG.debug("Volume reschedule parameters: %(allow)s "
               "retry: %(retry)s", {'allow': allow_reschedule, 'retry': retry})

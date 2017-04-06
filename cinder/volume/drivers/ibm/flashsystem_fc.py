@@ -32,7 +32,7 @@ from oslo_utils import excutils
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LE, _LI, _LW
+from cinder.i18n import _
 from cinder import interface
 from cinder import utils
 from cinder.volume.drivers.ibm import flashsystem_common as fscommon
@@ -86,7 +86,7 @@ class FlashSystemFCDriver(fscommon.FlashSystemDriver):
     VERSION = "1.0.12"
 
     # ThirdPartySystems wiki page
-    CI_WIKI_NAME = "IBM_FlashSystem_CI"
+    CI_WIKI_NAME = "IBM_STORAGE_CI"
 
     def __init__(self, *args, **kwargs):
         super(FlashSystemFCDriver, self).__init__(*args, **kwargs)
@@ -168,7 +168,7 @@ class FlashSystemFCDriver(fscommon.FlashSystemDriver):
                     map(str.lower, map(str, connector['wwpns']))):
                 return host
         else:
-            LOG.warning(_LW('Host %(host)s was not found on backend storage.'),
+            LOG.warning('Host %(host)s was not found on backend storage.',
                         {'host': hname})
         return None
 
@@ -201,7 +201,7 @@ class FlashSystemFCDriver(fscommon.FlashSystemDriver):
                 if 'unconfigured' != s:
                     wwpns.add(i)
             node['WWPN'] = list(wwpns)
-            LOG.info(_LI('WWPN on node %(node)s: %(wwpn)s.'),
+            LOG.info('WWPN on node %(node)s: %(wwpn)s.',
                      {'node': node['id'], 'wwpn': node['WWPN']})
 
     def _get_vdisk_map_properties(
@@ -258,7 +258,7 @@ class FlashSystemFCDriver(fscommon.FlashSystemDriver):
 
         return {'driver_volume_type': type_str, 'data': properties}
 
-    @fczm_utils.AddFCZone
+    @fczm_utils.add_fc_zone
     @utils.synchronized('flashsystem-init-conn', external=True)
     def initialize_connection(self, volume, connector):
         """Perform work so that an FC connection can be made.
@@ -303,9 +303,9 @@ class FlashSystemFCDriver(fscommon.FlashSystemDriver):
         except exception.VolumeBackendAPIException:
             with excutils.save_and_reraise_exception():
                 self.terminate_connection(volume, connector)
-                LOG.error(_LE('initialize_connection: Failed to collect '
-                              'return properties for volume %(vol)s and '
-                              'connector %(conn)s.'),
+                LOG.error('initialize_connection: Failed to collect '
+                          'return properties for volume %(vol)s and '
+                          'connector %(conn)s.',
                           {'vol': volume, 'conn': connector})
 
         LOG.debug(
@@ -317,7 +317,7 @@ class FlashSystemFCDriver(fscommon.FlashSystemDriver):
 
         return properties
 
-    @fczm_utils.RemoveFCZone
+    @fczm_utils.remove_fc_zone
     @utils.synchronized('flashsystem-term-conn', external=True)
     def terminate_connection(self, volume, connector, **kwargs):
         """Cleanup after connection has been terminated.
@@ -394,7 +394,6 @@ class FlashSystemFCDriver(fscommon.FlashSystemDriver):
     def validate_connector(self, connector):
         """Check connector."""
         if 'FC' == self._protocol and 'wwpns' not in connector:
-            msg = _LE('The connector does not contain the '
+            LOG.error('The connector does not contain the '
                       'required information: wwpns is missing')
-            LOG.error(msg)
             raise exception.InvalidConnectorException(missing='wwpns')

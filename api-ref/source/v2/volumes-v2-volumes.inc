@@ -1,6 +1,5 @@
 .. -*- rst -*-
 
-=================
 Volumes (volumes)
 =================
 
@@ -45,7 +44,7 @@ status values are:
 
 
 List volumes with details
-=========================
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  GET /v2/{tenant_id}/volumes/detail
 
@@ -88,14 +87,14 @@ Response Parameters
    - os-vol-tenant-attr:tenant_id: os-vol-tenant-attr:tenant_id
    - os-vol-mig-status-attr:migstat: os-vol-mig-status-attr:migstat
    - metadata: metadata
-   - status: status
+   - status: status_3
    - description: description
    - multiattach: multiattach
    - source_volid: source_volid
    - consistencygroup_id: consistencygroup_id
    - os-vol-mig-status-attr:name_id: os-vol-mig-status-attr:name_id
    - name: name
-   - bootable: bootable
+   - bootable: bootable_response
    - created_at: created_at
    - os-volume-replication:driver_data: os-volume-replication:driver_data
    - volumes: volumes
@@ -113,7 +112,7 @@ Response Example
 
 
 Create volume
-=============
+~~~~~~~~~~~~~
 
 .. rest_method::  POST /v2/{tenant_id}/volumes
 
@@ -197,14 +196,14 @@ Response Parameters
    - size: size
    - user_id: user_id
    - metadata: metadata
-   - status: status
+   - status: status_3
    - description: description
    - multiattach: multiattach
    - source_volid: source_volid
    - volume: volume
    - consistencygroup_id: consistencygroup_id
    - name: name
-   - bootable: bootable
+   - bootable: bootable_response
    - created_at: created_at
    - volume_type: volume_type
 
@@ -213,7 +212,7 @@ Response Parameters
 
 
 List volumes
-============
+~~~~~~~~~~~~
 
 .. rest_method::  GET /v2/{tenant_id}/volumes
 
@@ -257,7 +256,7 @@ Response Example
 
 
 Show volume details
-===================
+~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  GET /v2/{tenant_id}/volumes/{volume_id}
 
@@ -302,7 +301,7 @@ Response Parameters
    - os-vol-tenant-attr:tenant_id: os-vol-tenant-attr:tenant_id
    - os-vol-mig-status-attr:migstat: os-vol-mig-status-attr:migstat
    - metadata: metadata
-   - status: status
+   - status: status_3
    - description: description
    - multiattach: multiattach
    - source_volid: source_volid
@@ -310,7 +309,7 @@ Response Parameters
    - consistencygroup_id: consistencygroup_id
    - os-vol-mig-status-attr:name_id: os-vol-mig-status-attr:name_id
    - name: name
-   - bootable: bootable
+   - bootable: bootable_response
    - created_at: created_at
    - os-volume-replication:driver_data: os-volume-replication:driver_data
    - volume_type: volume_type
@@ -327,7 +326,7 @@ Response Example
 
 
 Update volume
-=============
+~~~~~~~~~~~~~
 
 .. rest_method::  PUT /v2/{tenant_id}/volumes/{volume_id}
 
@@ -346,7 +345,7 @@ Request
    - volume: volume
    - description: description
    - name: name
-   - metadata: metadata
+   - metadata: metadata_2
    - tenant_id: tenant_id
    - volume_id: volume_id
 
@@ -374,15 +373,15 @@ Response Parameters
    - id: id
    - size: size
    - user_id: user_id
-   - metadata: metadata
-   - status: status
+   - metadata: metadata_3
+   - status: status_3
    - description: description
    - multiattach: multiattach
    - source_volid: source_volid
    - volume: volume
    - consistencygroup_id: consistencygroup_id
    - name: name
-   - bootable: bootable
+   - bootable: bootable_response
    - created_at: created_at
    - volume_type: volume_type
 
@@ -398,7 +397,7 @@ Response Example
 
 
 Delete volume
-=============
+~~~~~~~~~~~~~
 
 .. rest_method::  DELETE /v2/{tenant_id}/volumes/{volume_id}
 
@@ -446,11 +445,12 @@ Request
 
 
 Create volume metadata
-======================
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  POST /v2/{tenant_id}/volumes/{volume_id}/metadata
 
-Creates metadata for a volume.
+Creates or replaces metadata for a volume. Does not modify items that are not
+in the request.
 
 Normal response codes: 202,
 
@@ -460,7 +460,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - metadata: metadata
+   - metadata: metadata_3
    - tenant_id: tenant_id
    - volume_id: volume_id
 
@@ -477,14 +477,19 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - metadata: metadata
+   - metadata: metadata_3
 
 
+Response Example
+----------------
+
+.. literalinclude:: ./samples/volume-metadata-create-response.json
+   :language: javascript
 
 
 
 Show volume metadata
-====================
+~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  GET /v2/{tenant_id}/volumes/{volume_id}/metadata
 
@@ -509,7 +514,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - metadata: metadata
+   - metadata: metadata_3
 
 
 
@@ -523,14 +528,11 @@ Response Example
 
 
 Update volume metadata
-======================
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. rest_method::  PUT /v2/{tenant_id}/volumes/{volume_id}/metadata
 
-Updates metadata for a volume.
-
-Replaces metadata items that match keys. Does not modify items that
-are not in the request.
+Replaces all the volume's metadata with the key-value pairs in the request.
 
 
 Normal response codes: 200
@@ -542,7 +544,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - metadata: metadata
+   - metadata: metadata_3
    - tenant_id: tenant_id
    - volume_id: volume_id
 
@@ -559,7 +561,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - metadata: metadata
+   - metadata: metadata_3
 
 
 
@@ -568,3 +570,62 @@ Response Example
 
 .. literalinclude:: ./samples/volume-metadata-update-response.json
    :language: javascript
+
+
+
+Show volume metadata for a specific key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. rest_method::  GET /v2/{tenant_id}/volumes/{volume_id}/metadata/{key}
+
+Shows metadata for a volume for a specific key.
+
+Normal response codes: 200
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - tenant_id: tenant_id
+   - volume_id: volume_id_path
+   - key: key_2
+
+
+Response Parameters
+-------------------
+
+.. rest_parameters:: parameters.yaml
+
+   - metadata: metadata_3
+
+
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/volume-metadata-show-response.json
+   :language: javascript
+
+
+
+
+Delete volume metadata
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. rest_method::  DELETE /v2/{tenant_id}/volumes/{volume_id}/metadata/{key}
+
+Deletes metadata for a volume.
+
+Normal response codes: 200
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - tenant_id: tenant_id
+   - volume_id: volume_id_path
+   - key: key_1

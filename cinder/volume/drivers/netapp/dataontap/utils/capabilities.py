@@ -1,4 +1,5 @@
 # Copyright (c) 2016 Clinton Knight.  All rights reserved.
+# Copyright (c) 2017 Jose Porrua.  All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -22,7 +23,7 @@ from oslo_log import log as logging
 import six
 
 from cinder import exception
-from cinder.i18n import _, _LI, _LW
+from cinder.i18n import _
 
 
 LOG = logging.getLogger(__name__)
@@ -44,7 +45,9 @@ SSC_API_MAP = {
         'netapp_dedup',
         'netapp_compression',
     ],
-    ('volume', 'show', 'volume-get-iter'): [],
+    ('volume', 'show', 'volume-get-iter'): [
+        'netapp_flexvol_encryption',
+    ],
 }
 
 
@@ -78,10 +81,10 @@ class CapabilitiesLibrary(object):
                 msg = _('User not permitted to query Data ONTAP volumes.')
                 raise exception.VolumeBackendAPIException(data=msg)
             else:
-                LOG.warning(_LW('The configured user account does not have '
-                                'sufficient privileges to use all needed '
-                                'APIs. The following extra specs will fail '
-                                'or be ignored: %s.'), invalid_extra_specs)
+                LOG.warning('The configured user account does not have '
+                            'sufficient privileges to use all needed '
+                            'APIs. The following extra specs will fail '
+                            'or be ignored: %s.', invalid_extra_specs)
 
     def get_ssc(self):
         """Get a copy of the Storage Service Catalog."""
@@ -113,8 +116,8 @@ class CapabilitiesLibrary(object):
         The self.ssc attribute is updated with the following format.
         {<flexvol_name> : {<ssc_key>: <ssc_value>}}
         """
-        LOG.info(_LI("Updating storage service catalog information for "
-                     "backend '%s'"), self.backend_name)
+        LOG.info("Updating storage service catalog information for "
+                 "backend '%s'", self.backend_name)
 
         ssc = {}
 
@@ -129,6 +132,7 @@ class CapabilitiesLibrary(object):
             ssc_volume.update(self._get_ssc_flexvol_info(flexvol_name))
             ssc_volume.update(self._get_ssc_dedupe_info(flexvol_name))
             ssc_volume.update(self._get_ssc_mirror_info(flexvol_name))
+            ssc_volume.update(self._get_ssc_encryption_info(flexvol_name))
 
             # Get aggregate info
             aggregate_name = ssc_volume.get('netapp_aggregate')
@@ -188,6 +192,13 @@ class CapabilitiesLibrary(object):
             'netapp_dedup': six.text_type(dedupe).lower(),
             'netapp_compression': six.text_type(compression).lower(),
         }
+
+    def _get_ssc_encryption_info(self, flexvol_name):
+        """Gather flexvol encryption info and recast into SSC-style stats."""
+        encrypted = self.zapi_client.is_flexvol_encrypted(
+            flexvol_name, self.vserver_name)
+
+        return {'netapp_flexvol_encryption': six.text_type(encrypted).lower()}
 
     def _get_ssc_mirror_info(self, flexvol_name):
         """Gather SnapMirror info and recast into SSC-style volume stats."""

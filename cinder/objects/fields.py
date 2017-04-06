@@ -123,9 +123,10 @@ class SnapshotStatus(BaseCinderEnum):
     UPDATING = 'updating'
     ERROR_DELETING = 'error_deleting'
     UNMANAGING = 'unmanaging'
+    BACKING_UP = 'backing-up'
 
     ALL = (ERROR, AVAILABLE, CREATING, DELETING, DELETED,
-           UPDATING, ERROR_DELETING, UNMANAGING)
+           UPDATING, ERROR_DELETING, UNMANAGING, BACKING_UP)
 
 
 class SnapshotStatusField(BaseEnumField):
@@ -148,11 +149,13 @@ class VolumeAttachStatus(BaseCinderEnum):
     ATTACHED = 'attached'
     ATTACHING = 'attaching'
     DETACHED = 'detached'
+    RESERVED = 'reserved'
     ERROR_ATTACHING = 'error_attaching'
     ERROR_DETACHING = 'error_detaching'
+    DELETED = 'deleted'
 
     ALL = (ATTACHED, ATTACHING, DETACHED, ERROR_ATTACHING,
-           ERROR_DETACHING)
+           ERROR_DETACHING, RESERVED, DELETED)
 
 
 class VolumeAttachStatusField(BaseEnumField):
