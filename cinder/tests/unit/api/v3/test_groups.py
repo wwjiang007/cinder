@@ -19,6 +19,7 @@ Tests for group code.
 
 import ddt
 import mock
+from six.moves import http_client
 import webob
 
 from cinder.api.v3 import groups as v3_groups
@@ -143,6 +144,49 @@ class GroupsAPITestCase(test.TestCase):
                          res_dict['group']['status'])
         self.assertEqual([fake.VOLUME_TYPE_ID],
                          res_dict['group']['volume_types'])
+
+    @ddt.data(('3.24', False), ('3.24', True), ('3.25', False), ('3.25', True))
+    @ddt.unpack
+    @mock.patch('cinder.objects.volume_type.VolumeTypeList.get_all_by_group')
+    @mock.patch('cinder.objects.volume.VolumeList.get_all_by_generic_group')
+    def test_list_group_with_list_volume(self, version, has_list_volume,
+                                         mock_vol_get_all_by_group,
+                                         mock_vol_type_get_all_by_group):
+        volume_objs = [objects.Volume(context=self.ctxt, id=i)
+                       for i in [fake.VOLUME_ID]]
+        volumes = objects.VolumeList(context=self.ctxt, objects=volume_objs)
+        mock_vol_get_all_by_group.return_value = volumes
+
+        vol_type_objs = [objects.VolumeType(context=self.ctxt, id=i)
+                         for i in [fake.VOLUME_TYPE_ID]]
+        vol_types = objects.VolumeTypeList(context=self.ctxt,
+                                           objects=vol_type_objs)
+        mock_vol_type_get_all_by_group.return_value = vol_types
+
+        if has_list_volume:
+            req = fakes.HTTPRequest.blank(
+                '/v3/%s/groups/detail?list_volume=True' % fake.PROJECT_ID,
+                version=version)
+        else:
+            req = fakes.HTTPRequest.blank('/v3/%s/groups/detail' %
+                                          fake.PROJECT_ID,
+                                          version=version)
+        res_dict = self.controller.detail(req)
+
+        # If the microversion >= 3.25 and "list_volume=True", "volumes" should
+        # be contained in the response body. Else,"volumes" should not be
+        # contained in the response body.
+        self.assertEqual(3, len(res_dict['groups']))
+        if (version, has_list_volume) == ('3.25', True):
+            self.assertEqual([fake.VOLUME_ID],
+                             res_dict['groups'][0]['volumes'])
+        else:
+            self.assertIsNone(res_dict['groups'][0].get('volumes', None))
+
+        # "volumes" should not be contained in the response body when list
+        # groups without detail.
+        res_dict = self.controller.index(req)
+        self.assertIsNone(res_dict['groups'][0].get('volumes', None))
 
     @mock.patch('cinder.objects.volume_type.VolumeTypeList.get_all_by_group')
     @mock.patch('cinder.objects.volume.VolumeList.get_all_by_generic_group')
@@ -442,7 +486,7 @@ class GroupsAPITestCase(test.TestCase):
 
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
-        self.assertEqual(202, res_dict.status_int)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
         self.assertEqual('deleting', group.status)
 
     def test_delete_group_available_no_delete_volumes(self):
@@ -457,7 +501,7 @@ class GroupsAPITestCase(test.TestCase):
 
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
-        self.assertEqual(202, res_dict.status_int)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
         self.assertEqual(fields.GroupStatus.DELETING,
                          group.status)
 
@@ -492,7 +536,7 @@ class GroupsAPITestCase(test.TestCase):
 
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
-        self.assertEqual(202, res_dict.status_int)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
         self.assertEqual('deleting', group.status)
 
     def test_delete_group_no_host(self):
@@ -507,7 +551,7 @@ class GroupsAPITestCase(test.TestCase):
         res_dict = self.controller.delete_group(
             req, self.group1.id, body)
 
-        self.assertEqual(202, res_dict.status_int)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
         group = objects.Group.get_by_id(
             context.get_admin_context(read_deleted='yes'),
             self.group1.id)
@@ -556,7 +600,7 @@ class GroupsAPITestCase(test.TestCase):
         ex = self.assertRaises(exception.GroupLimitExceeded,
                                self.controller.create,
                                req, body)
-        self.assertEqual(413, ex.code)
+        self.assertEqual(http_client.REQUEST_ENTITY_TOO_LARGE, ex.code)
 
     def test_delete_group_with_invalid_body(self):
         self.group1.status = fields.GroupStatus.AVAILABLE
@@ -604,7 +648,7 @@ class GroupsAPITestCase(test.TestCase):
 
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
-        self.assertEqual(202, res_dict.status_int)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
         self.assertEqual('deleting', group.status)
 
         vol.destroy()
@@ -654,7 +698,7 @@ class GroupsAPITestCase(test.TestCase):
 
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
-        self.assertEqual(202, res_dict.status_int)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
         self.assertEqual('deleting', group.status)
 
         vol.destroy()
@@ -743,7 +787,7 @@ class GroupsAPITestCase(test.TestCase):
 
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
-        self.assertEqual(202, res_dict.status_int)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
         self.assertTrue(mock_validate.called)
         self.assertEqual(fields.GroupStatus.UPDATING,
                          group.status)
@@ -915,7 +959,7 @@ class GroupsAPITestCase(test.TestCase):
                                                 self.group2.id, body)
 
         group = objects.Group.get_by_id(self.ctxt, self.group2.id)
-        self.assertEqual(202, response.status_int)
+        self.assertEqual(http_client.ACCEPTED, response.status_int)
         self.assertEqual(fields.GroupStatus.AVAILABLE, group.status)
 
     @mock.patch(

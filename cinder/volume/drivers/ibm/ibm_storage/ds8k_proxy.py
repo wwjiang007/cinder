@@ -70,7 +70,6 @@ from cinder import exception
 from cinder.i18n import _
 from cinder import objects
 from cinder.objects import fields
-from cinder.utils import synchronized
 import cinder.volume.drivers.ibm.ibm_storage as storage
 from cinder.volume.drivers.ibm.ibm_storage import (
     ds8k_replication as replication)
@@ -541,10 +540,14 @@ class DS8KProxy(proxy.IBMStorageProxy):
                      _('Target volume should be bigger or equal '
                        'to the Source volume in size.'))
         self._ensure_vol_not_fc_target(src_lun.ds_id)
-        # volume ID of src_lun and tgt_lun will be the same one if tgt_lun is
-        # image-volume, because _clone_image_volume in manager.py does not pop
-        # the provider_location.
-        if (tgt_lun.ds_id is None) or (src_lun.ds_id == tgt_lun.ds_id):
+        # image volume cache brings two cases for clone lun:
+        # 1. volume ID of src_lun and tgt_lun will be the same one because
+        #    _clone_image_volume does not pop the provider_location.
+        # 2. if creating image volume failed at the first time, tgt_lun will be
+        #    deleted, so when it is sent to driver again, it will not exist.
+        if (tgt_lun.ds_id is None or
+           src_lun.ds_id == tgt_lun.ds_id or
+           not self._helper.lun_exists(tgt_lun.ds_id)):
             # It is a preferred practice to locate the FlashCopy target
             # volume on the same DS8000 server as the FlashCopy source volume.
             pool = self._helper.get_pool(src_lun.ds_id[0:2])
@@ -790,7 +793,6 @@ class DS8KProxy(proxy.IBMStorageProxy):
 
         return True, lun.get_volume_update()
 
-    @synchronized('OpenStackCinderIBMDS8KMutexConnect-', external=True)
     @proxy._trace_time
     @proxy.logger
     def initialize_connection(self, volume, connector, **kwargs):
@@ -799,7 +801,6 @@ class DS8KProxy(proxy.IBMStorageProxy):
         LOG.info('Attach the volume %s.', vol_id)
         return self._helper.initialize_connection(vol_id, connector, **kwargs)
 
-    @synchronized('OpenStackCinderIBMDS8KMutexConnect-', external=True)
     @proxy._trace_time
     @proxy.logger
     def terminate_connection(self, volume, connector, force=False, **kwargs):
@@ -1037,6 +1038,7 @@ class DS8KProxy(proxy.IBMStorageProxy):
             if not finished:
                 self._helper.delete_lun(tgt_luns)
 
+    @coordination.synchronized('{self.prefix}-consistency-group')
     @proxy._trace_time
     def _do_flashcopy_with_freeze(self, vol_pairs):
         # issue flashcopy with freeze

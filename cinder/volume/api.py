@@ -467,9 +467,12 @@ class API(base.Base):
         if encryption_key_id is not None:
             try:
                 self.key_manager.delete(context, encryption_key_id)
-            except Exception as e:
+            except exception.CinderException as e:
                 LOG.warning("Unable to delete encryption key for "
                             "volume: %s.", e.msg, resource=volume)
+            except Exception:
+                LOG.exception("Unable to delete encryption key for "
+                              "volume.")
 
         self.volume_rpcapi.delete_volume(context,
                                          volume,
@@ -1386,7 +1389,7 @@ class API(base.Base):
                                             cluster_name=svc_cluster,
                                             backend_match_level='pool')
         except exception.ServiceNotFound:
-            msg = _('No available service named %s') % cluster_name or host
+            msg = _("No available service named '%s'") % (cluster_name or host)
             LOG.error(msg)
             raise exception.InvalidHost(reason=msg)
         # Even if we were requested to do a migration to a host, if the host is

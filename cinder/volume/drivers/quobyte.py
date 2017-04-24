@@ -31,14 +31,14 @@ from cinder import interface
 from cinder import utils
 from cinder.volume.drivers import remotefs as remotefs_drv
 
-VERSION = '1.1.1'
+VERSION = '1.1.4'
 
 LOG = logging.getLogger(__name__)
 
 volume_opts = [
-    cfg.URIOpt('quobyte_volume_url',
-               help=('URL to the Quobyte volume e.g.,'
-                     ' quobyte://<DIR host>/<volume name>')),
+    cfg.StrOpt('quobyte_volume_url',
+               help=('Quobyte URL to the Quobyte volume e.g.,'
+                     ' quobyte://<DIR host1>, <DIR host2>/<volume name>')),
     cfg.StrOpt('quobyte_client_cfg',
                help=('Path to a Quobyte Client configuration file.')),
     cfg.BoolOpt('quobyte_sparsed_volumes',
@@ -81,6 +81,9 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         1.0   - Initial driver.
         1.1   - Adds optional insecure NAS settings
         1.1.1 - Removes getfattr calls from driver
+        1.1.2 - Fixes a bug in the creation of cloned volumes
+        1.1.3 - Explicitely mounts Quobyte volumes w/o xattrs
+        1.1.4 - Fixes capability to configure redundancy in quobyte_volume_url
 
     """
 
@@ -175,7 +178,7 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
     @utils.synchronized('quobyte', external=False)
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume."""
-        self._create_cloned_volume(volume, src_vref)
+        return self._create_cloned_volume(volume, src_vref)
 
     @utils.synchronized('quobyte', external=False)
     def create_volume(self, volume):
@@ -449,7 +452,8 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             if not os.path.isdir(mount_path):
                 self._execute('mkdir', '-p', mount_path)
 
-            command = ['mount.quobyte', quobyte_volume, mount_path]
+            command = ['mount.quobyte', '--disable-xattrs',
+                       quobyte_volume, mount_path]
             if self.configuration.quobyte_client_cfg:
                 command.extend(['-c', self.configuration.quobyte_client_cfg])
 

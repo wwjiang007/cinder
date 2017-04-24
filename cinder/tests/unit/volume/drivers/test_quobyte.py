@@ -133,7 +133,7 @@ class QuobyteDriverTestCase(test.TestCase):
             mkdir_call = mock.call('mkdir', '-p', self.TEST_MNT_POINT)
 
             mount_call = mock.call(
-                'mount.quobyte', self.TEST_QUOBYTE_VOLUME,
+                'mount.quobyte', '--disable-xattrs', self.TEST_QUOBYTE_VOLUME,
                 self.TEST_MNT_POINT, run_as_root=False)
 
             mock_execute.assert_has_calls(
@@ -181,7 +181,7 @@ class QuobyteDriverTestCase(test.TestCase):
 
             mkdir_call = mock.call('mkdir', '-p', self.TEST_MNT_POINT)
             mount_call = mock.call(
-                'mount.quobyte', self.TEST_QUOBYTE_VOLUME,
+                'mount.quobyte', '--disable-xattrs', self.TEST_QUOBYTE_VOLUME,
                 self.TEST_MNT_POINT, run_as_root=False)
             mock_execute.assert_has_calls([mkdir_call, mount_call],
                                           any_order=False)
@@ -212,7 +212,7 @@ class QuobyteDriverTestCase(test.TestCase):
 
             mkdir_call = mock.call('mkdir', '-p', self.TEST_MNT_POINT)
             mount_call = mock.call(
-                'mount.quobyte', self.TEST_QUOBYTE_VOLUME,
+                'mount.quobyte', '--disable-xattrs', self.TEST_QUOBYTE_VOLUME,
                 self.TEST_MNT_POINT, run_as_root=False)
             mock_execute.assert_has_calls([mkdir_call, mount_call],
                                           any_order=False)
@@ -970,7 +970,9 @@ class QuobyteDriverTestCase(test.TestCase):
         stat_mock.assert_called_once_with(self.TEST_MNT_POINT)
         part_mock.assert_called_once_with(all=True)
 
-    def test_validate_volume_no_mtab_entry(self):
+    @mock.patch.object(psutil, "disk_partitions")
+    def test_validate_volume_no_mtab_entry(self, part_mock):
+        part_mock.return_value = []  # no quobyte@ devices
         msg = ("Volume driver reported an error: "
                "No matching Quobyte mount entry for %(mpt)s"
                " could be found for validation in partition list."
@@ -1006,7 +1008,7 @@ class QuobyteDriverTestCase(test.TestCase):
         part_mock.return_value = self.get_mock_partitions()
         drv = self._driver
 
-        # As this uses a local fs dir size is >0, raising an exception
+        # As this uses a local fs the dir size is >0, raising an exception
         self.assertRaises(
             exception.VolumeDriverException,
             drv._validate_volume,

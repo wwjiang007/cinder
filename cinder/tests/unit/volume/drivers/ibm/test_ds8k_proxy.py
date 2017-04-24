@@ -695,40 +695,6 @@ FAKE_CREATE_HOST_RESPONSE = {
         "href": "https://1.1.1.1:8452/api/v1/hosts/testHost_1"
     }
 }
-FAKE_GET_HOSTS_RESPONSE = {
-    "server":
-    {
-        "status": "ok",
-        "code": "",
-        "message": "Operation done successfully."
-    },
-    "data":
-    {
-        "hosts":
-        [
-            {
-                "id": "H13",
-                "mappings_briefs":
-                [
-                ]
-            },
-            {
-                "id": TEST_HOST_ID,
-                "mappings_briefs":
-                [
-                    {
-                        "lunid": TEST_LUN_ID,
-                        "volume_id": TEST_VOLUME_ID
-                    },
-                    {
-                        "lunid": "01",
-                        "volume_id": "0103"
-                    }
-                ]
-            }
-        ]
-    }
-}
 FAKE_GET_MAPPINGS_RESPONSE = {
     "server":
     {
@@ -924,8 +890,6 @@ FAKE_REST_API_RESPONSES = {
         FAKE_GET_IOPORT_RESPONSE,
     TEST_SOURCE_DS8K_IP + '/hosts/post':
         FAKE_CREATE_HOST_RESPONSE,
-    TEST_SOURCE_DS8K_IP + '/hosts/get':
-        FAKE_GET_HOSTS_RESPONSE,
     TEST_SOURCE_DS8K_IP + '/host_ports/assign/post':
         FAKE_ASSIGN_HOST_PORT_RESPONSE,
     TEST_SOURCE_DS8K_IP + '/hosts%5Bid=' + TEST_HOST_ID + '%5D/mappings/get':
@@ -933,7 +897,7 @@ FAKE_REST_API_RESPONSES = {
     TEST_SOURCE_DS8K_IP + '/hosts%5Bid=' + TEST_HOST_ID + '%5D/mappings/' +
     TEST_LUN_ID + '/delete':
         FAKE_DELETE_MAPPINGS_RESPONSE,
-    TEST_SOURCE_DS8K_IP + '/host_ports/delete':
+    TEST_SOURCE_DS8K_IP + '/host_ports/' + TEST_SOURCE_WWPN_2 + '/delete':
         FAKE_DELETE_HOST_PORTS_RESPONSE,
     TEST_SOURCE_DS8K_IP + '/hosts%5Bid=' + TEST_HOST_ID + '%5D/delete':
         FAKE_DELETE_HOSTS_RESPONSE
@@ -1918,6 +1882,31 @@ class DS8KProxyTest(test.TestCase):
         self.assertRaises(restclient.APIException,
                           self.driver.create_cloned_volume, tgt_vol, src_vol)
 
+    @mock.patch.object(helper.DS8KCommonHelper, 'get_flashcopy')
+    @mock.patch.object(helper.DS8KCommonHelper, 'lun_exists')
+    @mock.patch.object(helper.DS8KCommonHelper, 'create_lun')
+    def test_create_cloned_volume5(self, mock_create_lun, mock_lun_exists,
+                                   mock_get_flashcopy):
+        """clone a volume when target has volume ID but it is nonexistent."""
+        self.driver = FakeDS8KProxy(self.storage_info, self.logger,
+                                    self.exception, self)
+        self.driver.setup(self.ctxt)
+
+        vol_type = volume_types.create(self.ctxt, 'VOL_TYPE', {})
+        location = six.text_type({'vol_hex_id': TEST_VOLUME_ID})
+        src_vol = self._create_volume(volume_type_id=vol_type.id,
+                                      provider_location=location)
+        location = six.text_type({'vol_hex_id': '0003'})
+        metadata = [{'key': 'data_type', 'value': 'FB 512'}]
+        tgt_vol = self._create_volume(volume_type_id=vol_type.id,
+                                      provider_location=location,
+                                      volume_metadata=metadata)
+
+        mock_get_flashcopy.side_effect = [[TEST_FLASHCOPY], {}]
+        mock_lun_exists.return_value = False
+        self.driver.create_cloned_volume(tgt_vol, src_vol)
+        self.assertTrue(mock_create_lun.called)
+
     @mock.patch.object(eventlet, 'sleep')
     @mock.patch.object(helper.DS8KCommonHelper, 'get_flashcopy')
     def test_create_volume_from_snapshot(self, mock_get_flashcopy, mock_sleep):
@@ -2271,8 +2260,6 @@ class DS8KProxyTest(test.TestCase):
                 self.ctxt, volume, backend)
             self.assertTrue(moved)
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     def test_initialize_connection_of_fb_volume(self):
         """attach a FB volume to host."""
         self.driver = FakeDS8KProxy(self.storage_info, self.logger,
@@ -2286,8 +2273,6 @@ class DS8KProxyTest(test.TestCase):
         map_data = self.driver.initialize_connection(volume, TEST_CONNECTOR)
         self.assertEqual(int(TEST_LUN_ID), map_data['data']['target_lun'])
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     def test_initialize_connection_of_eckd_volume(self):
         """attach a ECKD volume to host."""
         self.configuration.connection_type = (
@@ -2308,8 +2293,6 @@ class DS8KProxyTest(test.TestCase):
         self.assertEqual(int(TEST_ECKD_VOLUME_ID[2:4], 16),
                          map_data['data']['unit_address'])
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     @mock.patch.object(helper.DS8KCommonHelper, '_get_host_ports')
     def test_initialize_connection_when_no_existing_host(self,
                                                          mock_get_host_ports):
@@ -2335,8 +2318,6 @@ class DS8KProxyTest(test.TestCase):
         map_data = self.driver.initialize_connection(volume, TEST_CONNECTOR)
         self.assertEqual(int(TEST_LUN_ID), map_data['data']['target_lun'])
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     @mock.patch.object(helper.DS8KCommonHelper, '_get_host_ports')
     def test_initialize_connection_with_multiple_hosts(self,
                                                        mock_get_host_ports):
@@ -2370,8 +2351,6 @@ class DS8KProxyTest(test.TestCase):
                           self.driver.initialize_connection,
                           volume, TEST_CONNECTOR)
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     def test_terminate_connection_of_fb_volume(self):
         """detach a FB volume from host."""
         self.driver = FakeDS8KProxy(self.storage_info, self.logger,
@@ -2384,8 +2363,6 @@ class DS8KProxyTest(test.TestCase):
 
         self.driver.terminate_connection(volume, TEST_CONNECTOR)
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     @mock.patch.object(helper.DS8KCommonHelper, '_get_host_ports')
     def test_terminate_connection_with_multiple_hosts(self,
                                                       mock_get_host_ports):
@@ -2419,8 +2396,6 @@ class DS8KProxyTest(test.TestCase):
                           self.driver.terminate_connection,
                           volume, TEST_CONNECTOR)
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     @mock.patch.object(helper.DS8KCommonHelper, '_get_host_ports')
     def test_terminate_connection_but_can_not_find_host(self,
                                                         mock_get_host_ports):
@@ -2446,8 +2421,6 @@ class DS8KProxyTest(test.TestCase):
         unmap_data = self.driver.terminate_connection(volume, TEST_CONNECTOR)
         self.assertIsNone(unmap_data)
 
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
     @mock.patch.object(helper.DS8KCommonHelper, '_get_host_ports')
     @mock.patch.object(helper.DS8KCommonHelper, '_get_mappings')
     def test_terminate_connection_and_remove_host(self, mock_get_mappings,
@@ -2487,21 +2460,6 @@ class DS8KProxyTest(test.TestCase):
         mock_get_host_ports.side_effect = [host_ports]
         mock_get_mappings.side_effect = [mappings]
         self.driver.terminate_connection(volume, TEST_CONNECTOR)
-
-    @mock.patch('oslo_concurrency.lockutils.external_lock',
-                new=mock.MagicMock())
-    def test_terminate_connection_with_fake_connector(self):
-        """detach volume from host with fake connector."""
-        self.driver = FakeDS8KProxy(self.storage_info, self.logger,
-                                    self.exception, self)
-        self.driver.setup(self.ctxt)
-        vol_type = volume_types.create(self.ctxt, 'VOL_TYPE', {})
-        location = six.text_type({'vol_hex_id': TEST_VOLUME_ID})
-        volume = self._create_volume(volume_type_id=vol_type.id,
-                                     provider_location=location)
-
-        fake_connector = {'ip': '127.0.0.1', 'initiator': 'iqn.fake'}
-        self.driver.terminate_connection(volume, fake_connector)
 
     def test_create_consistency_group(self):
         """user should reserve LSS for consistency group."""
@@ -2601,7 +2559,9 @@ class DS8KProxyTest(test.TestCase):
     @mock.patch.object(eventlet, 'sleep')
     @mock.patch.object(helper.DS8KCommonHelper, 'get_flashcopy')
     @mock.patch.object(helper.DS8KCommonHelper, '_create_lun')
-    def test_update_generic_group_when_enable_cg(self, mock_create_lun,
+    @mock.patch.object(helper.DS8KCommonHelper, 'lun_exists')
+    def test_update_generic_group_when_enable_cg(self, mock_lun_exists,
+                                                 mock_create_lun,
                                                  mock_get_flashcopy,
                                                  mock_sleep):
         """update group, but volume is not in LSS which belongs to group."""
@@ -2624,6 +2584,7 @@ class DS8KProxyTest(test.TestCase):
 
         mock_get_flashcopy.side_effect = [[TEST_FLASHCOPY], {}]
         mock_create_lun.return_value = '2200'
+        mock_lun_exists.return_value = True
         model_update, add_volumes_update, remove_volumes_update = (
             self.driver.update_group(self.ctxt, group, [volume], []))
         location = ast.literal_eval(add_volumes_update[0]['provider_location'])
@@ -2632,7 +2593,9 @@ class DS8KProxyTest(test.TestCase):
     @mock.patch.object(eventlet, 'sleep')
     @mock.patch.object(helper.DS8KCommonHelper, 'get_flashcopy')
     @mock.patch.object(helper.DS8KCommonHelper, '_create_lun')
-    def test_update_generic_group_when_enable_cg2(self, mock_create_lun,
+    @mock.patch.object(helper.DS8KCommonHelper, 'lun_exists')
+    def test_update_generic_group_when_enable_cg2(self, mock_lun_exists,
+                                                  mock_create_lun,
                                                   mock_get_flashcopy,
                                                   mock_sleep):
         """add replicated volume into group."""
@@ -2663,6 +2626,7 @@ class DS8KProxyTest(test.TestCase):
 
         mock_get_flashcopy.side_effect = [[TEST_FLASHCOPY], {}]
         mock_create_lun.return_value = '2200'
+        mock_lun_exists.return_value = True
         model_update, add_volumes_update, remove_volumes_update = (
             self.driver.update_group(self.ctxt, group, [volume], []))
         location = ast.literal_eval(add_volumes_update[0]['provider_location'])
