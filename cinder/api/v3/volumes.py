@@ -83,6 +83,19 @@ class VolumeController(volumes_v2.VolumeController):
 
         return webob.Response(status_int=202)
 
+    @common.process_general_filtering('volume')
+    def _process_volume_filtering(self, context=None, filters=None,
+                                  req_version=None):
+        if req_version.matches(None, "3.3"):
+            filters.pop('glance_metadata', None)
+
+        if req_version.matches(None, "3.9"):
+            filters.pop('group_id', None)
+
+        utils.remove_invalid_filter_options(
+            context, filters,
+            self._get_volume_filter_options())
+
     def _get_volumes(self, req, is_detail):
         """Returns a list of volumes, transformed through view builder."""
 
@@ -94,14 +107,9 @@ class VolumeController(volumes_v2.VolumeController):
         sort_keys, sort_dirs = common.get_sort_params(params)
         filters = params
 
-        if req_version.matches(None, "3.3"):
-            filters.pop('glance_metadata', None)
+        self._process_volume_filtering(context=context, filters=filters,
+                                       req_version=req_version)
 
-        if req_version.matches(None, "3.9"):
-            filters.pop('group_id', None)
-
-        utils.remove_invalid_filter_options(context, filters,
-                                            self._get_volume_filter_options())
         # NOTE(thingee): v2 API allows name instead of display_name
         if 'name' in sort_keys:
             sort_keys[sort_keys.index('name')] = 'display_name'
@@ -214,6 +222,10 @@ class VolumeController(volumes_v2.VolumeController):
 
         source_volid = volume.get('source_volid')
         if source_volid is not None:
+            if not uuidutils.is_uuid_like(source_volid):
+                msg = _("Source volume ID '%s' must be a "
+                        "valid UUID.") % source_volid
+                raise exc.HTTPBadRequest(explanation=msg)
             # Not found exception will be handled at the wsgi level
             kwargs['source_volume'] = (
                 self.volume_api.get_volume(context,
@@ -223,6 +235,10 @@ class VolumeController(volumes_v2.VolumeController):
 
         source_replica = volume.get('source_replica')
         if source_replica is not None:
+            if not uuidutils.is_uuid_like(source_replica):
+                msg = _("Source replica ID '%s' must be a "
+                        "valid UUID") % source_replica
+                raise exc.HTTPBadRequest(explanation=msg)
             # Not found exception will be handled at the wsgi level
             src_vol = self.volume_api.get_volume(context,
                                                  source_replica)
@@ -238,6 +254,10 @@ class VolumeController(volumes_v2.VolumeController):
         kwargs['consistencygroup'] = None
         consistencygroup_id = volume.get('consistencygroup_id')
         if consistencygroup_id is not None:
+            if not uuidutils.is_uuid_like(consistencygroup_id):
+                msg = _("Consistency group ID '%s' must be a "
+                        "valid UUID.") % consistencygroup_id
+                raise exc.HTTPBadRequest(explanation=msg)
             # Not found exception will be handled at the wsgi level
             kwargs['group'] = self.group_api.get(context, consistencygroup_id)
 

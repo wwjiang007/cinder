@@ -140,6 +140,59 @@ class GroupManagerTestCase(test.TestCase):
                           self.context,
                           group.id)
 
+    @ddt.data(('', [], 0, None, True),
+              ('1,2', ['available', 'in-use'], 2, None, True),
+              ('1,2,3', ['available', 'in-use', 'error_deleting'], 3,
+               None, False),
+              ('1,2', ['wrong_status', 'available'], 0,
+               exception.InvalidVolume, True),
+              ('1,2', ['available', exception.VolumeNotFound],
+               0, exception.VolumeNotFound, True))
+    @ddt.unpack
+    @mock.patch('cinder.objects.Volume.get_by_id')
+    def test__collect_volumes_for_group(self, add_volumes, returned, expected,
+                                        raise_error, add, mock_get):
+        side_effect = []
+
+        class FakeVolume(object):
+            def __init__(self, status):
+                self.status = status
+                self.id = fake.UUID1
+
+        for value in returned:
+            if isinstance(value, str):
+                value = FakeVolume(value)
+            else:
+                value = value(volume_id=fake.UUID1)
+            side_effect.append(value)
+        mock_get.side_effect = side_effect
+        group = tests_utils.create_group(
+            self.context,
+            availability_zone=CONF.storage_availability_zone,
+            volume_type_ids=[fake.VOLUME_TYPE_ID],
+            group_type_id=fake.GROUP_TYPE_ID,
+            host=CONF.host)
+
+        with mock.patch.object(self.volume, '_check_is_our_resource',
+                               mock.Mock()) as mock_check:
+            if raise_error:
+                self.assertRaises(raise_error,
+                                  self.volume._collect_volumes_for_group,
+                                  None, group, add_volumes, add)
+            else:
+                result = self.volume._collect_volumes_for_group(None, group,
+                                                                add_volumes,
+                                                                add=add)
+                if add:
+                    self.assertEqual(expected, mock_check.call_count)
+                self.assertEqual(expected, len(result))
+
+    @ddt.data((False, fake.GROUP_TYPE_ID),
+              (True, fake.GROUP_TYPE_ID),
+              (True, fake.GROUP_TYPE2_ID))
+    @ddt.unpack
+    @mock.patch('cinder.volume.group_types.get_default_cgsnapshot_type',
+                return_value={'id': fake.GROUP_TYPE2_ID})
     @mock.patch.object(GROUP_QUOTAS, "reserve",
                        return_value=["RESERVATION"])
     @mock.patch.object(GROUP_QUOTAS, "commit")
@@ -147,17 +200,22 @@ class GroupManagerTestCase(test.TestCase):
     @mock.patch.object(driver.VolumeDriver,
                        "create_group",
                        return_value={'status': 'available'})
+    @mock.patch('cinder.volume.manager.VolumeManager._update_group_generic')
+    @mock.patch.object(driver.VolumeDriver,
+                       'update_consistencygroup')
     @mock.patch.object(driver.VolumeDriver,
                        "update_group")
-    def test_update_group(self, fake_update_grp,
+    def test_update_group(self, raise_error, type_id,
+                          fake_update_grp, fake_update_cg,
+                          fake_generic_update,
                           fake_create_grp, fake_rollback,
-                          fake_commit, fake_reserve):
+                          fake_commit, fake_reserve, fake_get_type):
         """Test group can be updated."""
         group = tests_utils.create_group(
             self.context,
             availability_zone=CONF.storage_availability_zone,
             volume_type_ids=[fake.VOLUME_TYPE_ID],
-            group_type_id=fake.GROUP_TYPE_ID,
+            group_type_id=type_id,
             host=CONF.host)
         self.volume.create_group(self.context, group)
 
@@ -177,14 +235,38 @@ class GroupManagerTestCase(test.TestCase):
             host=group.host)
         self.volume.create_volume(self.context, volume)
 
-        fake_update_grp.return_value = (
-            {'status': fields.GroupStatus.AVAILABLE},
-            [{'id': volume2.id, 'status': 'available'}],
-            [{'id': volume.id, 'status': 'available'}])
+        driver_result = ({'status': fields.GroupStatus.AVAILABLE},
+                         [{'id': volume2.id, 'status': 'available'}],
+                         [{'id': volume.id, 'status': 'available'}])
+        if raise_error:
+            fake_update_grp.side_effect = [NotImplementedError]
+            fake_update_cg.return_value = driver_result
+            fake_generic_update.return_value = driver_result
+        else:
+            fake_update_grp.return_value = driver_result
 
-        self.volume.update_group(self.context, group,
-                                 add_volumes=volume2.id,
-                                 remove_volumes=volume.id)
+        with mock.patch.object(
+                self.volume, '_convert_group_to_cg',
+                mock.Mock()) as mock_convert, mock.patch.object(
+            self.volume,
+                '_remove_consistencygroup_id_from_volumes',
+                mock.Mock()):
+            mock_convert.return_value = ('fake_cg', [volume])
+            self.volume.update_group(self.context, group,
+                                     add_volumes=volume2.id,
+                                     remove_volumes=volume.id)
+        if raise_error:
+            if type_id == fake.GROUP_TYPE2_ID:
+                fake_update_cg.assert_called_once_with(
+                    self.context, 'fake_cg',
+                    add_volumes=mock.ANY,
+                    remove_volumes=[volume])
+            else:
+                fake_generic_update.assert_called_once_with(
+                    self.context, group,
+                    add_volumes=mock.ANY,
+                    remove_volumes=mock.ANY)
+
         grp = objects.Group.get_by_id(self.context, group.id)
         expected = {
             'status': fields.GroupStatus.AVAILABLE,
@@ -194,7 +276,7 @@ class GroupManagerTestCase(test.TestCase):
             'created_at': mock.ANY,
             'user_id': fake.USER_ID,
             'group_id': group.id,
-            'group_type': fake.GROUP_TYPE_ID
+            'group_type': type_id
         }
         self.assertEqual(fields.GroupStatus.AVAILABLE, grp.status)
         self.assertEqual(10, len(self.notifier.notifications),

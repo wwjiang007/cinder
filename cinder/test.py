@@ -93,6 +93,7 @@ class TestCase(testtools.TestCase):
 
     POLICY_PATH = 'cinder/tests/unit/policy.json'
     MOCK_WORKER = True
+    MOCK_TOOZ = True
 
     def _get_joined_notifier(self, *args, **kwargs):
         # We create a new fake notifier but we join the notifications with
@@ -118,6 +119,11 @@ class TestCase(testtools.TestCase):
             clean_path = 'cinder.objects.cleanable.CinderCleanableObject.%s'
             for method in ('create_worker', 'set_worker', 'unset_worker'):
                 self.patch(clean_path % method, return_value=None)
+
+        if self.MOCK_TOOZ:
+            self.patch('cinder.coordination.Coordinator.start')
+            self.patch('cinder.coordination.Coordinator.stop')
+            self.patch('cinder.coordination.Coordinator.get_lock')
 
         # Unit tests do not need to use lazy gettext
         i18n.enable_lazy(False)
@@ -399,7 +405,7 @@ class RPCAPITestCase(TestCase, ModelsObjectComparatorMixin):
         :param server: Expected hostname.
         :param fanout: True if expected call/cast should be fanout.
         :param version: Expected autocalculated RPC API version.
-        :param epected_method: Expected RPC method name.
+        :param expected_method: Expected RPC method name.
         :param expected_kwargs_diff: Map of expected changes between keyword
                                      arguments passed into the method and sent
                                      over RPC.

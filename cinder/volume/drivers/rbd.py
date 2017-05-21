@@ -117,6 +117,7 @@ class RBDVolumeProxy(object):
                                            utils.convert_str(name),
                                            snapshot=snapshot,
                                            read_only=read_only)
+            self.volume = tpool.Proxy(self.volume)
         except driver.rbd.Error:
             LOG.exception("error opening rbd image %s", name)
             driver._disconnect_from_rados(client, ioctx)
@@ -280,43 +281,45 @@ class RBDDriver(driver.CloneableImageVD,
 
         return args
 
-    @utils.retry(exception.VolumeBackendAPIException,
-                 CONF.rados_connection_interval,
-                 CONF.rados_connection_retries)
     def _connect_to_rados(self, pool=None, remote=None, timeout=None):
+        @utils.retry(exception.VolumeBackendAPIException,
+                     self.configuration.rados_connection_interval,
+                     self.configuration.rados_connection_retries)
+        def _do_conn(pool, remote, timeout):
+            name, conf, user = self._get_config_tuple(remote)
 
-        name, conf, user = self._get_config_tuple(remote)
+            if pool is not None:
+                pool = utils.convert_str(pool)
+            else:
+                pool = self.configuration.rbd_pool
 
-        if pool is not None:
-            pool = utils.convert_str(pool)
-        else:
-            pool = self.configuration.rbd_pool
+            if timeout is None:
+                timeout = self.configuration.rados_connect_timeout
 
-        if timeout is None:
-            timeout = self.configuration.rados_connect_timeout
+            LOG.debug("connecting to %(name)s (timeout=%(timeout)s).",
+                      {'name': name, 'timeout': timeout})
 
-        LOG.debug("connecting to %(name)s (timeout=%(timeout)s).",
-                  {'name': name, 'timeout': timeout})
+            client = self.rados.Rados(rados_id=user,
+                                      clustername=name,
+                                      conffile=conf)
 
-        client = self.rados.Rados(rados_id=user,
-                                  clustername=name,
-                                  conffile=conf)
+            try:
+                if timeout >= 0:
+                    timeout = six.text_type(timeout)
+                    client.conf_set('rados_osd_op_timeout', timeout)
+                    client.conf_set('rados_mon_op_timeout', timeout)
+                    client.conf_set('client_mount_timeout', timeout)
 
-        try:
-            if timeout >= 0:
-                timeout = six.text_type(timeout)
-                client.conf_set('rados_osd_op_timeout', timeout)
-                client.conf_set('rados_mon_op_timeout', timeout)
-                client.conf_set('client_mount_timeout', timeout)
+                client.connect()
+                ioctx = client.open_ioctx(pool)
+                return client, ioctx
+            except self.rados.Error:
+                msg = _("Error connecting to ceph cluster.")
+                LOG.exception(msg)
+                client.shutdown()
+                raise exception.VolumeBackendAPIException(data=msg)
 
-            client.connect()
-            ioctx = client.open_ioctx(pool)
-            return client, ioctx
-        except self.rados.Error:
-            msg = _("Error connecting to ceph cluster.")
-            LOG.exception(msg)
-            client.shutdown()
-            raise exception.VolumeBackendAPIException(data=msg)
+        return _do_conn(pool, remote, timeout)
 
     def _disconnect_from_rados(self, client, ioctx):
         # closing an ioctx cannot raise an exception
@@ -896,8 +899,8 @@ class RBDDriver(driver.CloneableImageVD,
 
     def _exec_on_volume(self, volume_name, remote, operation, *args, **kwargs):
         @utils.retry(rbd.ImageBusy,
-                     CONF.rados_connection_interval,
-                     CONF.rados_connection_retries)
+                     self.configuration.rados_connection_interval,
+                     self.configuration.rados_connection_retries)
         def _do_exec():
             timeout = self.configuration.replication_connect_timeout
             with RBDVolumeProxy(self, volume_name, self.configuration.rbd_pool,
@@ -1035,6 +1038,7 @@ class RBDDriver(driver.CloneableImageVD,
                 'secret_type': 'ceph',
                 'secret_uuid': self.configuration.rbd_secret_uuid,
                 'volume_id': volume.id,
+                "discard": True,
             }
         }
         LOG.debug('connection data: %s', data)

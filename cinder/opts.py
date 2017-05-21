@@ -72,10 +72,10 @@ from cinder.volume.drivers.coprhd import scaleio as \
     cinder_volume_drivers_coprhd_scaleio
 from cinder.volume.drivers.datera import datera_iscsi as \
     cinder_volume_drivers_datera_dateraiscsi
-from cinder.volume.drivers.dell import dell_storagecenter_common as \
-    cinder_volume_drivers_dell_dellstoragecentercommon
 from cinder.volume.drivers.dell_emc import ps as \
     cinder_volume_drivers_dell_emc_ps
+from cinder.volume.drivers.dell_emc.sc import storagecenter_common as \
+    cinder_volume_drivers_dell_emc_sc_storagecentercommon
 from cinder.volume.drivers.dell_emc.scaleio import driver as \
     cinder_volume_drivers_dell_emc_scaleio_driver
 from cinder.volume.drivers.dell_emc.unity import driver as \
@@ -204,11 +204,23 @@ from cinder.zonemanager import fc_zone_manager as \
 
 def list_opts():
     return [
-        ('FC-ZONE-MANAGER',
+        ('BACKEND',
             itertools.chain(
-                cinder_zonemanager_drivers_brocade_brcdfczonedriver.brcd_opts,
-                cinder_zonemanager_drivers_cisco_ciscofczonedriver.cisco_opts,
-                cinder_zonemanager_fczonemanager.zone_manager_opts,
+                [cinder_cmd_volume.host_opt],
+            )),
+        ('BRCD_FABRIC_EXAMPLE',
+            itertools.chain(
+                cinder_zonemanager_drivers_brocade_brcdfabricopts.
+                brcd_zone_opts,
+            )),
+        ('CISCO_FABRIC_EXAMPLE',
+            itertools.chain(
+                cinder_zonemanager_drivers_cisco_ciscofabricopts.
+                cisco_zone_opts,
+            )),
+        ('COORDINATION',
+            itertools.chain(
+                cinder_coordination.coordination_opts,
             )),
         ('DEFAULT',
             itertools.chain(
@@ -231,7 +243,7 @@ def list_opts():
                 cinder_common_config.core_opts,
                 cinder_common_config.global_opts,
                 cinder.compute.compute_opts,
-                cinder_compute_nova.nova_opts,
+                cinder_compute_nova.old_opts,
                 cinder_context.context_opts,
                 cinder_db_api.db_opts,
                 [cinder_db_base.db_driver_opt],
@@ -264,9 +276,9 @@ def list_opts():
                 cinder_volume_drivers_coprhd_common.volume_opts,
                 cinder_volume_drivers_coprhd_scaleio.scaleio_opts,
                 cinder_volume_drivers_datera_dateraiscsi.d_opts,
-                cinder_volume_drivers_dell_dellstoragecentercommon.
-                common_opts,
                 cinder_volume_drivers_dell_emc_ps.eqlx_opts,
+                cinder_volume_drivers_dell_emc_sc_storagecentercommon.
+                common_opts,
                 cinder_volume_drivers_dell_emc_scaleio_driver.scaleio_opts,
                 cinder_volume_drivers_dell_emc_unity_driver.UNITY_OPTS,
                 cinder_volume_drivers_dell_emc_vmax_common.emc_opts,
@@ -299,6 +311,7 @@ def list_opts():
                 cinder_volume_drivers_ibm_flashsystemiscsi.
                 flashsystem_iscsi_opts,
                 cinder_volume_drivers_ibm_gpfs.gpfs_opts,
+                cinder_volume_drivers_ibm_gpfs.gpfs_remote_ssh_opts,
                 cinder_volume_drivers_ibm_ibm_storage_ds8kproxy.ds8k_opts,
                 cinder_volume_drivers_ibm_ibm_storage_ibmstorage.driver_opts,
                 cinder_volume_drivers_ibm_storwize_svc_storwizesvccommon.
@@ -365,26 +378,20 @@ def list_opts():
                 cinder_volume_manager.volume_manager_opts,
                 cinder_wsgi_eventletserver.socket_opts,
             )),
-        ('CISCO_FABRIC_EXAMPLE',
+        ('FC-ZONE-MANAGER',
             itertools.chain(
-                cinder_zonemanager_drivers_cisco_ciscofabricopts.
-                cisco_zone_opts,
-            )),
-        ('BRCD_FABRIC_EXAMPLE',
-            itertools.chain(
-                cinder_zonemanager_drivers_brocade_brcdfabricopts.
-                brcd_zone_opts,
-            )),
-        ('COORDINATION',
-            itertools.chain(
-                cinder_coordination.coordination_opts,
+                cinder_zonemanager_drivers_brocade_brcdfczonedriver.brcd_opts,
+                cinder_zonemanager_drivers_cisco_ciscofczonedriver.cisco_opts,
+                cinder_zonemanager_fczonemanager.zone_manager_opts,
             )),
         ('KEY_MANAGER',
             itertools.chain(
                 cinder_keymgr_confkeymgr.key_mgr_opts,
             )),
-        ('BACKEND',
+        ('NOVA_GROUP',
             itertools.chain(
-                [cinder_cmd_volume.host_opt],
+                cinder_compute_nova.nova_opts,
+                cinder_compute_nova.nova_session_opts,
+                cinder_compute_nova.nova_auth_opts,
             )),
     ]

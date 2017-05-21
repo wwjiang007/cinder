@@ -1220,7 +1220,7 @@ class BackupsAPITestCase(test.TestCase):
         volume_name = 'test1'
         volume_id = utils.create_volume(self.context,
                                         size=5,
-                                        display_name = volume_name).id
+                                        display_name=volume_name).id
 
         body = {"restore": {"volume_id": volume_id, }}
         req = webob.Request.blank('/v2/%s/backups/%s/restore' % (
@@ -1380,7 +1380,7 @@ class BackupsAPITestCase(test.TestCase):
         # Ensure that the original volume name wasn't overridden
         self.assertEqual(orig_vol_name, restored_vol['display_name'])
 
-    @mock.patch('cinder.backup.API.restore')
+    @mock.patch('cinder.backup.api.API.restore')
     def test_restore_backup_with_InvalidInput(self,
                                               _mock_volume_api_restore):
 
@@ -1503,7 +1503,7 @@ class BackupsAPITestCase(test.TestCase):
 
         db.backup_destroy(context.get_admin_context(), backup_id)
 
-    @mock.patch('cinder.backup.API.restore')
+    @mock.patch('cinder.backup.api.API.restore')
     def test_restore_backup_with_VolumeSizeExceedsAvailableQuota(
             self,
             _mock_backup_restore):
@@ -1536,7 +1536,7 @@ class BackupsAPITestCase(test.TestCase):
                          '2G has been consumed.',
                          res_dict['overLimit']['message'])
 
-    @mock.patch('cinder.backup.API.restore')
+    @mock.patch('cinder.backup.api.API.restore')
     def test_restore_backup_with_VolumeLimitExceeded(self,
                                                      _mock_backup_restore):
 
@@ -1602,7 +1602,7 @@ class BackupsAPITestCase(test.TestCase):
         volume_name = 'test1'
         volume_id = utils.create_volume(self.context,
                                         size=15,
-                                        display_name = volume_name).id
+                                        display_name=volume_name).id
 
         body = {"restore": {"volume_id": volume_id, }}
         req = webob.Request.blank('/v2/%s/backups/%s/restore' % (

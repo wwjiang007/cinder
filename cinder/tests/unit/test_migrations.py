@@ -29,6 +29,8 @@ from oslo_db.sqlalchemy import test_base
 from oslo_db.sqlalchemy import test_migrations
 from oslo_db.sqlalchemy import utils as db_utils
 import sqlalchemy
+from sqlalchemy.engine import reflection
+from sqlalchemy import func, select
 
 from cinder.db import migration
 import cinder.db.sqlalchemy.migrate_repo
@@ -42,6 +44,7 @@ class MigrationsMixin(test_migrations.WalkVersionsMixin):
     TIME_TYPE = sqlalchemy.types.DATETIME
     INTEGER_TYPE = sqlalchemy.types.INTEGER
     VARCHAR_TYPE = sqlalchemy.types.VARCHAR
+    TEXT_TYPE = sqlalchemy.types.Text
 
     @property
     def INIT_VERSION(self):
@@ -683,7 +686,7 @@ class MigrationsMixin(test_migrations.WalkVersionsMixin):
         self.assertIsInstance(backups.c.parent_id.type,
                               self.VARCHAR_TYPE)
 
-    def _check_40(self, engine, data):
+    def _check_040(self, engine, data):
         volumes = db_utils.get_table(engine, 'volumes')
         self.assertNotIn('instance_uuid', volumes.c)
         self.assertNotIn('attached_host', volumes.c)
@@ -1002,8 +1005,8 @@ class MigrationsMixin(test_migrations.WalkVersionsMixin):
                               self.VARCHAR_TYPE)
 
         quota_classes = db_utils.get_table(engine, 'quota_classes')
-        rows = quota_classes.count().\
-            where(quota_classes.c.resource == 'groups').\
+        rows = select([func.count()]).select_from(
+            quota_classes).where(quota_classes.c.resource == 'groups').\
             execute().scalar()
         self.assertEqual(1, rows)
 
@@ -1098,13 +1101,93 @@ class MigrationsMixin(test_migrations.WalkVersionsMixin):
         self.assertIsInstance(workers.c.race_preventer.type,
                               self.INTEGER_TYPE)
 
+    def _check_091(self, engine, data):
+        self.assertTrue(engine.dialect.has_table(engine.connect(),
+                                                 "attachment_specs"))
+        attachment = db_utils.get_table(engine, 'attachment_specs')
+
+        self.assertIsInstance(attachment.c.created_at.type,
+                              self.TIME_TYPE)
+        self.assertIsInstance(attachment.c.updated_at.type,
+                              self.TIME_TYPE)
+        self.assertIsInstance(attachment.c.deleted_at.type,
+                              self.TIME_TYPE)
+        self.assertIsInstance(attachment.c.deleted.type,
+                              self.BOOL_TYPE)
+        self.assertIsInstance(attachment.c.id.type,
+                              self.INTEGER_TYPE)
+        self.assertIsInstance(attachment.c.key.type,
+                              self.VARCHAR_TYPE)
+        self.assertIsInstance(attachment.c.value.type,
+                              self.VARCHAR_TYPE)
+        self.assertIsInstance(attachment.c.attachment_id.type,
+                              self.VARCHAR_TYPE)
+        f_keys = self.get_foreign_key_columns(engine, 'attachment_specs')
+        self.assertEqual({'attachment_id'}, f_keys)
+
+    def _check_098(self, engine, data):
+        self.assertTrue(engine.dialect.has_table(engine.connect(),
+                                                 "messages"))
+        ids = self.get_indexed_columns(engine, 'messages')
+        self.assertTrue('expires_at' in ids)
+
+    def _check_099(self, engine, data):
+        self.assertTrue(engine.dialect.has_table(engine.connect(),
+                                                 "volume_attachment"))
+        attachment = db_utils.get_table(engine, 'volume_attachment')
+
+        self.assertIsInstance(attachment.c.connection_info.type,
+                              self.TEXT_TYPE)
+
+    def get_table_names(self, engine):
+        inspector = reflection.Inspector.from_engine(engine)
+        return inspector.get_table_names()
+
+    def get_foreign_key_columns(self, engine, table_name):
+        foreign_keys = set()
+        table = db_utils.get_table(engine, table_name)
+        inspector = reflection.Inspector.from_engine(engine)
+        for column_dict in inspector.get_columns(table_name):
+            column_name = column_dict['name']
+            column = getattr(table.c, column_name)
+            if column.foreign_keys:
+                foreign_keys.add(column_name)
+        return foreign_keys
+
+    def get_indexed_columns(self, engine, table_name):
+        indexed_columns = set()
+        for index in db_utils.get_indexes(engine, table_name):
+            for column_name in index['column_names']:
+                indexed_columns.add(column_name)
+        return indexed_columns
+
+    def assert_each_foreign_key_is_part_of_an_index(self):
+        engine = self.migrate_engine
+
+        non_indexed_foreign_keys = set()
+
+        for table_name in self.get_table_names(engine):
+            indexed_columns = self.get_indexed_columns(engine, table_name)
+            foreign_key_columns = self.get_foreign_key_columns(
+                engine, table_name
+            )
+            for column_name in foreign_key_columns - indexed_columns:
+                non_indexed_foreign_keys.add(table_name + '.' + column_name)
+
+        self.assertSetEqual(set(), non_indexed_foreign_keys)
+
     def test_walk_versions(self):
         self.walk_versions(False, False)
+        self.assert_each_foreign_key_is_part_of_an_index()
 
 
 class TestSqliteMigrations(test_base.DbTestCase,
                            MigrationsMixin):
-    pass
+    def assert_each_foreign_key_is_part_of_an_index(self):
+        # Skip the test for SQLite because SQLite does not list
+        # UniqueConstraints as indexes, which makes this test fail.
+        # Given that SQLite is only for testing purposes, it is safe to skip
+        pass
 
 
 class TestMysqlMigrations(test_base.MySQLOpportunisticTestCase,

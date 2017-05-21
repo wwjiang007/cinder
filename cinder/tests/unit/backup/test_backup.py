@@ -573,6 +573,27 @@ class BackupTestCase(BaseBackupTest):
         self.assertEqual(fields.BackupStatus.ERROR, backup['status'])
         self.assertTrue(mock_run_backup.called)
 
+    @mock.patch('cinder.backup.manager.BackupManager._run_backup',
+                side_effect=FakeBackupException(str(uuid.uuid4())))
+    def test_create_backup_with_snapshot_error(self, mock_run_backup):
+        """Test error handling when error occurs during backup creation."""
+        vol_id = self._create_volume_db_entry(size=1)
+        snapshot = self._create_snapshot_db_entry(status='backing-up',
+                                                  volume_id=vol_id)
+        backup = self._create_backup_db_entry(volume_id=vol_id,
+                                              snapshot_id=snapshot.id)
+        self.assertRaises(FakeBackupException,
+                          self.backup_mgr.create_backup,
+                          self.ctxt,
+                          backup)
+
+        snapshot.refresh()
+        self.assertEqual('available', snapshot.status)
+
+        backup.refresh()
+        self.assertEqual(fields.BackupStatus.ERROR, backup.status)
+        self.assertTrue(mock_run_backup.called)
+
     @mock.patch('cinder.utils.brick_get_connector_properties')
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.get_backup_device')
     @mock.patch('cinder.utils.temporary_chown')
@@ -659,7 +680,7 @@ class BackupTestCase(BaseBackupTest):
         vol_id = self._create_volume_db_entry(size=vol_size,
                                               previous_status='in-use')
         backup = self._create_backup_db_entry(volume_id=vol_id)
-        snap = self._create_snapshot_db_entry(volume_id = vol_id)
+        snap = self._create_snapshot_db_entry(volume_id=vol_id)
 
         vol = objects.Volume.get_by_id(self.ctxt, vol_id)
         mock_get_backup_device.return_value = (
@@ -740,7 +761,7 @@ class BackupTestCase(BaseBackupTest):
         vol_id = self._create_volume_db_entry(size=vol_size,
                                               previous_status='in-use')
         vol = objects.Volume.get_by_id(self.ctxt, vol_id)
-        snap = self._create_snapshot_db_entry(volume_id = vol_id)
+        snap = self._create_snapshot_db_entry(volume_id=vol_id)
         mock_create_vol_from_snap.return_value = {'provider_id':
                                                   'fake_provider_id'}
 

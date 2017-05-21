@@ -147,6 +147,7 @@ class RemoteFSDriver(driver.BaseVD):
         self._mounted_shares = []
         self._execute_as_root = True
         self._is_voldb_empty_at_startup = kwargs.pop('is_vol_db_empty', None)
+        self._supports_encryption = False
 
         if self.configuration:
             self.configuration.append_config_values(nas_opts)
@@ -233,6 +234,10 @@ class RemoteFSDriver(driver.BaseVD):
         :param volume: volume reference
         :returns: provider_location update dict for database
         """
+
+        if volume.encryption_key_id and not self._supports_encryption:
+            message = _("Encryption is not yet supported.")
+            raise exception.VolumeDriverException(message=message)
 
         LOG.debug('Creating volume %(vol)s', {'vol': volume.id})
         self._ensure_shares_mounted()
@@ -350,11 +355,6 @@ class RemoteFSDriver(driver.BaseVD):
                       'bs=%dM' % block_size_mb,
                       'count=%d' % block_count,
                       run_as_root=self._execute_as_root)
-
-    def _fallocate(self, path, size):
-        """Creates a raw file of given size in GiB using fallocate."""
-        self._execute('fallocate', '--length=%sG' % size,
-                      path, run_as_root=self._execute_as_root)
 
     def _create_qcow2_file(self, path, size_gb):
         """Creates a QCOW2 file of a given size in GiB."""
@@ -697,14 +697,17 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
         with open(info_path, 'w') as f:
             json.dump(snap_info, f, indent=1, sort_keys=True)
 
-    def _qemu_img_info_base(self, path, volume_name, basedir):
+    def _qemu_img_info_base(self, path, volume_name, basedir,
+                            run_as_root=False):
         """Sanitize image_utils' qemu_img_info.
 
         This code expects to deal only with relative filenames.
         """
 
+        run_as_root = run_as_root or self._execute_as_root
+
         info = image_utils.qemu_img_info(path,
-                                         run_as_root=self._execute_as_root)
+                                         run_as_root=run_as_root)
         if info.image:
             info.image = os.path.basename(info.image)
         if info.backing_file:

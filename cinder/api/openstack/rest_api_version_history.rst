@@ -292,3 +292,15 @@ user documentation.
 3.29
 ----
   Add filter, sorter and pagination support in group snapshot.
+
+3.30
+----
+  Support sort snapshots with "name".
+
+3.31
+----
+  Add support for configure resource query filters.
+
+3.32
+----
+  Added ``set-log`` and ``get-log`` service actions.

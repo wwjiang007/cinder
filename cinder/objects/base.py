@@ -36,7 +36,7 @@ class CinderObjectVersionsHistory(dict):
     """Helper class that maintains objects version history.
 
     Current state of object versions is aggregated in a single version number
-    that explicitily identifies a set of object versions. That way a service
+    that explicitly identifies a set of object versions. That way a service
     is able to report what objects it supports using a single string and all
     the newer services will know exactly what that mean for a single object.
     """
@@ -131,6 +131,7 @@ OBJ_VERSIONS.add('1.21', {'ManageableSnapshot': '1.0',
                           'ManageableSnapshotList': '1.0'})
 OBJ_VERSIONS.add('1.22', {'Snapshot': '1.4'})
 OBJ_VERSIONS.add('1.23', {'VolumeAttachment': '1.2'})
+OBJ_VERSIONS.add('1.24', {'LogLevel': '1.0', 'LogLevelList': '1.0'})
 
 
 class CinderObjectRegistry(base.VersionedObjectRegistry):

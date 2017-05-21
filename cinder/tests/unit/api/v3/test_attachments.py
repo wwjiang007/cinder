@@ -49,13 +49,13 @@ class AttachmentsAPITestCase(test.TestCase):
                                            project_id=fake.PROJECT_ID)
         self.volume2 = self._create_volume(display_name='fake_volume_2',
                                            project_id=fake.PROJECT2_ID)
-        self.attachment1 = self._create_attachement(
+        self.attachment1 = self._create_attachment(
             volume_uuid=self.volume1.id, instance_uuid=fake.UUID1)
-        self.attachment2 = self._create_attachement(
+        self.attachment2 = self._create_attachment(
             volume_uuid=self.volume1.id, instance_uuid=fake.UUID1)
-        self.attachment3 = self._create_attachement(
+        self.attachment3 = self._create_attachment(
             volume_uuid=self.volume1.id, instance_uuid=fake.UUID2)
-        self.attachment4 = self._create_attachement(
+        self.attachment4 = self._create_attachment(
             volume_uuid=self.volume2.id, instance_uuid=fake.UUID2)
         self.addCleanup(self._cleanup)
 
@@ -139,12 +139,25 @@ class AttachmentsAPITestCase(test.TestCase):
                           self.controller.delete, req,
                           self.attachment1.id)
 
+    @ddt.data('3.30', '3.31')
+    @mock.patch('cinder.api.common.reject_invalid_filters')
+    def test_attachment_list_with_general_filter(self, version, mock_update):
+        url = '/v3/%s/attachments' % fake.PROJECT_ID
+        req = fakes.HTTPRequest.blank(url,
+                                      version=version,
+                                      use_admin_context=False)
+        self.controller.index(req)
+
+        if version != '3.30':
+            mock_update.assert_called_once_with(req.environ['cinder.context'],
+                                                mock.ANY, 'attachment')
+
     @ddt.data('reserved', 'attached')
     @mock.patch.object(volume_rpcapi.VolumeAPI, 'attachment_delete')
     def test_delete_attachment(self, status, mock_delete):
         volume1 = self._create_volume(display_name='fake_volume_1',
                                       project_id=fake.PROJECT_ID)
-        attachment = self._create_attachement(
+        attachment = self._create_attachment(
             volume_uuid=volume1.id, instance_uuid=fake.UUID1,
             attach_status=status)
         req = fakes.HTTPRequest.blank('/v3/%s/attachments/%s' %
@@ -165,11 +178,11 @@ class AttachmentsAPITestCase(test.TestCase):
             mock_delete.assert_called_once_with(req.environ['cinder.context'],
                                                 attachment.id, mock.ANY)
 
-    def _create_attachement(self, ctxt=None, volume_uuid=None,
-                            instance_uuid=None, mountpoint=None,
-                            attach_time=None, detach_time=None,
-                            attach_status=None, attach_mode=None):
-        """Create a attachement object."""
+    def _create_attachment(self, ctxt=None, volume_uuid=None,
+                           instance_uuid=None, mountpoint=None,
+                           attach_time=None, detach_time=None,
+                           attach_status=None, attach_mode=None):
+        """Create an attachment object."""
         ctxt = ctxt or self.ctxt
         attachment = objects.VolumeAttachment(ctxt)
         attachment.volume_id = volume_uuid
