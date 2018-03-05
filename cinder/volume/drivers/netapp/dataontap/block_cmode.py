@@ -40,6 +40,7 @@ from cinder.volume.drivers.netapp.dataontap.utils import loopingcalls
 from cinder.volume.drivers.netapp.dataontap.utils import utils as dot_utils
 from cinder.volume.drivers.netapp import options as na_opts
 from cinder.volume.drivers.netapp import utils as na_utils
+from cinder.volume import utils as volume_utils
 
 
 LOG = logging.getLogger(__name__)
@@ -72,17 +73,20 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
         self.zapi_client = dot_utils.get_client_for_backend(
             self.failed_over_backend_name or self.backend_name)
         self.vserver = self.zapi_client.vserver
-        self.using_cluster_credentials = \
-            self.zapi_client.check_for_cluster_credentials()
-
-        # Performance monitoring library
-        self.perf_library = perf_cmode.PerformanceCmodeLibrary(
-            self.zapi_client)
 
         # Storage service catalog
         self.ssc_library = capabilities.CapabilitiesLibrary(
             self.driver_protocol, self.vserver, self.zapi_client,
             self.configuration)
+
+        self.ssc_library.check_api_permissions()
+
+        self.using_cluster_credentials = (
+            self.ssc_library.cluster_user_supported())
+
+        # Performance monitoring library
+        self.perf_library = perf_cmode.PerformanceCmodeLibrary(
+            self.zapi_client)
 
     def _update_zapi_client(self, backend_name):
         """Set cDOT API client for the specified config backend stanza name."""
@@ -98,8 +102,6 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
 
     def check_for_setup_error(self):
         """Check that the driver is working and can communicate."""
-        self.ssc_library.check_api_permissions()
-
         if not self._get_flexvol_to_pool_map():
             msg = _('No pools are available for provisioning volumes. '
                     'Ensure that the configuration option '
@@ -120,12 +122,6 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
                                    loopingcalls.ONE_HOUR,
                                    loopingcalls.ONE_HOUR)
 
-        # Add the task that harvests soft-deleted QoS policy groups.
-        self.loopingcalls.add_task(
-            self.zapi_client.remove_unused_qos_policy_groups,
-            loopingcalls.ONE_MINUTE,
-            loopingcalls.ONE_MINUTE)
-
         self.loopingcalls.add_task(
             self._handle_housekeeping_tasks,
             loopingcalls.TEN_MINUTES,
@@ -135,11 +131,11 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
 
     def _handle_housekeeping_tasks(self):
         """Handle various cleanup activities."""
-
-        # Harvest soft-deleted QoS policy groups
-        self.zapi_client.remove_unused_qos_policy_groups()
-
         active_backend = self.failed_over_backend_name or self.backend_name
+
+        # Add the task that harvests soft-deleted QoS policy groups.
+        if self.using_cluster_credentials:
+            self.zapi_client.remove_unused_qos_policy_groups()
 
         LOG.debug("Current service state: Replication enabled: %("
                   "replication)s. Failed-Over: %(failed)s. Active Backend "
@@ -160,7 +156,7 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
         """Log autosupport messages."""
 
         base_ems_message = dot_utils.build_ems_log_message_0(
-            self.driver_name, self.app_version, self.driver_mode)
+            self.driver_name, self.app_version)
         self.zapi_client.send_ems_log_message(base_ems_message)
 
         pool_ems_message = dot_utils.build_ems_log_message_1(
@@ -298,9 +294,10 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
             pool.update(ssc_vol_info)
 
             # Add driver capabilities and config info
-            pool['QoS_support'] = True
+            pool['QoS_support'] = self.using_cluster_credentials
             pool['multiattach'] = False
             pool['consistencygroup_support'] = True
+            pool['consistent_group_snapshot_enabled'] = True
             pool['reserved_percentage'] = self.reserved_percentage
             pool['max_over_subscription_ratio'] = (
                 self.max_over_subscription_ratio)
@@ -314,9 +311,6 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
 
             size_available_gb = capacity['size-available'] / units.Gi
             pool['free_capacity_gb'] = na_utils.round_down(size_available_gb)
-
-            pool['provisioned_capacity_gb'] = round(
-                pool['total_capacity_gb'] - pool['free_capacity_gb'], 2)
 
             if self.using_cluster_credentials:
                 dedupe_used = self.zapi_client.get_flexvol_dedupe_used_percent(
@@ -453,7 +447,7 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
         self._mark_qos_policy_group_for_deletion(qos_policy_group_info)
         super(NetAppBlockStorageCmodeLibrary, self).unmanage(volume)
 
-    def failover_host(self, context, volumes, secondary_id=None):
+    def failover_host(self, context, volumes, secondary_id=None, groups=None):
         """Failover a backend to a secondary replication target."""
 
         return self._failover_host(volumes, secondary_id=secondary_id)
@@ -461,3 +455,152 @@ class NetAppBlockStorageCmodeLibrary(block_base.NetAppBlockStorageLibrary,
     def _get_backing_flexvol_names(self):
         """Returns a list of backing flexvol names."""
         return self.ssc_library.get_ssc().keys()
+
+    def create_group(self, group):
+        """Driver entry point for creating a generic volume group.
+
+        ONTAP does not maintain an actual Group construct. As a result, no
+        communication to the backend is necessary for generic volume group
+        creation.
+
+        :returns: Hard-coded model update for generic volume group model.
+        """
+        model_update = {'status': fields.GroupStatus.AVAILABLE}
+        return model_update
+
+    def delete_group(self, group, volumes):
+        """Driver entry point for deleting a group.
+
+        :returns: Updated group model and list of volume models
+                 for the volumes that were deleted.
+        """
+        model_update = {'status': fields.GroupStatus.DELETED}
+        volumes_model_update = []
+        for volume in volumes:
+            try:
+                self._delete_lun(volume['name'])
+                volumes_model_update.append(
+                    {'id': volume['id'], 'status': 'deleted'})
+            except Exception:
+                volumes_model_update.append(
+                    {'id': volume['id'],
+                     'status': 'error_deleting'})
+                LOG.exception("Volume %(vol)s in the group could not be "
+                              "deleted.", {'vol': volume})
+        return model_update, volumes_model_update
+
+    def update_group(self, group, add_volumes=None, remove_volumes=None):
+        """Driver entry point for updating a generic volume group.
+
+        Since no actual group construct is ever created in ONTAP, it is not
+        necessary to update any metadata on the backend. Since this is a NO-OP,
+        there is guaranteed to be no change in any of the volumes' statuses.
+        """
+        return None, None, None
+
+    def create_group_snapshot(self, group_snapshot, snapshots):
+        """Creates a Cinder group snapshot object.
+
+        The Cinder group snapshot object is created by making use of an
+        ephemeral ONTAP consistency group snapshot in order to provide
+        write-order consistency for a set of flexvol snapshots. First, a list
+        of the flexvols backing the given Cinder group must be gathered. An
+        ONTAP group-snapshot of these flexvols will create a snapshot copy of
+        all the Cinder volumes in the generic volume group. For each Cinder
+        volume in the group, it is then necessary to clone its backing LUN from
+        the ONTAP cg-snapshot. The naming convention used for the clones is
+        what indicates the clone's role as a Cinder snapshot and its inclusion
+        in a Cinder group. The ONTAP cg-snapshot of the flexvols is no longer
+        required after having cloned the LUNs backing the Cinder volumes in
+        the Cinder group.
+
+        :returns: An implicit update for group snapshot and snapshots models
+                 that is interpreted by the manager to set their models to
+                 available.
+        """
+        try:
+            if volume_utils.is_group_a_cg_snapshot_type(group_snapshot):
+                self._create_consistent_group_snapshot(group_snapshot,
+                                                       snapshots)
+            else:
+                for snapshot in snapshots:
+                    self._create_snapshot(snapshot)
+        except Exception as ex:
+            err_msg = (_("Create group snapshot failed (%s).") % ex)
+            LOG.exception(err_msg, resource=group_snapshot)
+            raise exception.NetAppDriverException(err_msg)
+
+        return None, None
+
+    def _create_consistent_group_snapshot(self, group_snapshot, snapshots):
+            flexvols = set()
+            for snapshot in snapshots:
+                flexvols.add(volume_utils.extract_host(
+                    snapshot['volume']['host'], level='pool'))
+
+            self.zapi_client.create_cg_snapshot(flexvols, group_snapshot['id'])
+
+            for snapshot in snapshots:
+                self._clone_lun(snapshot['volume']['name'], snapshot['name'],
+                                source_snapshot=group_snapshot['id'])
+
+            for flexvol in flexvols:
+                try:
+                    self.zapi_client.wait_for_busy_snapshot(
+                        flexvol, group_snapshot['id'])
+                    self.zapi_client.delete_snapshot(
+                        flexvol, group_snapshot['id'])
+                except exception.SnapshotIsBusy:
+                    self.zapi_client.mark_snapshot_for_deletion(
+                        flexvol, group_snapshot['id'])
+
+    def delete_group_snapshot(self, group_snapshot, snapshots):
+        """Delete LUNs backing each snapshot in the group snapshot.
+
+        :returns: An implicit update for snapshots models that is interpreted
+                 by the manager to set their models to deleted.
+        """
+        for snapshot in snapshots:
+            self._delete_lun(snapshot['name'])
+            LOG.debug("Snapshot %s deletion successful", snapshot['name'])
+
+        return None, None
+
+    def create_group_from_src(self, group, volumes, group_snapshot=None,
+                              snapshots=None, source_group=None,
+                              source_vols=None):
+        """Creates a group from a group snapshot or a group of cinder vols.
+
+        :returns: An implicit update for the volumes model that is
+                 interpreted by the manager as a successful operation.
+        """
+        LOG.debug("VOLUMES %s ", ', '.join([vol['id'] for vol in volumes]))
+        volume_model_updates = []
+
+        if group_snapshot:
+            vols = zip(volumes, snapshots)
+
+            for volume, snapshot in vols:
+                source = {
+                    'name': snapshot['name'],
+                    'size': snapshot['volume_size'],
+                }
+                volume_model_update = self._clone_source_to_destination(
+                    source, volume)
+                if volume_model_update is not None:
+                    volume_model_update['id'] = volume['id']
+                    volume_model_updates.append(volume_model_update)
+
+        else:
+            vols = zip(volumes, source_vols)
+
+            for volume, old_src_vref in vols:
+                src_lun = self._get_lun_from_table(old_src_vref['name'])
+                source = {'name': src_lun.name, 'size': old_src_vref['size']}
+                volume_model_update = self._clone_source_to_destination(
+                    source, volume)
+                if volume_model_update is not None:
+                    volume_model_update['id'] = volume['id']
+                    volume_model_updates.append(volume_model_update)
+
+        return None, volume_model_updates

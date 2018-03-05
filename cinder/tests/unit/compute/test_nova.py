@@ -78,6 +78,7 @@ class NovaClientTestCase(test.TestCase):
             p_api_version(nova.NOVA_API_VERSION),
             session=p_session.return_value, region_name=None,
             insecure=False, endpoint_type='public', cacert='my.ca',
+            global_request_id=self.ctx.request_id,
             timeout=None, extensions=nova.nova_extensions)
 
     @mock.patch('novaclient.api_versions.APIVersion')
@@ -97,6 +98,7 @@ class NovaClientTestCase(test.TestCase):
             p_api_version(nova.NOVA_API_VERSION),
             session=p_session.return_value, region_name=None,
             insecure=False, endpoint_type='public', cacert='my.ca',
+            global_request_id=self.ctx.request_id,
             timeout=None, extensions=nova.nova_extensions)
 
     @mock.patch('novaclient.api_versions.APIVersion')
@@ -107,18 +109,16 @@ class NovaClientTestCase(test.TestCase):
                                          p_client, p_api_version):
 
         nova.novaclient(self.ctx, privileged_user=True)
-        p_password_plugin.assert_called_once_with(
-            auth_url='http://keystonehost:5000', default_domain_id=None,
-            default_domain_name=None, domain_id=None, domain_name=None,
-            password='strongpassword', project_domain_id=None,
-            project_domain_name=None, project_id=None, project_name=None,
-            trust_id=None, user_domain_id=None, user_domain_name=None,
-            user_id=None, username='adminuser'
-        )
+        p_password_plugin.assert_called_once()
+        self.assertEqual('adminuser',
+                         p_password_plugin.call_args[1]['username'])
+        self.assertEqual('http://keystonehost:5000',
+                         p_password_plugin.call_args[1]['auth_url'])
         p_client.assert_called_once_with(
             p_api_version(nova.NOVA_API_VERSION),
             session=p_session.return_value, region_name=None,
             insecure=False, endpoint_type='public', cacert='my.ca',
+            global_request_id=self.ctx.request_id,
             timeout=None, extensions=nova.nova_extensions)
 
     @mock.patch('novaclient.api_versions.APIVersion')
@@ -134,18 +134,16 @@ class NovaClientTestCase(test.TestCase):
                           'http://privatekeystonehost:5000',
                           group='nova')
         nova.novaclient(self.ctx, privileged_user=True)
-        p_password_plugin.assert_called_once_with(
-            auth_url='http://privatekeystonehost:5000', default_domain_id=None,
-            default_domain_name=None, domain_id=None, domain_name=None,
-            password='strongpassword', project_domain_id=None,
-            project_domain_name=None, project_id=None, project_name=None,
-            trust_id=None, user_domain_id=None, user_domain_name=None,
-            user_id=None, username='adminuser'
-        )
+        p_password_plugin.assert_called_once()
+        self.assertEqual('http://privatekeystonehost:5000',
+                         p_password_plugin.call_args[1]['auth_url'])
+        self.assertEqual('adminuser',
+                         p_password_plugin.call_args[1]['username'])
         p_client.assert_called_once_with(
             p_api_version(nova.NOVA_API_VERSION),
             session=p_session.return_value, region_name=None,
             insecure=False, endpoint_type='public', cacert='my.ca',
+            global_request_id=self.ctx.request_id,
             timeout=None, extensions=nova.nova_extensions)
 
     @mock.patch('novaclient.api_versions.APIVersion')
@@ -157,18 +155,18 @@ class NovaClientTestCase(test.TestCase):
 
         CONF.set_override('region_name', 'farfaraway', group='nova')
         nova.novaclient(self.ctx, privileged_user=True)
-        p_password_plugin.assert_called_once_with(
-            auth_url='http://keystonehost:5000', default_domain_id=None,
-            default_domain_name=None, domain_id=None, domain_name=None,
-            password='strongpassword', project_domain_id=None,
-            project_domain_name=None, project_id=None, project_name=None,
-            trust_id=None, user_domain_id=None, user_domain_name=None,
-            user_id=None, username='adminuser'
-        )
+        # This doesn't impact the password plugin, just make sure it was called
+        # with expected default values
+        p_password_plugin.assert_called_once()
+        self.assertEqual('http://keystonehost:5000',
+                         p_password_plugin.call_args[1]['auth_url'])
+        self.assertEqual('adminuser',
+                         p_password_plugin.call_args[1]['username'])
         p_client.assert_called_once_with(
             p_api_version(nova.NOVA_API_VERSION),
             session=p_session.return_value, region_name='farfaraway',
             insecure=False, endpoint_type='public', cacert='my.ca',
+            global_request_id=self.ctx.request_id,
             timeout=None, extensions=nova.nova_extensions)
 
     def test_novaclient_exceptions(self):
@@ -179,11 +177,16 @@ class NovaClientTestCase(test.TestCase):
 
 
 class FakeNovaClient(object):
+    class ServerExternalEvents(object):
+        def __getattr__(self, item):
+            return None
+
     class Volumes(object):
         def __getattr__(self, item):
             return None
 
     def __init__(self):
+        self.server_external_events = self.ServerExternalEvents()
         self.volumes = self.Volumes()
 
     def create_volume_snapshot(self, *args, **kwargs):
@@ -218,3 +221,24 @@ class NovaApiTestCase(test.TestCase):
             'attach_id',
             'new_volume_id'
         )
+
+    def test_extend_volume(self):
+        server_ids = ['server-id-1', 'server-id-2']
+        with mock.patch.object(nova, 'novaclient') as mock_novaclient, \
+                mock.patch.object(self.novaclient.server_external_events,
+                                  'create') as mock_create_event:
+            mock_novaclient.return_value = self.novaclient
+
+            self.api.extend_volume(self.ctx, server_ids, 'volume_id')
+
+        mock_novaclient.assert_called_once_with(self.ctx,
+                                                privileged_user=True,
+                                                api_version='2.51')
+        mock_create_event.assert_called_once_with([
+            {'name': 'volume-extended',
+             'server_uuid': 'server-id-1',
+             'tag': 'volume_id'},
+            {'name': 'volume-extended',
+             'server_uuid': 'server-id-2',
+             'tag': 'volume_id'},
+        ])

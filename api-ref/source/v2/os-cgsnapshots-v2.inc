@@ -10,11 +10,11 @@ deletes consistency group snapshots.
 Delete consistency group snapshot
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v2/{tenant_id}/cgsnapshots/{cgsnapshot_id}
+.. rest_method::  DELETE /v2/{project_id}/cgsnapshots/{cgsnapshot_id}
 
 Deletes a consistency group snapshot.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -22,20 +22,19 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - cgsnapshot_id: cgsnapshot_id
 
 
 Show consistency group snapshot details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/cgsnapshots/{cgsnapshot_id}
+.. rest_method::  GET /v2/{project_id}/cgsnapshots/{cgsnapshot_id}
 
 Shows details for a consistency group snapshot.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -43,7 +42,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - cgsnapshot_id: cgsnapshot_id
 
 
@@ -69,20 +68,20 @@ Response Example
 List consistency group snapshots with details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/cgsnapshots/detail
+.. rest_method::  GET /v2/{project_id}/cgsnapshots/detail
 
 Lists all consistency group snapshots with details.
 
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
 
 
 Response Parameters
@@ -106,13 +105,12 @@ Response Example
 List consistency group snapshots
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/cgsnapshots
+.. rest_method::  GET /v2/{project_id}/cgsnapshots
 
 Lists all consistency group snapshots.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -120,7 +118,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
 
 
 Response Parameters
@@ -145,11 +144,11 @@ Response Example
 Create consistency group snapshot
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/cgsnapshots
+.. rest_method::  POST /v2/{project_id}/cgsnapshots
 
 Creates a consistency group snapshot.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 Request
 -------
@@ -157,7 +156,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------

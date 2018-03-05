@@ -336,7 +336,7 @@ class DellSCSanAPITestCase(test.TestCase):
                 u'name': u'Server_21000024ff30441d',
                 u'hbaPresent': True,
                 u'hbaCount': 2,
-                u'notes': u'Created by Dell Cinder Driver',
+                u'notes': u'Created by Dell EMC Cinder Driver',
                 u'mapped': False,
                 u'operatingSystem': {u'instanceId': u'64702.38',
                                      u'instanceName': u'Red Hat Linux 6.x',
@@ -370,7 +370,7 @@ class DellSCSanAPITestCase(test.TestCase):
                        u'name': u'Server_21000024ff30441d',
                        u'hbaPresent': True,
                        u'hbaCount': 2,
-                       u'notes': u'Created by Dell Cinder Driver',
+                       u'notes': u'Created by Dell EMC Cinder Driver',
                        u'mapped': False,
                        u'operatingSystem':
                            {u'instanceId': u'64702.38',
@@ -1322,7 +1322,7 @@ class DellSCSanAPITestCase(test.TestCase):
           u'objectType': u'ScControllerPort'},
          u'status': u'Up',
          u'iscsiIpAddress': u'0.0.0.0',
-         u'Wwn': u'5000D31000FCBE36',
+         u'wWN': u'5000D31000FCBE36',
          u'name': u'5000D31000FCBE36',
          u'parent':
          {u'instanceId': u'64702.5764839588723736093.57',
@@ -1369,7 +1369,7 @@ class DellSCSanAPITestCase(test.TestCase):
 
     RPLAY_PROFILE = {u'name': u'fc8f2fec-fab2-4e34-9148-c094c913b9a3',
                      u'type': u'Consistent',
-                     u'notes': u'Created by Dell Cinder Driver',
+                     u'notes': u'Created by Dell EMC Cinder Driver',
                      u'volumeCount': 0,
                      u'expireIncompleteReplaySets': True,
                      u'replayCreationTimeout': 20,
@@ -1679,8 +1679,8 @@ class DellSCSanAPITestCase(test.TestCase):
         # up.
         self.configuration.dell_sc_verify_cert = True
         self.configuration.dell_sc_api_port = 3033
-        self.configuration.iscsi_ip_address = '192.168.1.1'
-        self.configuration.iscsi_port = 3260
+        self.configuration.target_ip_address = '192.168.1.1'
+        self.configuration.target_port = 3260
         self._context = context.get_admin_context()
         self.apiversion = '2.0'
 
@@ -1699,6 +1699,8 @@ class DellSCSanAPITestCase(test.TestCase):
         self.scapi.vfname = self.configuration.dell_sc_volume_folder
         # Note that we set this to True (or not) on the replication tests.
         self.scapi.failed_over = False
+        # Legacy folder names are still current so we default this to true.
+        self.scapi.legacyfoldernames = True
 
         self.volid = str(uuid.uuid4())
         self.volume_name = "volume" + self.volid
@@ -1871,8 +1873,7 @@ class DellSCSanAPITestCase(test.TestCase):
         self.assertIsNone(res, 'Expected None')
 
     @mock.patch.object(storagecenter_api.SCApi,
-                       '_get_result',
-                       return_value=u'devstackvol/fcvm/')
+                       '_get_result')
     @mock.patch.object(storagecenter_api.HttpClient,
                        'post',
                        return_value=RESPONSE_200)
@@ -1882,12 +1883,98 @@ class DellSCSanAPITestCase(test.TestCase):
                          mock_close_connection,
                          mock_open_connection,
                          mock_init):
-        res = self.scapi._find_folder(
-            'StorageCenter/ScVolumeFolder',
-            self.configuration.dell_sc_volume_folder)
-        self.assertTrue(mock_post.called)
+        self.scapi._find_folder('StorageCenter/ScVolumeFolder/GetList',
+                                'devstackvol/fcvm', 12345)
+        expected_payload = {'filter': {'filterType': 'AND', 'filters': [
+            {'filterType': 'Equals', 'attributeName': 'scSerialNumber',
+             'attributeValue': 12345},
+            {'filterType': 'Equals', 'attributeName': 'Name',
+             'attributeValue': 'fcvm'},
+            {'filterType': 'Equals', 'attributeName': 'folderPath',
+             'attributeValue': 'devstackvol/'}]}}
+        mock_post.assert_called_once_with(
+            'StorageCenter/ScVolumeFolder/GetList',
+            expected_payload)
         self.assertTrue(mock_get_result.called)
-        self.assertEqual(u'devstackvol/fcvm/', res, 'Unexpected folder')
+
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_get_result')
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'post',
+                       return_value=RESPONSE_200)
+    def test_find_folder_not_legacy(self,
+                                    mock_post,
+                                    mock_get_result,
+                                    mock_close_connection,
+                                    mock_open_connection,
+                                    mock_init):
+        self.scapi.legacyfoldernames = False
+        self.scapi._find_folder('StorageCenter/ScVolumeFolder/GetList',
+                                'devstackvol/fcvm', 12345)
+        expected_payload = {'filter': {'filterType': 'AND', 'filters': [
+            {'filterType': 'Equals', 'attributeName': 'scSerialNumber',
+             'attributeValue': 12345},
+            {'filterType': 'Equals', 'attributeName': 'Name',
+             'attributeValue': 'fcvm'},
+            {'filterType': 'Equals', 'attributeName': 'folderPath',
+             'attributeValue': '/devstackvol/'}]}}
+        mock_post.assert_called_once_with(
+            'StorageCenter/ScVolumeFolder/GetList',
+            expected_payload)
+        self.assertTrue(mock_get_result.called)
+        self.scapi.legacyfoldernames = True
+
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_get_result')
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'post',
+                       return_value=RESPONSE_200)
+    def test_find_folder_legacy_root(self,
+                                     mock_post,
+                                     mock_get_result,
+                                     mock_close_connection,
+                                     mock_open_connection,
+                                     mock_init):
+        self.scapi._find_folder('StorageCenter/ScVolumeFolder/GetList',
+                                'devstackvol', 12345)
+        expected_payload = {'filter': {'filterType': 'AND', 'filters': [
+            {'filterType': 'Equals', 'attributeName': 'scSerialNumber',
+             'attributeValue': 12345},
+            {'filterType': 'Equals', 'attributeName': 'Name',
+             'attributeValue': 'devstackvol'},
+            {'filterType': 'Equals', 'attributeName': 'folderPath',
+             'attributeValue': ''}]}}
+        mock_post.assert_called_once_with(
+            'StorageCenter/ScVolumeFolder/GetList',
+            expected_payload)
+        self.assertTrue(mock_get_result.called)
+
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_get_result')
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'post',
+                       return_value=RESPONSE_200)
+    def test_find_folder_non_legacy_root(self,
+                                         mock_post,
+                                         mock_get_result,
+                                         mock_close_connection,
+                                         mock_open_connection,
+                                         mock_init):
+        self.scapi.legacyfoldernames = False
+        self.scapi._find_folder('StorageCenter/ScVolumeFolder/GetList',
+                                'devstackvol', 12345)
+        expected_payload = {'filter': {'filterType': 'AND', 'filters': [
+            {'filterType': 'Equals', 'attributeName': 'scSerialNumber',
+             'attributeValue': 12345},
+            {'filterType': 'Equals', 'attributeName': 'Name',
+             'attributeValue': 'devstackvol'},
+            {'filterType': 'Equals', 'attributeName': 'folderPath',
+             'attributeValue': '/'}]}}
+        mock_post.assert_called_once_with(
+            'StorageCenter/ScVolumeFolder/GetList',
+            expected_payload)
+        self.assertTrue(mock_get_result.called)
+        self.scapi.legacyfoldernames = True
 
     @mock.patch.object(storagecenter_api.SCApi,
                        '_get_result',
@@ -2187,7 +2274,7 @@ class DellSCSanAPITestCase(test.TestCase):
                                        'replay_profile_string', 'volume_qos',
                                        'group_qos', 'datareductionprofile')
         expected_payload = {'Name': self.volume_name,
-                            'Notes': 'Created by Dell Cinder Driver',
+                            'Notes': 'Created by Dell EMC Cinder Driver',
                             'Size': '1 GB',
                             'StorageCenter': 12345,
                             'VolumeFolder': '12345.200',
@@ -3413,24 +3500,29 @@ class DellSCSanAPITestCase(test.TestCase):
     @mock.patch.object(storagecenter_api.SCApi,
                        '_find_initiators',
                        return_value=WWNS)
-    def test_find_wwns_wwn_error(self,
-                                 mock_find_initiators,
-                                 mock_find_mappings,
-                                 mock_find_controller_port,
-                                 mock_close_connection,
-                                 mock_open_connection,
-                                 mock_init):
-        # Test case where ScControllerPort object has WWn instead of wwn for a
-        # property
+    def test_find_wwns_wwn_resilient(self,
+                                     mock_find_initiators,
+                                     mock_find_mappings,
+                                     mock_find_controller_port,
+                                     mock_close_connection,
+                                     mock_open_connection,
+                                     mock_init):
+        # Test case where ScControllerPort object has wWN instead of wwn (as
+        # seen in some cases) for a property but we are still able to find it.
         lun, wwns, itmap = self.scapi.find_wwns(self.VOLUME,
                                                 self.SCSERVER)
         self.assertTrue(mock_find_initiators.called)
         self.assertTrue(mock_find_mappings.called)
         self.assertTrue(mock_find_controller_port.called)
 
-        self.assertIsNone(lun, 'Incorrect LUN')
-        self.assertEqual([], wwns, 'WWNs is not empty')
-        self.assertEqual({}, itmap, 'WWN mapping not empty')
+        self.assertEqual(1, lun, 'Incorrect LUN')
+        expected_wwn = ['5000D31000FCBE36', '5000D31000FCBE36',
+                        '5000D31000FCBE36']
+        self.assertEqual(expected_wwn, wwns, 'WWNs incorrect')
+        expected_itmap = {'21000024FF30441C': ['5000D31000FCBE36'],
+                          '21000024FF30441D': ['5000D31000FCBE36',
+                                               '5000D31000FCBE36']}
+        self.assertEqual(expected_itmap, itmap, 'WWN mapping incorrect')
 
     @mock.patch.object(storagecenter_api.SCApi,
                        '_find_controller_port',
@@ -4191,6 +4283,125 @@ class DellSCSanAPITestCase(test.TestCase):
         self.assertFalse(mock_delete.called)
         self.assertTrue(res)
 
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'delete')
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'get')
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_find_mapping_profiles')
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_get_json')
+    def test_unmap_all(self, mock_get_json, mock_find_mapping_profiles,
+                       mock_get, mock_delete, mock_close_connection,
+                       mock_open_connection, mock_init):
+        mock_delete.return_value = self.RESPONSE_200
+        mock_get.return_value = self.RESPONSE_200
+        mock_find_mapping_profiles.return_value = [
+            {'instanceId': '12345.0.1',
+             'server': {'instanceId': '12345.100', 'instanceName': 'Srv1'}},
+            {'instanceId': '12345.0.2',
+             'server': {'instanceId': '12345.101', 'instanceName': 'Srv2'}},
+            {'instanceId': '12345.0.3',
+             'server': {'instanceId': '12345.102', 'instanceName': 'Srv3'}},
+        ]
+        # server, result pairs
+        mock_get_json.side_effect = [
+            {'instanceId': '12345.100', 'instanceName': 'Srv1',
+             'type': 'Physical'},
+            {'result': True},
+            {'instanceId': '12345.101', 'instanceName': 'Srv2',
+             'type': 'Physical'},
+            {'result': True},
+            {'instanceId': '12345.102', 'instanceName': 'Srv3',
+             'type': 'Physical'},
+            {'result': True}
+        ]
+        vol = {'instanceId': '12345.0', 'name': 'vol1'}
+        res = self.scapi.unmap_all(vol)
+        # Success and 3 delete calls
+        self.assertTrue(res)
+        self.assertEqual(3, mock_delete.call_count)
+
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'delete')
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'get')
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_find_mapping_profiles')
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_get_json')
+    def test_unmap_all_with_remote(self, mock_get_json,
+                                   mock_find_mapping_profiles, mock_get,
+                                   mock_delete, mock_close_connection,
+                                   mock_open_connection, mock_init):
+        mock_delete.return_value = self.RESPONSE_200
+        mock_get.return_value = self.RESPONSE_200
+        mock_find_mapping_profiles.return_value = [
+            {'instanceId': '12345.0.1',
+             'server': {'instanceId': '12345.100', 'instanceName': 'Srv1'}},
+            {'instanceId': '12345.0.2',
+             'server': {'instanceId': '12345.101', 'instanceName': 'Srv2'}},
+            {'instanceId': '12345.0.3',
+             'server': {'instanceId': '12345.102', 'instanceName': 'Srv3'}},
+        ]
+        # server, result pairs
+        mock_get_json.side_effect = [
+            {'instanceId': '12345.100', 'instanceName': 'Srv1',
+             'type': 'Physical'},
+            {'result': True},
+            {'instanceId': '12345.101', 'instanceName': 'Srv2',
+             'type': 'RemoteStorageCenter'},
+            {'instanceId': '12345.102', 'instanceName': 'Srv3',
+             'type': 'Physical'},
+            {'result': True}
+        ]
+        vol = {'instanceId': '12345.0', 'name': 'vol1'}
+        res = self.scapi.unmap_all(vol)
+        # Should succeed but call delete only twice
+        self.assertTrue(res)
+        self.assertEqual(2, mock_delete.call_count)
+
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'delete')
+    @mock.patch.object(storagecenter_api.HttpClient,
+                       'get')
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_find_mapping_profiles')
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_get_json')
+    def test_unmap_all_fail(self, mock_get_json, mock_find_mapping_profiles,
+                            mock_get, mock_delete, mock_close_connection,
+                            mock_open_connection, mock_init):
+        mock_delete.return_value = self.RESPONSE_400
+        mock_get.return_value = self.RESPONSE_200
+        mock_find_mapping_profiles.return_value = [
+            {'instanceId': '12345.0.1',
+             'server': {'instanceId': '12345.100', 'instanceName': 'Srv1'}},
+            {'instanceId': '12345.0.2',
+             'server': {'instanceId': '12345.101', 'instanceName': 'Srv2'}},
+            {'instanceId': '12345.0.3',
+             'server': {'instanceId': '12345.102', 'instanceName': 'Srv3'}},
+        ]
+        # server, result pairs
+        mock_get_json.side_effect = [
+            {'instanceId': '12345.100', 'instanceName': 'Srv1',
+             'type': 'Physical'}
+        ]
+        vol = {'instanceId': '12345.0', 'name': 'vol1'}
+        res = self.scapi.unmap_all(vol)
+        self.assertFalse(res)
+
+    @mock.patch.object(storagecenter_api.SCApi,
+                       '_find_mapping_profiles')
+    def test_unmap_all_no_profiles(self, mock_find_mapping_profiles,
+                                   mock_close_connection, mock_open_connection,
+                                   mock_init):
+        mock_find_mapping_profiles.return_value = []
+        vol = {'instanceId': '12345.0', 'name': 'vol1'}
+        res = self.scapi.unmap_all(vol)
+        # Should exit with success.
+        self.assertTrue(res)
+
     @mock.patch.object(storagecenter_api.SCApi,
                        '_get_json',
                        return_value=[{'a': 1}, {'a': 2}])
@@ -4613,7 +4824,7 @@ class DellSCSanAPITestCase(test.TestCase):
             'name', screplay, 'replay_profile_string', 'volume_qos',
             'group_qos', 'datareductionprofile')
         expected_payload = {'Name': 'name',
-                            'Notes': 'Created by Dell Cinder Driver',
+                            'Notes': 'Created by Dell EMC Cinder Driver',
                             'VolumeFolder': '12345.200',
                             'ReplayProfileList': ['12345.4'],
                             'VolumeQosProfile': '12345.2',
@@ -4656,7 +4867,7 @@ class DellSCSanAPITestCase(test.TestCase):
                                             'group_qos',
                                             None)
         expected_payload = {'Name': 'name',
-                            'Notes': 'Created by Dell Cinder Driver',
+                            'Notes': 'Created by Dell EMC Cinder Driver',
                             'VolumeFolder': '12345.200',
                             'ReplayProfileList': ['12345.4'],
                             'VolumeQosProfile': '12345.2',
@@ -4692,7 +4903,7 @@ class DellSCSanAPITestCase(test.TestCase):
                                             'group_qos',
                                             None)
         expected_payload = {'Name': 'name',
-                            'Notes': 'Created by Dell Cinder Driver',
+                            'Notes': 'Created by Dell EMC Cinder Driver',
                             'VolumeFolder': '12345.200',
                             'VolumeQosProfile': '12345.2',
                             'GroupQosProfile': '12345.3'}
@@ -6808,7 +7019,7 @@ class DellSCSanAPITestCase(test.TestCase):
                             'DeleteRestorePoint': True}
         ret = self.scapi.delete_replication(self.VOLUME, destssn)
         mock_delete.assert_any_call(expected, payload=expected_payload,
-                                    async=True)
+                                    async_call=True)
         self.assertTrue(ret)
 
     @mock.patch.object(storagecenter_api.SCApi,
@@ -6845,7 +7056,7 @@ class DellSCSanAPITestCase(test.TestCase):
                             'DeleteRestorePoint': True}
         ret = self.scapi.delete_replication(self.VOLUME, destssn)
         mock_delete.assert_any_call(expected, payload=expected_payload,
-                                    async=True)
+                                    async_call=True)
         self.assertFalse(ret)
 
     @mock.patch.object(storagecenter_api.SCApi,
@@ -6872,7 +7083,7 @@ class DellSCSanAPITestCase(test.TestCase):
         ssn = 64702
         destssn = 65495
         qosnode = 'Cinder QoS'
-        notes = 'Created by Dell Cinder Driver'
+        notes = 'Created by Dell EMC Cinder Driver'
         repl_prefix = 'Cinder repl of '
 
         mock_find_sc.side_effect = [destssn, ssn, destssn, ssn, destssn, ssn]
@@ -6936,7 +7147,7 @@ class DellSCSanAPITestCase(test.TestCase):
         ssn = 64702
         destssn = 65495
         qosnode = 'Cinder QoS'
-        notes = 'Created by Dell Cinder Driver'
+        notes = 'Created by Dell EMC Cinder Driver'
         repl_prefix = 'Cinder repl of '
 
         mock_find_sc.side_effect = [destssn, ssn, destssn, ssn]
@@ -7515,7 +7726,7 @@ class DellSCSanAPITestCase(test.TestCase):
                     'Type': 'Synchronous',
                     'PrimaryVolume': '101.1',
                     'SecondaryVolumeAttributes':
-                        {'Notes': 'Created by Dell Cinder Driver',
+                        {'Notes': 'Created by Dell EMC Cinder Driver',
                          'CreateSourceVolumeFolderPath': True,
                          'Name': 'name'}
                     }
@@ -7783,7 +7994,7 @@ class DellSCSanAPITestCase(test.TestCase):
         mock_post.assert_called_once_with(
             'StorageCenter/ScReplay/11111.201/CreateView',
             {'Name': 'fback:guidb',
-             'Notes': 'Created by Dell Cinder Driver',
+             'Notes': 'Created by Dell EMC Cinder Driver',
              'VolumeFolder': '11111.1'},
             True)
         mock_create_replay.assert_called_once_with(svolume, 'failback', 600)
@@ -8421,8 +8632,8 @@ class DellSCSanAPIConnectionTestCase(test.TestCase):
         # up.
         self.configuration.dell_sc_verify_cert = True
         self.configuration.dell_sc_api_port = 3033
-        self.configuration.iscsi_ip_address = '192.168.1.1'
-        self.configuration.iscsi_port = 3260
+        self.configuration.target_ip_address = '192.168.1.1'
+        self.configuration.target_port = 3260
         self._context = context.get_admin_context()
         self.apiversion = '2.0'
 

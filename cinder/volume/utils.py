@@ -17,6 +17,7 @@
 
 import ast
 import functools
+import json
 import math
 import operator
 from os import urandom
@@ -24,8 +25,12 @@ import re
 import time
 import uuid
 
+from castellan.common.credentials import keystone_password
+from castellan.common import exception as castellan_exception
+from castellan import key_manager as castellan_key_manager
 import eventlet
 from eventlet import tpool
+from keystoneauth1 import loading as ks_loading
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -108,7 +113,7 @@ def _usage_from_backup(backup, **kw):
                       backup_id=backup.id,
                       host=backup.host,
                       display_name=backup.display_name,
-                      created_at=str(backup.created_at),
+                      created_at=backup.created_at.isoformat(),
                       status=backup.status,
                       volume_id=backup.volume_id,
                       size=backup.size,
@@ -170,7 +175,7 @@ def _usage_from_snapshot(snapshot, context, **extra_usage_info):
         'volume_size': snapshot.volume_size,
         'snapshot_id': snapshot.id,
         'display_name': snapshot.display_name,
-        'created_at': str(snapshot.created_at),
+        'created_at': snapshot.created_at.isoformat(),
         'status': snapshot.status,
         'deleted': null_safe_str(snapshot.deleted),
         'metadata': null_safe_str(snapshot.metadata),
@@ -839,6 +844,13 @@ def paginate_entries_list(entries, marker, limit, offset, sort_keys,
     if offset is None:
         offset = 0
     if marker:
+        if not isinstance(marker, dict):
+            try:
+                marker = json.loads(marker)
+            except ValueError:
+                msg = _('marker %s can not be analysed, please use json like '
+                        'format') % marker
+                raise exception.InvalidInput(reason=msg)
         start_index = -1
         for i, entry in enumerate(sorted_entries):
             if entry['reference'] == marker:
@@ -884,11 +896,52 @@ def create_encryption_key(context, key_manager, volume_type_id):
         cipher = volume_type_encryption.cipher
         length = volume_type_encryption.key_size
         algorithm = cipher.split('-')[0] if cipher else None
-        encryption_key_id = key_manager.create_key(
-            context,
-            algorithm=algorithm,
-            length=length)
+        try:
+            encryption_key_id = key_manager.create_key(
+                context,
+                algorithm=algorithm,
+                length=length)
+        except castellan_exception.KeyManagerError:
+            # The messaging back to the client here is
+            # purposefully terse, so we don't leak any sensitive
+            # details.
+            LOG.exception("Key manager error")
+            raise exception.Invalid(message="Key manager error")
+
     return encryption_key_id
+
+
+def delete_encryption_key(context, key_manager, encryption_key_id):
+    try:
+        key_manager.delete(context, encryption_key_id)
+    except castellan_exception.ManagedObjectNotFoundError:
+        pass
+    except castellan_exception.KeyManagerError:
+        LOG.info("First attempt to delete key id %s failed, retrying with "
+                 "cinder's service context.", encryption_key_id)
+        conf = CONF
+        ks_loading.register_auth_conf_options(conf, 'keystone_authtoken')
+        service_context = keystone_password.KeystonePassword(
+            password=conf.keystone_authtoken.password,
+            auth_url=conf.keystone_authtoken.auth_url,
+            username=conf.keystone_authtoken.username,
+            user_domain_name=conf.keystone_authtoken.user_domain_name,
+            project_name=conf.keystone_authtoken.project_name,
+            project_domain_name=conf.keystone_authtoken.project_domain_name)
+        try:
+            castellan_key_manager.API(conf).delete(service_context,
+                                                   encryption_key_id)
+        except castellan_exception.ManagedObjectNotFoundError:
+            pass
+
+
+def clone_encryption_key(context, key_manager, encryption_key_id):
+    clone_key_id = None
+    if encryption_key_id is not None:
+        clone_key_id = key_manager.store(
+            context,
+            key_manager.get(context, encryption_key_id))
+    return clone_key_id
 
 
 def is_replicated_str(str):
@@ -918,3 +971,44 @@ def is_group_a_cg_snapshot_type(group_or_snap):
         )
         return spec == "<is> True"
     return False
+
+
+def is_group_a_type(group, key):
+    if group.group_type_id is not None:
+        spec = group_types.get_group_type_specs(
+            group.group_type_id, key=key
+        )
+        return spec == "<is> True"
+    return False
+
+
+def get_max_over_subscription_ratio(str_value, supports_auto=False):
+    """Get the max_over_subscription_ratio from a string
+
+    As some drivers need to do some calculations with the value and we are now
+    receiving a string value in the conf, this converts the value to float
+    when appropriate.
+
+    :param str_value: Configuration object
+    :param supports_auto: Tell if the calling driver supports auto MOSR.
+    :param drv_msg: Error message from the caller
+    :response: value of mosr
+    """
+
+    if not supports_auto and str_value == "auto":
+        msg = _("This driver does not support automatic "
+                "max_over_subscription_ratio calculation. Please use a "
+                "valid float value.")
+        LOG.error(msg)
+        raise exception.VolumeDriverException(message=msg)
+
+    if str_value == 'auto':
+        return str_value
+
+    mosr = float(str_value)
+    if mosr < 1:
+        msg = _("The value of max_over_subscription_ratio must be "
+                "greater than 1.")
+        LOG.error(msg)
+        raise exception.InvalidParameterValue(message=msg)
+    return mosr

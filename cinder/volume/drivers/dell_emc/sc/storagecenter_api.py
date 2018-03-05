@@ -22,6 +22,7 @@ from oslo_utils import excutils
 import requests
 from simplejson import scanner
 import six
+from six.moves import http_client
 import uuid
 
 from cinder import exception
@@ -118,8 +119,8 @@ class HttpClient(object):
             baseurl += 'api/rest/'
         return '%s%s' % (baseurl, url if url[0] != '/' else url[1:])
 
-    def _get_header(self, async):
-        if async:
+    def _get_header(self, header_async):
+        if header_async:
             header = self.header.copy()
             header['async'] = 'True'
             return header
@@ -134,7 +135,7 @@ class HttpClient(object):
         except IndexError:
             url = asyncTask.get('returnValue')
         except AttributeError:
-            LOG.debug('_get_async_url: Atttribute Error. (%r)', asyncTask)
+            LOG.debug('_get_async_url: Attribute Error. (%r)', asyncTask)
             url = 'api/rest/ApiConnection/AsyncTask/'
 
         # Blank URL
@@ -204,11 +205,11 @@ class HttpClient(object):
         LOG.debug('_wait_for_async_complete: Error asyncTask: %r', asyncTask)
         return None
 
-    def _rest_ret(self, rest_response, async):
+    def _rest_ret(self, rest_response, async_call):
         # If we made an async call and it was accepted
         # we wait for our response.
-        if async:
-            if rest_response.status_code == 202:
+        if async_call:
+            if rest_response.status_code == http_client.ACCEPTED:
                 asyncTask = rest_response.json()
                 return self._wait_for_async_complete(asyncTask)
             else:
@@ -231,13 +232,14 @@ class HttpClient(object):
                                          headers=self.header,
                                          verify=self.verify)
 
-        if rest_response and rest_response.status_code == 400 and (
-                'Unhandled Exception' in rest_response.text):
+        if (rest_response and rest_response.status_code == (
+                http_client.BAD_REQUEST)) and (
+                    'Unhandled Exception' in rest_response.text):
             raise exception.DellDriverRetryableException()
         return rest_response
 
     @utils.retry(exceptions=(requests.ConnectionError,))
-    def post(self, url, payload, async=False):
+    def post(self, url, payload, async_call=False):
         LOG.debug('post: %(url)s data: %(payload)s',
                   {'url': url,
                    'payload': payload})
@@ -245,11 +247,11 @@ class HttpClient(object):
             self.__formatUrl(url),
             data=json.dumps(payload,
                             ensure_ascii=False).encode('utf-8'),
-            headers=self._get_header(async),
-            verify=self.verify), async)
+            headers=self._get_header(async_call),
+            verify=self.verify), async_call)
 
     @utils.retry(exceptions=(requests.ConnectionError,))
-    def put(self, url, payload, async=False):
+    def put(self, url, payload, async_call=False):
         LOG.debug('put: %(url)s data: %(payload)s',
                   {'url': url,
                    'payload': payload})
@@ -257,20 +259,21 @@ class HttpClient(object):
             self.__formatUrl(url),
             data=json.dumps(payload,
                             ensure_ascii=False).encode('utf-8'),
-            headers=self._get_header(async),
-            verify=self.verify), async)
+            headers=self._get_header(async_call),
+            verify=self.verify), async_call)
 
     @utils.retry(exceptions=(requests.ConnectionError,))
-    def delete(self, url, payload=None, async=False):
+    def delete(self, url, payload=None, async_call=False):
         LOG.debug('delete: %(url)s data: %(payload)s',
                   {'url': url, 'payload': payload})
-        named = {'headers': self._get_header(async), 'verify': self.verify}
+        named = {'headers': self._get_header(async_call),
+                 'verify': self.verify}
         if payload:
             named['data'] = json.dumps(
                 payload, ensure_ascii=False).encode('utf-8')
 
         return self._rest_ret(
-            self.session.delete(self.__formatUrl(url), **named), async)
+            self.session.delete(self.__formatUrl(url), **named), async_call)
 
 
 class SCApiHelper(object):
@@ -433,7 +436,7 @@ class SCApi(object):
                        should be turned on or not.
         :param apiversion: Version used on login.
         """
-        self.notes = 'Created by Dell Cinder Driver'
+        self.notes = 'Created by Dell EMC Cinder Driver'
         self.repl_prefix = 'Cinder repl of '
         self.ssn = None
         # primaryssn is the ssn of the SC we are configured to use. This
@@ -447,6 +450,7 @@ class SCApi(object):
         self.consisgroups = True
         self.protocol = 'Iscsi'
         self.apiversion = apiversion
+        self.legacyfoldernames = True
         # Nothing other than Replication should care if we are direct connect
         # or not.
         self.is_direct_connect = False
@@ -467,7 +471,8 @@ class SCApi(object):
         :returns: ``True`` if success, ``False`` otherwise.
         """
         if rest_response is not None:
-            if 200 <= rest_response.status_code < 300:
+            if http_client.OK <= rest_response.status_code < (
+                    http_client.MULTIPLE_CHOICES):
                 # API call was a normal success
                 return True
 
@@ -656,7 +661,7 @@ class SCApi(object):
 
                 elif splitver[1] == '1':
                     self.legacypayloadfilters = True
-            return
+            self.legacyfoldernames = (splitver[0] < '4')
 
         except Exception:
             # Good return but not the login response we were expecting.
@@ -808,12 +813,19 @@ class SCApi(object):
         pf.append('scSerialNumber', ssn)
         basename = os.path.basename(foldername)
         pf.append('Name', basename)
-        # If we have any kind of path we throw it into the filters.
-        folderpath = os.path.dirname(foldername)
+        # save the user from themselves.
+        folderpath = foldername.strip('/')
+        folderpath = os.path.dirname(folderpath)
+        # Put our path into the filters
         if folderpath != '':
+            # Legacy didn't begin with a slash.
+            if not self.legacyfoldernames:
+                folderpath = '/' + folderpath
             # SC convention is to end with a '/' so make sure we do.
             folderpath += '/'
-            pf.append('folderPath', folderpath)
+        elif not self.legacyfoldernames:
+            folderpath = '/'
+        pf.append('folderPath', folderpath)
         folder = None
         r = self.client.post(url, pf.payload)
         if self._check_result(r):
@@ -1300,7 +1312,7 @@ class SCApi(object):
         # If we have an id then delete the volume.
         if provider_id:
             r = self.client.delete('StorageCenter/ScVolume/%s' % provider_id,
-                                   async=True)
+                                   async_call=True)
             if not self._check_result(r):
                 msg = _('Error deleting volume %(ssn)s: %(volume)s') % {
                     'ssn': self.ssn,
@@ -1614,6 +1626,19 @@ class SCApi(object):
         LOG.debug('_find_controller_port: %s', controllerport)
         return controllerport
 
+    @staticmethod
+    def _get_wwn(controllerport):
+        """Return the WWN value of the controller port.
+
+        Usually the WWN key in the controller port is wwn or WWN, but there
+        are cases where the backend returns wWW, so we have to check all the
+        keys.
+        """
+        for key, value in controllerport.items():
+            if key.lower() == 'wwn':
+                return value
+        return None
+
     def find_wwns(self, scvolume, scserver):
         """Finds the lun and wwns of the mapped volume.
 
@@ -1639,7 +1664,7 @@ class SCApi(object):
             if controllerport is not None:
                 # This changed case at one point or another.
                 # Look for both keys.
-                wwn = controllerport.get('wwn', controllerport.get('WWN'))
+                wwn = self._get_wwn(controllerport)
                 if wwn:
                     serverhba = mapping.get('serverHba')
                     if serverhba:
@@ -1945,7 +1970,7 @@ class SCApi(object):
                 if prosrv is not None and self._get_id(prosrv) == serverid:
                     r = self.client.delete('StorageCenter/ScMappingProfile/%s'
                                            % self._get_id(profile),
-                                           async=True)
+                                           async_call=True)
                     if self._check_result(r):
                         # Check our result in the json.
                         result = self._get_json(r)
@@ -1967,6 +1992,53 @@ class SCApi(object):
                     rtn = False
                     break
         # return true/false.
+        return rtn
+
+    def unmap_all(self, scvolume):
+        """Unmaps a volume from all connections except SCs.
+
+        :param scvolume: The SC Volume object.
+        :return: Boolean
+        """
+        rtn = True
+        profiles = self._find_mapping_profiles(scvolume)
+        for profile in profiles:
+            # get our server
+            scserver = None
+            r = self.client.get('StorageCenter/ScServer/%s' %
+                                self._get_id(profile.get('server')))
+            if self._check_result(r):
+                scserver = self._get_json(r)
+            # We do not want to whack our replication or live volume
+            # connections. So anything other than a remote storage center
+            # is fair game.
+            if scserver and scserver['type'].upper() != 'REMOTESTORAGECENTER':
+                # we can whack the connection.
+                r = self.client.delete('StorageCenter/ScMappingProfile/%s'
+                                       % self._get_id(profile),
+                                       async_call=True)
+                if self._check_result(r):
+                    # Check our result in the json.
+                    result = self._get_json(r)
+                    # EM 15.1 and 15.2 return a boolean directly.
+                    # 15.3 on up return it in a dict under 'result'.
+                    if result is True or (type(result) is dict and
+                                          result.get('result')):
+                        LOG.info(
+                            'Volume %(vol)s unmapped from %(srv)s',
+                            {'vol': scvolume['name'],
+                             'srv': scserver['instanceName']})
+                        # yay, it is gone, carry on.
+                        continue
+
+                LOG.error('Unable to unmap %(vol)s from %(srv)s',
+                          {'vol': scvolume['name'],
+                           'srv': scserver['instanceName']})
+                # 1 failed unmap is as good as 100.
+                # Fail it and leave
+                rtn = False
+                break
+
         return rtn
 
     def get_storage_usage(self):
@@ -2453,7 +2525,7 @@ class SCApi(object):
         LOG.debug('ScServer delete %s', self._get_id(scserver))
         if scserver.get('deleteAllowed') is True:
             r = self.client.delete('StorageCenter/ScServer/%s'
-                                   % self._get_id(scserver), async=True)
+                                   % self._get_id(scserver), async_call=True)
             if self._check_result(r):
                 LOG.debug('ScServer deleted.')
         else:
@@ -2515,7 +2587,7 @@ class SCApi(object):
         """
         self.cg_except_on_no_support()
         r = self.client.delete('StorageCenter/ScReplayProfile/%s' %
-                               self._get_id(profile), async=True)
+                               self._get_id(profile), async_call=True)
         if self._check_result(r):
             LOG.info('Profile %s has been deleted.',
                      profile.get('name'))
@@ -2992,7 +3064,7 @@ class SCApi(object):
             payload['DeleteRestorePoint'] = True
             r = self.client.delete('StorageCenter/ScReplication/%s' %
                                    self._get_id(replication), payload=payload,
-                                   async=True)
+                                   async_call=True)
             if self._check_result(r):
                 # check that we whacked the dest volume
                 LOG.info('Replication %(vol)s to %(dest)s.',

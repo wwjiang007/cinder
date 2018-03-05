@@ -31,7 +31,7 @@ from cinder import ssh_utils
 
 LOG = logging.getLogger(__name__)
 
-retry_msgids = ['iSM31005', 'iSM31015', 'iSM42408', 'iSM42412']
+retry_msgids = ['iSM31005', 'iSM31015', 'iSM42408', 'iSM42412', 'iSM19411']
 
 
 class MStorageISMCLI(object):
@@ -197,24 +197,6 @@ class MStorageISMCLI(object):
                               conf_ismview_path)
         return out
 
-    def get_poolnumber_and_ldnumber(self, pools, used_ldns, max_ld_count):
-        selected_pool = -1
-        min_ldn = 0
-        for pool in pools:
-            nld = len(pool['ld_list'])
-            if selected_pool == -1 or min_ldn > nld:
-                selected_pool = pool['pool_num']
-                min_ldn = nld
-        for ldn in range(0, max_ld_count + 1):
-            if ldn not in used_ldns:
-                break
-        if ldn > max_ld_count - 1:
-            msg = _('All Logical Disk numbers are used.')
-            LOG.error(msg)
-            raise exception.VolumeBackendAPIException(data=msg)
-
-        return selected_pool, ldn
-
     def ldbind(self, name, pool, ldn, size):
         """Bind an LD and attach a nickname to it."""
         errnum = ""
@@ -244,6 +226,41 @@ class MStorageISMCLI(object):
                '-unit gb'
                % {'ldn': ldn, 'capacity': capacity})
         self._execute(cmd)
+
+    def addldset_fc(self, ldsetname, connector):
+        """Create new FC LD Set."""
+        cmd = 'iSMcfg addldset -ldset LX:%s -type fc' % ldsetname
+        out, err, status = self._execute(cmd, [0], False)
+        if status != 0:
+            return False
+        for wwpn in connector['wwpns']:
+            length = len(wwpn)
+            setwwpn = '-'.join([wwpn[i:i + 4]
+                                for i in range(0, length, 4)])
+            setwwpn = setwwpn.upper()
+            cmd = ('iSMcfg addldsetpath -ldset LX:%(name)s -path %(path)s'
+                   % {'name': ldsetname, 'path': setwwpn})
+            out, err, status = self._execute(cmd, [0], False)
+            if status != 0:
+                return False
+
+        return True
+
+    def addldset_iscsi(self, ldsetname, connector):
+        """Create new iSCSI LD Set."""
+        cmd = ('iSMcfg addldset -ldset LX:%s -multitarget on'
+               ' -type iscsi' % ldsetname)
+        out, err, status = self._execute(cmd, [0], False)
+        if status != 0:
+            return False
+        cmd = ('iSMcfg addldsetinitiator'
+               ' -ldset LX:%(name)s -initiatorname %(initiator)s'
+               % {'name': ldsetname, 'initiator': connector['initiator']})
+        out, err, status = self._execute(cmd, [0], False)
+        if status != 0:
+            return False
+
+        return True
 
     def addldsetld(self, ldset, ldname, lun=None):
         """Add an LD to specified LD Set."""
@@ -454,17 +471,17 @@ class MStorageISMCLI(object):
             if flag == 'backup':
                 LOG.debug('Volume Id not found. '
                           'LD name = %(name)s volume_id = %(id)s.',
-                          {'name': ldname, 'id': snapshot['volume_id']})
+                          {'name': ldname, 'id': snapshot.volume_id})
                 raise exception.NotFound(_('Logical Disk does not exist.'))
             elif flag == 'restore':
                 LOG.debug('Snapshot Id not found. '
                           'LD name = %(name)s snapshot_id = %(id)s.',
-                          {'name': ldname, 'id': snapshot['id']})
+                          {'name': ldname, 'id': snapshot.id})
                 raise exception.NotFound(_('Logical Disk does not exist.'))
             elif flag == 'delete':
                 LOG.debug('LD `%(name)s` already unbound? '
                           'snapshot_id = %(id)s.',
-                          {'name': ldname, 'id': snapshot['id']})
+                          {'name': ldname, 'id': snapshot.id})
                 return None
             else:
                 LOG.debug('check_ld_existed_rplstatus flag error flag = %s.',
@@ -572,6 +589,17 @@ class MStorageISMCLI(object):
         LOG.debug('snap/state:%s.', query_status)
         return query_status
 
+    def get_bvname(self, svname):
+        cmd = ('iSMsc_query -sv %s -svflg ld -summary | '
+               'while builtin read line;do '
+               'if [[ "$line" =~ "LD Name" ]]; '
+               'then builtin echo "$line";fi;done'
+               % svname[3:])
+        out, err, status = self._execute(cmd)
+
+        query_status = out[15:39].strip()
+        return query_status
+
     def set_io_limit(self, ldname, specs, force_delete=True):
         if specs['upperlimit'] is not None:
             upper = int(specs['upperlimit'], 10)
@@ -600,11 +628,45 @@ class MStorageISMCLI(object):
                 if force_delete:
                     self.unbind(ldname)
 
+    def lvbind(self, bvname, lvname, lvnumber):
+        """Link Volume create."""
+        cmd = ('iSMcfg lvbind -bvname %(bvname)s '
+               '-lvn %(lvnumber)d -lvname %(lvname)s'
+               % {'bvname': bvname,
+                  'lvnumber': lvnumber,
+                  'lvname': lvname})
+        self._execute(cmd)
+
+    def lvunbind(self, lvname):
+        """Link Volume delete."""
+        cmd = ('iSMcfg lvunbind -ldname %(lvname)s'
+               % {'lvname': lvname})
+        self._execute(cmd)
+
+    def lvlink(self, svname, lvname):
+        """Link to snapshot volume."""
+        cmd = ('iSMsc_link -lv %(lvname)s -lvflg ld '
+               '-sv %(svname)s -svflg ld -lvacc ro'
+               % {'lvname': lvname,
+                  'svname': svname})
+        self._execute(cmd)
+
+    def lvunlink(self, lvname):
+        """Unlink from snapshot volume."""
+        cmd = ('iSMsc_unlink -lv %(lvname)s -lvflg ld'
+               % {'lvname': lvname})
+        self._execute(cmd)
+
+    def cvbind(self, poolnumber, cvnumber):
+        """Create Control Volume."""
+        cmd = ('iSMcfg ldbind -poolnumber %(poolnumber)d '
+               '-ldattr cv -ldn %(cvnumber)d'
+               % {'poolnumber': poolnumber,
+                  'cvnumber': cvnumber})
+        self._execute(cmd)
+
 
 class UnpairWait(object):
-    error_updates = {'status': 'error',
-                     'progress': '100%',
-                     'migration_status': None}
 
     def __init__(self, volume_properties, cli):
         super(UnpairWait, self).__init__()

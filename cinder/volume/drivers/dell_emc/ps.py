@@ -33,6 +33,7 @@ from cinder.i18n import _
 from cinder import interface
 from cinder import ssh_utils
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume.drivers import san
 
 LOG = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ eqlx_opts = [
 
 
 CONF = cfg.CONF
-CONF.register_opts(eqlx_opts)
+CONF.register_opts(eqlx_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 def with_timeout(f):
@@ -135,13 +136,17 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
                 eqlx_chap_login, and eqlx_chap_password.
         1.4.1 - Rebranded driver to Dell EMC.
         1.4.2 - Enable report discard support.
+        1.4.3 - Report total_volumes in volume stats
+        1.4.4 - Fixed over-subscription ratio calculation
+        1.4.5 - Optimize volume stats information parsing
+        1.4.6 - Extend volume with no-snap option
 
     """
 
-    VERSION = "1.4.2"
+    VERSION = "1.4.6"
 
     # ThirdPartySytems wiki page
-    CI_WIKI_NAME = "Dell_Storage_CI"
+    CI_WIKI_NAME = "Dell_EMC_PS_Series_CI"
 
     def __init__(self, *args, **kwargs):
         super(PSSeriesISCSIDriver, self).__init__(*args, **kwargs)
@@ -298,12 +303,12 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
         data['reserved_percentage'] = 0
         data['QoS_support'] = False
 
-        data['total_capacity_gb'] = 0
-        data['free_capacity_gb'] = 0
+        data['total_capacity_gb'] = None
+        data['free_capacity_gb'] = None
         data['multiattach'] = False
+        data['total_volumes'] = None
 
-        provisioned_capacity = 0
-
+        provisioned_capacity = None
         for line in self._eql_execute('pool', 'select',
                                       self.configuration.eqlx_pool, 'show'):
             if line.startswith('TotalCapacity:'):
@@ -312,9 +317,16 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
             if line.startswith('FreeSpace:'):
                 out_tup = line.rstrip().partition(' ')
                 data['free_capacity_gb'] = self._get_space_in_gb(out_tup[-1])
-            if line.startswith('VolumeReserve:'):
+            if line.startswith('VolumeReportedSpace:'):
                 out_tup = line.rstrip().partition(' ')
                 provisioned_capacity = self._get_space_in_gb(out_tup[-1])
+            if line.startswith('TotalVolumes:'):
+                out_tup = line.rstrip().partition(' ')
+                data['total_volumes'] = int(out_tup[-1])
+            # Terminate parsing once this data is found to improve performance
+            if (data['total_capacity_gb'] and data['free_capacity_gb'] and
+               provisioned_capacity and data['total_volumes']):
+                break
 
         global_capacity = data['total_capacity_gb']
         global_free = data['free_capacity_gb']
@@ -362,6 +374,17 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
                               'it may have already been deleted',
                               volume['name'])
                     raise exception.VolumeNotFound(volume_id=volume['id'])
+
+    def _get_access_record(self, volume, connector):
+        """Returns access record id for the initiator"""
+        try:
+            out = self._eql_execute('volume', 'select', volume['name'],
+                                    'access', 'show')
+            return self._parse_connection(connector, out)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.error('Failed to get access records '
+                          'to volume "%s".', volume['name'])
 
     def _parse_connection(self, connector, out):
         """Returns the correct connection id for the initiator.
@@ -533,12 +556,15 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
     def initialize_connection(self, volume, connector):
         """Restrict access to a volume."""
         try:
-            cmd = ['volume', 'select', volume['name'], 'access', 'create',
-                   'initiator', connector['initiator']]
-            if self.configuration.use_chap_auth:
-                cmd.extend(['authmethod', 'chap', 'username',
-                            self.configuration.chap_username])
-            self._eql_execute(*cmd)
+            connection_id = self._get_access_record(volume, connector)
+            if connection_id is None:
+                cmd = ['volume', 'select', volume['name'], 'access', 'create',
+                       'initiator', connector['initiator']]
+                if self.configuration.use_chap_auth:
+                    cmd.extend(['authmethod', 'chap', 'username',
+                                self.configuration.chap_username])
+                self._eql_execute(*cmd)
+
             iscsi_properties = self._get_iscsi_properties(volume)
             iscsi_properties['discard'] = True
             return {
@@ -553,9 +579,7 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
     def terminate_connection(self, volume, connector, force=False, **kwargs):
         """Remove access restrictions from a volume."""
         try:
-            out = self._eql_execute('volume', 'select', volume['name'],
-                                    'access', 'show')
-            connection_id = self._parse_connection(connector, out)
+            connection_id = self._get_access_record(volume, connector)
             if connection_id is not None:
                 self._eql_execute('volume', 'select', volume['name'],
                                   'access', 'delete', connection_id)
@@ -602,7 +626,7 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
         """Extend the size of the volume."""
         try:
             self._eql_execute('volume', 'select', volume['name'],
-                              'size', "%sG" % new_size)
+                              'size', "%sG" % new_size, 'no-snap')
             LOG.info('Volume %(name)s resized from '
                      '%(current_size)sGB to %(new_size)sGB.',
                      {'name': volume['name'],
@@ -656,7 +680,7 @@ class PSSeriesISCSIDriver(san.SanISCSIDriver):
 
         :param volume:       Cinder volume to manage
         :param existing_ref: Driver-specific information used to identify a
-        volume
+                             volume
         """
         existing_volume_name = self._get_existing_volume_ref_name(existing_ref)
         data = self._get_volume_info(existing_volume_name)

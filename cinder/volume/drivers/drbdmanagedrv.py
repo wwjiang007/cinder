@@ -39,6 +39,7 @@ from oslo_utils import units
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
+from cinder.volume import configuration
 from cinder.volume import driver
 
 try:
@@ -108,7 +109,7 @@ drbd_opts = [
 
 
 CONF = cfg.CONF
-CONF.register_opts(drbd_opts)
+CONF.register_opts(drbd_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 AUX_PROP_CINDER_VOL_ID = "cinder-id"
@@ -398,7 +399,7 @@ class DrbdManageBaseDriver(driver.VolumeDriver):
                                          self.empty_dict)
         self._check_result(res)
 
-        if (not rl) or (len(rl) == 0):
+        if not rl:
             if empty_ok:
                 LOG.debug("No volume %s found.", v_uuid)
                 return None, None, None, None
@@ -435,7 +436,7 @@ class DrbdManageBaseDriver(driver.VolumeDriver):
                                          self.empty_dict)
         self._check_result(res)
 
-        if (not rs) or (len(rs) == 0):
+        if not rs:
             if empty_ok:
                 return None
             else:
@@ -596,7 +597,7 @@ class DrbdManageBaseDriver(driver.VolumeDriver):
             raise exception.VolumeBackendAPIException(data=message)
 
         # Delete resource, if empty
-        if (not rl) or (not rl[0]) or (len(rl[0][2]) == 0):
+        if (not rl) or (not rl[0]) or not rl[0][2]:
             res = self.call_or_reconnect(self.odm.remove_resource,
                                          d_res_name, False)
             self._check_result(res, ignore=[dm_exc.DM_ENOENT])
@@ -789,7 +790,7 @@ class DrbdManageIscsiDriver(DrbdManageBaseDriver):
     def __init__(self, *args, **kwargs):
         super(DrbdManageIscsiDriver, self).__init__(*args, **kwargs)
         target_driver = self.target_mapping[
-            self.configuration.safe_get('iscsi_helper')]
+            self.configuration.safe_get('target_helper')]
 
         LOG.debug('Attempting to initialize DRBD driver with the '
                   'following target_driver: %s',

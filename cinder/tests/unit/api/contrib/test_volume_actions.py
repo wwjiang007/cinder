@@ -24,7 +24,7 @@ from six.moves import http_client
 import webob
 
 from cinder.api.contrib import volume_actions
-from cinder.api.openstack import api_version_request as api_version
+from cinder.api import microversions as mv
 from cinder import context
 from cinder import db
 from cinder import exception
@@ -749,6 +749,22 @@ def fake_volume_get(self, context, volume_id):
     return volume
 
 
+def fake_volume_get_obj(self, context, volume_id, **kwargs):
+    volume = fake_volume.fake_volume_obj(context,
+                                         id=volume_id,
+                                         display_description='displaydesc',
+                                         **kwargs)
+    if volume_id == fake.VOLUME3_ID:
+        volume.status = 'in-use'
+    else:
+        volume.status = 'available'
+
+    volume.volume_type = fake_volume.fake_volume_type_obj(
+        context,
+        name=v2_fakes.DEFAULT_VOL_TYPE)
+    return volume
+
+
 def fake_upload_volume_to_image_service(self, context, volume, metadata,
                                         force):
     ret = {"id": volume['id'],
@@ -764,12 +780,14 @@ def fake_upload_volume_to_image_service(self, context, volume, metadata,
     return ret
 
 
+@ddt.ddt
 class VolumeImageActionsTest(test.TestCase):
     def setUp(self):
         super(VolumeImageActionsTest, self).setUp()
         self.controller = volume_actions.VolumeActionsController()
         self.context = context.RequestContext(fake.USER_ID, fake.PROJECT_ID,
                                               is_admin=False)
+        self.maxDiff = 2000
 
     def _get_os_volume_upload_image(self):
         vol = {
@@ -800,7 +818,7 @@ class VolumeImageActionsTest(test.TestCase):
             'size': 0}
         return ret
 
-    def fake_image_service_create_3_1(self, *args):
+    def fake_image_service_create_with_params(self, *args):
         ret = {
             'status': u'queued',
             'name': u'image_name',
@@ -823,16 +841,16 @@ class VolumeImageActionsTest(test.TestCase):
     def fake_rpc_copy_volume_to_image(self, *args):
         pass
 
-    @mock.patch.object(volume_api.API, 'get', fake_volume_get)
+    @mock.patch.object(volume_api.API, 'get', fake_volume_get_obj)
     @mock.patch.object(volume_api.API, "copy_volume_to_image",
                        fake_upload_volume_to_image_service)
     def test_copy_volume_to_image(self):
         id = fake.VOLUME_ID
-        vol = {"container_format": 'bare',
+        img = {"container_format": 'bare',
                "disk_format": 'raw',
                "image_name": 'image_name',
                "force": True}
-        body = {"os-volume_upload_image": vol}
+        body = {"os-volume_upload_image": img}
         req = fakes.HTTPRequest.blank('/v2/%s/volumes/%s/action' %
                                       (fake.PROJECT_ID, id))
         res_dict = self.controller._volume_upload_image(req, id, body)
@@ -842,7 +860,8 @@ class VolumeImageActionsTest(test.TestCase):
                      'status': 'uploading',
                      'display_description': 'displaydesc',
                      'size': 1,
-                     'volume_type': fake_volume.fake_db_volume_type(
+                     'volume_type': fake_volume.fake_volume_type_obj(
+                         context,
                          name='vol_type_name'),
                      'image_id': fake.IMAGE_ID,
                      'container_format': 'bare',
@@ -870,7 +889,7 @@ class VolumeImageActionsTest(test.TestCase):
                           id,
                           body)
 
-    @mock.patch.object(volume_api.API, 'get', fake_volume_get)
+    @mock.patch.object(volume_api.API, 'get', fake_volume_get_obj)
     @mock.patch.object(volume_api.API, 'copy_volume_to_image',
                        side_effect=exception.InvalidVolume(reason='blah'))
     def test_copy_volume_to_image_invalidvolume(self, mock_copy):
@@ -904,7 +923,27 @@ class VolumeImageActionsTest(test.TestCase):
                           id,
                           body)
 
-    @mock.patch.object(volume_api.API, 'get', fake_volume_get)
+    @mock.patch.object(volume_api.API, "copy_volume_to_image")
+    def test_copy_volume_to_image_disk_format_ploop(self,
+                                                    mock_copy_to_image):
+        volume = utils.create_volume(self.context, metadata={'test': 'test'})
+
+        img = {"container_format": 'bare',
+               "disk_format": 'ploop',
+               "image_name": 'image_name'}
+        body = {"os-volume_upload_image": img}
+        req = fakes.HTTPRequest.blank('/v3/%s/volumes/%s/action' %
+                                      (fake.PROJECT_ID, volume.id))
+
+        image_metadata = {'container_format': 'bare',
+                          'disk_format': 'ploop',
+                          'name': 'image_name'}
+        self.controller._volume_upload_image(req, volume.id, body)
+
+        mock_copy_to_image.assert_called_once_with(
+            req.environ['cinder.context'], volume, image_metadata, False)
+
+    @mock.patch.object(volume_api.API, 'get', fake_volume_get_obj)
     @mock.patch.object(volume_api.API, 'copy_volume_to_image',
                        side_effect=ValueError)
     def test_copy_volume_to_image_valueerror(self, mock_copy):
@@ -922,7 +961,7 @@ class VolumeImageActionsTest(test.TestCase):
                           id,
                           body)
 
-    @mock.patch.object(volume_api.API, 'get', fake_volume_get)
+    @mock.patch.object(volume_api.API, 'get', fake_volume_get_obj)
     @mock.patch.object(volume_api.API, 'copy_volume_to_image',
                        side_effect=messaging.RemoteError)
     def test_copy_volume_to_image_remoteerror(self, mock_copy):
@@ -977,6 +1016,33 @@ class VolumeImageActionsTest(test.TestCase):
                           req,
                           id,
                           body)
+
+    @ddt.data({'version': mv.get_prior_version(mv.VOLUME_EXTEND_INUSE),
+               'status': 'available'},
+              {'version': mv.get_prior_version(mv.VOLUME_EXTEND_INUSE),
+               'status': 'in-use'},
+              {'version': mv.VOLUME_EXTEND_INUSE,
+               'status': 'available'},
+              {'version': mv.VOLUME_EXTEND_INUSE,
+               'status': 'in-use'})
+    @ddt.unpack
+    def test_extend_attached_volume(self, version, status):
+        vol = db.volume_create(self.context,
+                               {'size': 1, 'project_id': fake.PROJECT_ID,
+                                'status': status})
+        self.mock_object(volume_api.API, 'get', return_value=vol)
+        mock_extend = self.mock_object(volume_api.API, '_extend')
+        body = {"os-extend": {"new_size": 2}}
+        req = fakes.HTTPRequest.blank('/v3/%s/volumes/%s/action' %
+                                      (fake.PROJECT_ID, vol['id']))
+        req.api_version_request = mv.get_api_version(version)
+        self.controller._extend(req, vol['id'], body)
+        if version == mv.VOLUME_EXTEND_INUSE and status == 'in-use':
+            mock_extend.assert_called_with(req.environ['cinder.context'],
+                                           vol, 2, attached=True)
+        else:
+            mock_extend.assert_called_with(req.environ['cinder.context'],
+                                           vol, 2, attached=False)
 
     def test_copy_volume_to_image_notimagename(self):
         id = fake.VOLUME2_ID
@@ -1045,14 +1111,14 @@ class VolumeImageActionsTest(test.TestCase):
         self.assertEqual('uploading', vol_db.status)
         self.assertEqual('available', vol_db.previous_status)
 
-    @mock.patch.object(volume_api.API, 'get', fake_volume_get)
+    @mock.patch.object(volume_api.API, 'get', fake_volume_get_obj)
     def test_copy_volume_to_image_public_not_authorized(self):
         """Test unauthorized create public image from volume."""
         id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
         req = fakes.HTTPRequest.blank('/v3/tenant1/volumes/%s/action' % id)
         req.environ['cinder.context'].is_admin = False
-        req.headers = {'OpenStack-API-Version': 'volume 3.1'}
-        req.api_version_request = api_version.APIVersionRequest('3.1')
+        req.headers = mv.get_mv_header(mv.UPLOAD_IMAGE_PARAMS)
+        req.api_version_request = mv.get_api_version(mv.UPLOAD_IMAGE_PARAMS)
         body = self._get_os_volume_upload_image()
         body['os-volume_upload_image']['visibility'] = 'public'
         self.assertRaises(exception.PolicyNotAuthorized,
@@ -1245,7 +1311,7 @@ class VolumeImageActionsTest(test.TestCase):
     @mock.patch.object(volume_api.API, "get_volume_image_metadata")
     @mock.patch.object(glance.GlanceImageService, "create")
     @mock.patch.object(volume_rpcapi.VolumeAPI, "copy_volume_to_image")
-    def test_copy_volume_to_image_version_3_1(
+    def test_copy_volume_to_image_version_with_params(
             self,
             mock_copy_volume_to_image,
             mock_create,
@@ -1257,18 +1323,16 @@ class VolumeImageActionsTest(test.TestCase):
             "volume_id": volume.id,
             "key": "x_billing_code_license",
             "value": "246254365"}
-        mock_create.side_effect = self.fake_image_service_create_3_1
+        mock_create.side_effect = self.fake_image_service_create_with_params
         mock_copy_volume_to_image.side_effect = \
             self.fake_rpc_copy_volume_to_image
-
-        self.override_config('glance_api_version', 2)
 
         req = fakes.HTTPRequest.blank(
             '/v3/%s/volumes/%s/action' % (fake.PROJECT_ID, volume.id),
             use_admin_context=self.context.is_admin)
         req.environ['cinder.context'].is_admin = True
-        req.headers = {'OpenStack-API-Version': 'volume 3.1'}
-        req.api_version_request = api_version.APIVersionRequest('3.1')
+        req.headers = mv.get_mv_header(mv.UPLOAD_IMAGE_PARAMS)
+        req.api_version_request = mv.get_api_version(mv.UPLOAD_IMAGE_PARAMS)
         body = self._get_os_volume_upload_image()
         body['os-volume_upload_image']['visibility'] = 'public'
         body['os-volume_upload_image']['protected'] = True

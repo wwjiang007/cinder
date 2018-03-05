@@ -18,6 +18,7 @@ from __future__ import absolute_import
 
 import logging as std_logging
 import os
+import warnings
 
 import fixtures
 
@@ -73,7 +74,7 @@ class StandardLogging(fixtures.Fixture):
 
         # set root logger to debug
         root = std_logging.getLogger()
-        root.setLevel(std_logging.DEBUG)
+        root.setLevel(std_logging.INFO)
 
         # supports collecting debug level for local runs
         if os.environ.get('OS_DEBUG') in _TRUE_VALUES:
@@ -99,3 +100,34 @@ class StandardLogging(fixtures.Fixture):
             # Don't log every single DB migration step
             std_logging.getLogger(
                 'migrate.versioning.api').setLevel(std_logging.WARNING)
+
+        # At times we end up calling back into main() functions in
+        # testing. This has the possibility of calling logging.setup
+        # again, which completely unwinds the logging capture we've
+        # created here. Once we've setup the logging in the way we want,
+        # disable the ability for the test to change this.
+        def fake_logging_setup(*args):
+            pass
+
+        self.useFixture(
+            fixtures.MonkeyPatch('oslo_log.log.setup', fake_logging_setup))
+
+
+class WarningsFixture(fixtures.Fixture):
+    """Filters out warnings during test runs."""
+
+    def setUp(self):
+        super(WarningsFixture, self).setUp()
+        # NOTE(sdague): Make deprecation warnings only happen once. Otherwise
+        # this gets kind of crazy given the way that upstream python libs use
+        # this.
+        warnings.simplefilter('once', DeprecationWarning)
+
+        # NOTE(sdague): this remains an unresolved item around the way
+        # forward on is_admin, the deprecation is definitely really premature.
+        warnings.filterwarnings(
+            'ignore',
+            message='Policy enforcement is depending on the value of is_admin.'
+                    ' This key is deprecated. Please update your policy '
+                    'file to use the standard policy values.')
+        self.addCleanup(warnings.resetwarnings)

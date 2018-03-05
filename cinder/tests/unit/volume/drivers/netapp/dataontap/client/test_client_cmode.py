@@ -1146,8 +1146,8 @@ class NetAppCmodeClientTestCase(test.TestCase):
         req_snapshot_child = actual_request.get_child_by_name('snapshot-name')
         self.assertEqual(fake.CG_SNAPSHOT_ID, req_snapshot_child.get_content())
 
-        self.assertEqual(actual_request.get_child_by_name(
-            'destination-exists'), None)
+        self.assertIsNone(actual_request.get_child_by_name(
+            'destination-exists'))
 
     def test_clone_file_when_destination_exists(self):
         expected_flex_vol = "fake_flex_vol"
@@ -2245,36 +2245,6 @@ class NetAppCmodeClientTestCase(test.TestCase):
         result = self.client.list_cluster_nodes()
 
         self.assertListEqual([], result)
-
-    def test_check_for_cluster_credentials(self):
-
-        self.mock_object(self.client,
-                         'list_cluster_nodes',
-                         mock.Mock(return_value=fake_client.NODE_NAMES))
-
-        result = self.client.check_for_cluster_credentials()
-
-        self.assertTrue(result)
-
-    def test_check_for_cluster_credentials_not_found(self):
-
-        api_error = netapp_api.NaApiError(code=netapp_api.EAPINOTFOUND)
-        self.mock_object(self.client,
-                         'list_cluster_nodes',
-                         side_effect=api_error)
-
-        result = self.client.check_for_cluster_credentials()
-
-        self.assertFalse(result)
-
-    def test_check_for_cluster_credentials_api_error(self):
-
-        self.mock_object(self.client,
-                         'list_cluster_nodes',
-                         self._mock_api_error())
-
-        self.assertRaises(netapp_api.NaApiError,
-                          self.client.check_for_cluster_credentials)
 
     @ddt.data({'types': {'FCAL'}, 'expected': ['FCAL']},
               {'types': {'SATA', 'SSD'}, 'expected': ['SATA', 'SSD']},)

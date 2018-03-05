@@ -39,7 +39,6 @@ logging.register_options(CONF)
 core_opts = [
     cfg.StrOpt('state_path',
                default='/var/lib/cinder',
-               deprecated_name='pybasedir',
                help="Top-level directory for maintaining cinder's state"), ]
 
 CONF.register_cli_opts(core_opts)
@@ -53,12 +52,6 @@ global_opts = [
                 help='A list of the URLs of glance API servers available to '
                      'cinder ([http[s]://][hostname|ip]:port). If protocol '
                      'is not specified it defaults to http.'),
-    cfg.IntOpt('glance_api_version',
-               default=2,
-               deprecated_for_removal=True,
-               deprecated_since="11.0.0",
-               deprecated_reason='Glance v1 support will be removed in Queens',
-               help='Version of the glance API to use'),
     cfg.IntOpt('glance_num_retries',
                min=0,
                default=0,
@@ -82,10 +75,6 @@ global_opts = [
                help='http/https timeout value for glance operations. If no '
                     'value (None) is supplied here, the glanceclient default '
                     'value is used.'),
-    cfg.BoolOpt('enable_v1_api',
-                default=False,
-                deprecated_for_removal=True,
-                help="DEPRECATED: Deploy v1 of the Cinder API."),
     cfg.BoolOpt('enable_v2_api',
                 default=True,
                 deprecated_for_removal=True,
@@ -183,36 +172,6 @@ global_opts = [
     cfg.StrOpt('group_api_class',
                default='cinder.group.api.API',
                help='The full class name of the group API class'),
-    cfg.StrOpt('os_privileged_user_name',
-               help='OpenStack privileged account username. Used for requests '
-                    'to other services (such as Nova) that require an account '
-                    'with special rights.',
-               deprecated_for_removal=True,
-               deprecated_since="11.0.0",
-               deprecated_reason='Use the [nova] section for configuring '
-               'Keystone authentication for a privileged user.'),
-    cfg.StrOpt('os_privileged_user_password',
-               help='Password associated with the OpenStack privileged '
-                    'account.',
-               deprecated_for_removal=True,
-               deprecated_since="11.0.0",
-               deprecated_reason='Use the [nova] section to configure '
-               'Keystone authentication for a privileged user.',
-               secret=True),
-    cfg.StrOpt('os_privileged_user_tenant',
-               help='Tenant name associated with the OpenStack privileged '
-                    'account.',
-               deprecated_for_removal=True,
-               deprecated_since="11.0.0",
-               deprecated_reason='Use the [nova] section to configure '
-               'Keystone authentication for a privileged user.'),
-    cfg.URIOpt('os_privileged_user_auth_url',
-               help='Auth URL associated with the OpenStack privileged '
-                    'account.',
-               deprecated_for_removal=True,
-               deprecated_since="11.0.0",
-               deprecated_reason='Use the [nova] section to configure '
-               'Keystone authentication for a privileged user.')
 ]
 
 CONF.register_opts(core_opts)

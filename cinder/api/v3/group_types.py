@@ -21,11 +21,14 @@ import webob
 from webob import exc
 
 from cinder.api import common
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
+from cinder.api.schemas import group_types as group_type
 from cinder.api.v3.views import group_types as views_types
+from cinder.api import validation
 from cinder import exception
 from cinder.i18n import _
-from cinder import policy
+from cinder.policies import group_types as policy
 from cinder import rpc
 from cinder import utils
 from cinder.volume import group_types
@@ -35,13 +38,6 @@ class GroupTypesController(wsgi.Controller):
     """The group types API controller for the OpenStack API."""
 
     _view_builder_class = views_types.ViewBuilder
-
-    def _check_policy(self, context):
-        target = {
-            'project_id': context.project_id,
-            'user_id': context.user_id,
-        }
-        policy.enforce(context, 'group:group_types_manage', target)
 
     @utils.if_notifications_enabled
     def _notify_group_type_error(self, context, method, err,
@@ -55,31 +51,20 @@ class GroupTypesController(wsgi.Controller):
         payload = dict(group_types=group_type)
         rpc.get_notifier('groupType').info(context, method, payload)
 
-    @wsgi.Controller.api_version('3.11')
+    @wsgi.Controller.api_version(mv.GROUP_TYPE)
     @wsgi.response(http_client.ACCEPTED)
+    @validation.schema(group_type.create)
     def create(self, req, body):
         """Creates a new group type."""
         context = req.environ['cinder.context']
-        self._check_policy(context)
-
-        self.assert_valid_body(body, 'group_type')
+        context.authorize(policy.MANAGE_POLICY)
 
         grp_type = body['group_type']
-        name = grp_type.get('name', None)
+        name = grp_type['name']
         description = grp_type.get('description')
         specs = grp_type.get('group_specs', {})
-        is_public = utils.get_bool_param('is_public', grp_type, True)
-
-        if name is None or len(name.strip()) == 0:
-            msg = _("Group type name can not be empty.")
-            raise webob.exc.HTTPBadRequest(explanation=msg)
-
-        utils.check_string_length(name, 'Type name',
-                                  min_length=1, max_length=255)
-
-        if description is not None:
-            utils.check_string_length(description, 'Type description',
-                                      min_length=0, max_length=255)
+        is_public = strutils.bool_from_string(grp_type.get('is_public', True),
+                                              strict=True)
 
         try:
             group_types.create(context,
@@ -103,41 +88,31 @@ class GroupTypesController(wsgi.Controller):
 
         return self._view_builder.show(req, grp_type)
 
-    @wsgi.Controller.api_version('3.11')
+    @wsgi.Controller.api_version(mv.GROUP_TYPE)
+    @validation.schema(group_type.update)
     def update(self, req, id, body):
         # Update description for a given group type.
         context = req.environ['cinder.context']
-        self._check_policy(context)
-
-        self.assert_valid_body(body, 'group_type')
+        context.authorize(policy.MANAGE_POLICY)
 
         grp_type = body['group_type']
         description = grp_type.get('description')
         name = grp_type.get('name')
         is_public = grp_type.get('is_public')
+        if is_public is not None:
+            is_public = strutils.bool_from_string(is_public, strict=True)
 
-        # Name and description can not be both None.
         # If name specified, name can not be empty.
         if name and len(name.strip()) == 0:
             msg = _("Group type name can not be empty.")
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
+        # Name, description and is_public can not be None.
+        # Specify one of them, or a combination thereof.
         if name is None and description is None and is_public is None:
             msg = _("Specify group type name, description or "
                     "a combination thereof.")
             raise webob.exc.HTTPBadRequest(explanation=msg)
-
-        if is_public is not None:
-            is_public = utils.get_bool_param('is_public', grp_type)
-
-        if name:
-            utils.check_string_length(name, 'Type name',
-                                      min_length=1, max_length=255)
-
-        if description is not None:
-            utils.check_string_length(description, 'Type description',
-                                      min_length=0, max_length=255)
-
         try:
             group_types.update(context, id, name, description,
                                is_public=is_public)
@@ -163,11 +138,11 @@ class GroupTypesController(wsgi.Controller):
 
         return self._view_builder.show(req, grp_type)
 
-    @wsgi.Controller.api_version('3.11')
+    @wsgi.Controller.api_version(mv.GROUP_TYPE)
     def delete(self, req, id):
         """Deletes an existing group type."""
         context = req.environ['cinder.context']
-        self._check_policy(context)
+        context.authorize(policy.MANAGE_POLICY)
 
         try:
             grp_type = group_types.get_group_type(context, id)
@@ -186,14 +161,14 @@ class GroupTypesController(wsgi.Controller):
 
         return webob.Response(status_int=http_client.ACCEPTED)
 
-    @wsgi.Controller.api_version('3.11')
+    @wsgi.Controller.api_version(mv.GROUP_TYPE)
     def index(self, req):
         """Returns the list of group types."""
         limited_types = self._get_group_types(req)
         req.cache_resource(limited_types, name='group_types')
         return self._view_builder.index(req, limited_types)
 
-    @wsgi.Controller.api_version('3.11')
+    @wsgi.Controller.api_version(mv.GROUP_TYPE)
     def show(self, req, id):
         """Return a single group type item."""
         context = req.environ['cinder.context']

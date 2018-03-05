@@ -23,6 +23,7 @@ import os
 from eventlet import pools
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_utils import excutils
 import paramiko
 import six
 
@@ -63,6 +64,7 @@ class SSHPool(pools.Pool):
         self.conn_timeout = conn_timeout if conn_timeout else None
         self.privatekey = privatekey
         self.hosts_key_file = None
+        self.current_size = 0
 
         # Validate good config setting here.
         # Paramiko handles the case where the file is inaccessible.
@@ -97,6 +99,23 @@ class SSHPool(pools.Pool):
             self.hosts_key_file += ',' + CONF.ssh_hosts_key_file
 
         super(SSHPool, self).__init__(*args, **kwargs)
+
+    def __del__(self):
+        # just return if nothing todo
+        if not self.current_size:
+            return
+        # change the size of the pool to reduce the number
+        # of elements on the pool via puts.
+        self.resize(1)
+        # release all but the last connection using
+        # get and put to allow any get waiters to complete.
+        while(self.waiting() or self.current_size > 1):
+            conn = self.get()
+            self.put(conn)
+        # Now free everthing that is left
+        while(self.free_items):
+            self.free_items.popleft().close()
+            self.current_size -= 1
 
     def create(self):
         try:
@@ -135,16 +154,8 @@ class SSHPool(pools.Pool):
                 msg = _("Specify a password or private_key")
                 raise exception.CinderException(msg)
 
-            # Paramiko by default sets the socket timeout to 0.1 seconds,
-            # ignoring what we set through the sshclient. This doesn't help for
-            # keeping long lived connections. Hence we have to bypass it, by
-            # overriding it after the transport is initialized. We are setting
-            # the sockettimeout to None and setting a keepalive packet so that,
-            # the server will keep the connection open. All that does is send
-            # a keepalive packet every ssh_conn_timeout seconds.
             if self.conn_timeout:
                 transport = ssh.get_transport()
-                transport.sock.settimeout(None)
                 transport.set_keepalive(self.conn_timeout)
             return ssh
         except Exception as e:
@@ -166,7 +177,22 @@ class SSHPool(pools.Pool):
                 return conn
             else:
                 conn.close()
-        return self.create()
+        try:
+            new_conn = self.create()
+        except Exception:
+            LOG.error("Create new item in SSHPool failed.")
+            with excutils.save_and_reraise_exception():
+                if conn:
+                    self.current_size -= 1
+        return new_conn
+
+    def put(self, conn):
+        # If we are have more connections than we should just close it
+        if self.current_size > self.max_size:
+            conn.close()
+            self.current_size -= 1
+            return
+        super(SSHPool, self).put(conn)
 
     def remove(self, ssh):
         """Close an ssh client and remove it from free_items."""

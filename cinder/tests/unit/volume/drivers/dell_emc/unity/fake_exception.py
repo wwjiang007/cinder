@@ -46,11 +46,23 @@ class UnityNothingToModifyError(StoropsException):
     pass
 
 
+class UnityThinCloneLimitExceededError(StoropsException):
+    pass
+
+
 class ExtendLunError(Exception):
     pass
 
 
 class DetachIsCalled(Exception):
+    pass
+
+
+class DetachAllIsCalled(Exception):
+    pass
+
+
+class DetachFromIsCalled(Exception):
     pass
 
 

@@ -324,3 +324,95 @@ class SSHPoolTestCase(test.TestCase):
         with sshpool.item() as ssh:
             self.assertIsInstance(ssh.get_policy(),
                                   paramiko.AutoAddPolicy)
+
+    @mock.patch('paramiko.SSHClient')
+    @mock.patch('six.moves.builtins.open')
+    @mock.patch('os.path.isfile', return_value=False)
+    def test_ssh_timeout(self, mock_isfile, mock_open, mock_sshclient):
+        sshpool = ssh_utils.SSHPool("127.0.0.1", 22, 10,
+                                    "test",
+                                    password="test",
+                                    min_size=1,
+                                    max_size=1)
+        self.assertEqual(1, sshpool.current_size)
+        conn = sshpool.get()
+        conn.connect = mock.MagicMock()
+        # create failed due to time out
+        conn.connect.side_effect = paramiko.SSHException("time out")
+        mock_transport = mock.MagicMock()
+        conn.get_transport.return_value = mock_transport
+        # connection is down
+        mock_transport.is_active.return_value = False
+        sshpool.put(conn)
+        self.assertRaises(paramiko.SSHException,
+                          sshpool.get)
+        self.assertEqual(0, sshpool.current_size)
+
+    @mock.patch('six.moves.builtins.open')
+    @mock.patch('os.path.isfile', return_value=True)
+    @mock.patch('paramiko.RSAKey.from_private_key_file')
+    @mock.patch('paramiko.SSHClient')
+    def test_ssh_put(self, mock_sshclient, mock_pkey, mock_isfile,
+                     mock_open):
+        self.override_config(
+            'ssh_hosts_key_file', '/var/lib/cinder/ssh_known_hosts')
+
+        fake_close = mock.MagicMock()
+        fake = FakeSSHClient()
+        fake.close = fake_close
+        mock_sshclient.return_value = fake
+
+        sshpool = ssh_utils.SSHPool("127.0.0.1", 22, 10,
+                                    "test",
+                                    password="test",
+                                    min_size=5,
+                                    max_size=5)
+        self.assertEqual(5, sshpool.current_size)
+        with sshpool.item():
+            pass
+        self.assertEqual(5, sshpool.current_size)
+        sshpool.resize(4)
+        with sshpool.item():
+            pass
+        self.assertEqual(4, sshpool.current_size)
+        fake_close.asssert_called_once_with(mock.call())
+        fake_close.reset_mock()
+        sshpool.resize(3)
+        with sshpool.item():
+            pass
+        self.assertEqual(3, sshpool.current_size)
+        fake_close.asssert_called_once_with(mock.call())
+
+    @mock.patch('six.moves.builtins.open')
+    @mock.patch('os.path.isfile', return_value=True)
+    @mock.patch('paramiko.RSAKey.from_private_key_file')
+    @mock.patch('paramiko.SSHClient')
+    def test_ssh_destructor(self, mock_sshclient, mock_pkey, mock_isfile,
+                            mock_open):
+        self.override_config(
+            'ssh_hosts_key_file', '/var/lib/cinder/ssh_known_hosts')
+
+        fake_close = mock.MagicMock()
+        fake = FakeSSHClient()
+        fake.close = fake_close
+        mock_sshclient.return_value = fake
+
+        # create with password
+        sshpool = ssh_utils.SSHPool("127.0.0.1", 22, 10,
+                                    "test",
+                                    password="test",
+                                    min_size=5,
+                                    max_size=5)
+        self.assertEqual(5, sshpool.current_size)
+        close_expect_calls = [mock.call(), mock.call(), mock.call(),
+                              mock.call(), mock.call()]
+
+        sshpool = ssh_utils.SSHPool("127.0.0.1", 22, 10,
+                                    "test",
+                                    password="test",
+                                    min_size=5,
+                                    max_size=5)
+        self.assertEqual(fake_close.mock_calls, close_expect_calls)
+        sshpool = None
+        self.assertEqual(fake_close.mock_calls, close_expect_calls +
+                         close_expect_calls)

@@ -17,18 +17,19 @@ Volume driver for QNAP Storage.
 This driver supports QNAP Storage for iSCSI.
 """
 import base64
+from collections import OrderedDict
 import eventlet
 import functools
 import re
 import ssl
+import threading
 import time
-try:
-    import xml.etree.cElementTree as ET
-except ImportError:
-    import xml.etree.ElementTree as ET
 
+from defusedxml import cElementTree as ET
+from oslo_concurrency import lockutils
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_utils import strutils
 from oslo_utils import timeutils
 from oslo_utils import units
 import six
@@ -38,6 +39,8 @@ from six.moves import urllib
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
+from cinder import utils
+from cinder.volume import configuration
 from cinder.volume.drivers.san import san
 
 LOG = logging.getLogger(__name__)
@@ -53,25 +56,30 @@ qnap_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(qnap_opts)
+CONF.register_opts(qnap_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 @interface.volumedriver
 class QnapISCSIDriver(san.SanISCSIDriver):
-    """OpenStack driver to enable QNAP Storage.
+    """QNAP iSCSI based cinder driver
 
-    Version history:
-        1.0.0 - Initial driver (Only iSCSI)
+      .. code-block:: default
+
+        Version History:
+          1.0.0:
+                Initial driver (Only iSCSI).
+          1.2.001:
+                Add supports for Thin Provisioning, SSD Cache, Deduplication
+                , Compression and CHAP.
+          1.2.002:
+                Add support for QES fw 2.0.0.
+
     """
 
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "QNAP_CI"
 
-    # TODO(smcginnis) Either remove this if CI requirement are met, or
-    # remove this driver in the Queens release per normal deprecation
-    SUPPORTED = False
-
-    VERSION = '1.0.0'
+    VERSION = '1.2.002'
 
     TIME_INTERVAL = 3
 
@@ -81,6 +89,13 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         self.api_executor = None
         self.group_stats = {}
         self.configuration.append_config_values(qnap_opts)
+        self.cache_time = 0
+        self.initiator = ''
+        self.iscsi_port = ''
+        self.target_index = ''
+        self.target_iqn = ''
+        self.target_iqns = []
+        self.nasInfoCache = {}
 
     def _check_config(self):
         """Ensure that the flags we care about are set."""
@@ -93,8 +108,24 @@ class QnapISCSIDriver(san.SanISCSIDriver):
 
         for attr in required_config:
             if not getattr(self.configuration, attr, None):
-                raise exception.InvalidConfigurationValue(
+                raise exception.InvalidInput(
                     reason=_('%s is not set.') % attr)
+
+        if not self.configuration.use_chap_auth:
+            self.configuration.chap_username = ''
+            self.configuration.chap_password = ''
+        else:
+            if not str.isalnum(self.configuration.chap_username):
+                # invalid chap_username
+                LOG.error('Username must be single-byte alphabet or number.')
+                raise exception.InvalidInput(
+                    reason=_('Username must be single-byte '
+                             'alphabet or number.'))
+            if not 12 <= len(self.configuration.chap_password) <= 16:
+                # invalid chap_password
+                LOG.error('Password must contain 12-16 characters.')
+                raise exception.InvalidInput(
+                    reason=_('Password must contain 12-16 characters.'))
 
     def do_setup(self, context):
         """Setup the QNAP Cinder volume driver."""
@@ -104,7 +135,7 @@ class QnapISCSIDriver(san.SanISCSIDriver):
 
         # Setup API Executor
         try:
-            self.api_executor = self.creat_api_executor()
+            self.api_executor = self.create_api_executor()
         except Exception:
             LOG.error('Failed to create HTTP client. '
                       'Check ip, port, username, password'
@@ -116,7 +147,7 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         """Check the status of setup."""
         pass
 
-    def creat_api_executor(self):
+    def create_api_executor(self):
         """Create api executor by nas model."""
         self.api_executor = QnapAPIExecutor(
             username=self.configuration.san_login,
@@ -126,6 +157,10 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         nas_model_name, internal_model_name, fw_version = (
             self.api_executor.get_basic_info(
                 self.configuration.qnap_management_url))
+
+        if (self.configuration.qnap_management_url not in self.nasInfoCache):
+            self.nasInfoCache[self.configuration.qnap_management_url] = (
+                nas_model_name, internal_model_name, fw_version)
 
         pattern = re.compile(r"^([A-Z]+)-?[A-Z]{0,2}(\d+)\d{2}(U|[a-z]*)")
         matches = pattern.match(nas_model_name)
@@ -143,9 +178,9 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         es_model_types = [
             "ES"
         ]
-
+        LOG.debug('fw_version: %s', fw_version)
         if model_type in ts_model_types:
-            if (fw_version.startswith("4.2") or fw_version.startswith("4.3")):
+            if (fw_version >= "4.2") and (fw_version <= "4.4"):
                 LOG.debug('Create TS API Executor')
                 # modify the pool name to pool index
                 self.configuration.qnap_poolname = (
@@ -158,8 +193,7 @@ class QnapISCSIDriver(san.SanISCSIDriver):
                     management_url=self.configuration.qnap_management_url))
         elif model_type in tes_model_types:
             if 'TS' in internal_model_name:
-                if (fw_version.startswith("4.2") or
-                        fw_version.startswith("4.3")):
+                if (fw_version >= "4.2") and (fw_version <= "4.4"):
                     LOG.debug('Create TS API Executor')
                     # modify the pool name to poole index
                     self.configuration.qnap_poolname = (
@@ -169,17 +203,14 @@ class QnapISCSIDriver(san.SanISCSIDriver):
                         username=self.configuration.san_login,
                         password=self.configuration.san_password,
                         management_url=self.configuration.qnap_management_url))
-
-            if (fw_version.startswith("1.1.2") or
-                    fw_version.startswith("1.1.3")):
+            elif "1.1.2" <= fw_version <= "2.0.9999":
                 LOG.debug('Create TES API Executor')
                 return (QnapAPIExecutorTES(
                     username=self.configuration.san_login,
                     password=self.configuration.san_password,
                     management_url=self.configuration.qnap_management_url))
         elif model_type in es_model_types:
-            if (fw_version.startswith("1.1.2") or
-                    fw_version.startswith("1.1.3")):
+            if "1.1.2" <= fw_version <= "2.0.9999":
                 LOG.debug('Create ES API Executor')
                 return (QnapAPIExecutor(
                     username=self.configuration.san_login,
@@ -193,8 +224,6 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         """Modify the pool name to poole index."""
         pattern = re.compile(r"^(\d+)+|^Storage Pool (\d+)+")
         matches = pattern.match(pool_name)
-        LOG.debug('matches.group(1): %s', matches.group(1))
-        LOG.debug('matches.group(2): %s', matches.group(2))
         if matches.group(1):
             return matches.group(1)
         else:
@@ -216,7 +245,7 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         create_lun_name = ''
         while True:
             create_lun_name = self._gen_random_name()
-            # If lunname with the name exists, need to change to
+            # If lun name with the name exists, need to change to
             # a different name
             created_lun = self.api_executor.get_lun_info(
                 LUNName=create_lun_name)
@@ -224,22 +253,73 @@ class QnapISCSIDriver(san.SanISCSIDriver):
                 break
         return create_lun_name
 
+    def _parse_boolean_extra_spec(self, extra_spec_value):
+        """Parse boolean value from extra spec.
+
+        Parse extra spec values of the form '<is> True' , '<is> False',
+        'True' and 'False'.
+        """
+
+        if not isinstance(extra_spec_value, six.string_types):
+            extra_spec_value = six.text_type(extra_spec_value)
+
+        match = re.match(r'^<is>\s*(?P<value>True|False)$',
+                         extra_spec_value.strip(),
+                         re.IGNORECASE)
+        if match:
+            extra_spec_value = match.group('value')
+        return strutils.bool_from_string(extra_spec_value, strict=True)
+
     def create_volume(self, volume):
         """Create a new volume."""
         start_time = time.time()
         LOG.debug('in create_volume')
         LOG.debug('volume: %s', volume.__dict__)
-        reserve = self.configuration.san_thin_provision
+        try:
+            extra_specs = volume["volume_type"]["extra_specs"]
+            LOG.debug('extra_spec: %s', extra_specs)
+            qnap_thin_provision = self._parse_boolean_extra_spec(
+                extra_specs.get('qnap_thin_provision', 'true'))
+            qnap_compression = self._parse_boolean_extra_spec(
+                extra_specs.get('qnap_compression', 'true'))
+            qnap_deduplication = self._parse_boolean_extra_spec(
+                extra_specs.get('qnap_deduplication', 'false'))
+            qnap_ssd_cache = self._parse_boolean_extra_spec(
+                extra_specs.get('qnap_ssd_cache', 'false'))
+        except TypeError:
+            LOG.debug('Unable to retrieve extra specs info. '
+                      'Use default extra spec.')
+            qnap_thin_provision = True
+            qnap_compression = True
+            qnap_deduplication = False
+            qnap_ssd_cache = False
+
+        LOG.debug('qnap_thin_provision: %(qnap_thin_provision)s '
+                  'qnap_compression: %(qnap_compression)s '
+                  'qnap_deduplication: %(qnap_deduplication)s '
+                  'qnap_ssd_cache: %(qnap_ssd_cache)s',
+                  {'qnap_thin_provision': qnap_thin_provision,
+                   'qnap_compression': qnap_compression,
+                   'qnap_deduplication': qnap_deduplication,
+                   'qnap_ssd_cache': qnap_ssd_cache})
+
+        if (qnap_deduplication and not qnap_thin_provision):
+            LOG.debug('Dedupe cannot be enabled without thin_provisioning.')
+            raise exception.VolumeBackendAPIException(
+                data=_('Dedupe cannot be enabled without thin_provisioning.'))
 
         # User could create two volume with the same name on horizon.
-        # Therefore, We should not use displayname to create lun on nas.
+        # Therefore, We should not use display name to create lun on nas.
         create_lun_name = self._gen_lun_name()
 
         create_lun_index = self.api_executor.create_lun(
             volume,
             self.configuration.qnap_poolname,
             create_lun_name,
-            reserve)
+            qnap_thin_provision,
+            qnap_ssd_cache,
+            qnap_compression,
+            qnap_deduplication)
 
         max_wait_sec = 600
         try_times = 0
@@ -257,14 +337,20 @@ class QnapISCSIDriver(san.SanISCSIDriver):
 
         LOG.debug('LUNNAA: %s', lun_naa)
         _metadata = self._get_volume_metadata(volume)
+
+        _metadata['LUNIndex'] = create_lun_index
         _metadata['LUNNAA'] = lun_naa
         _metadata['LunName'] = create_lun_name
 
         elapsed_time = time.time() - start_time
         LOG.debug('create_volume elapsed_time: %s', elapsed_time)
 
+        LOG.debug('create_volume volid: %(volid)s, metadata: %(meta)s',
+                  {'volid': volume['id'], 'meta': _metadata})
+
         return {'metadata': _metadata}
 
+    @lockutils.synchronized('delete_volume', 'cinder-', True)
     def delete_volume(self, volume):
         """Delete the specified volume."""
         start_time = time.time()
@@ -274,13 +360,38 @@ class QnapISCSIDriver(san.SanISCSIDriver):
             LOG.debug('Volume %s does not exist.', volume.id)
             return
 
-        del_lun = self.api_executor.get_lun_info(LUNNAA=lun_naa)
+        lun_index = ''
+        for metadata in volume['volume_metadata']:
+            if metadata['key'] == 'LUNIndex':
+                lun_index = metadata['value']
+                break
+        LOG.debug('LUNIndex: %s', lun_index)
+
+        internal_model_name = (self.nasInfoCache
+                               [self.configuration.qnap_management_url][1])
+        LOG.debug('internal_model_name: %s', internal_model_name)
+        fw_version = self.nasInfoCache[self.configuration
+                                           .qnap_management_url][2]
+        LOG.debug('fw_version: %s', fw_version)
+
+        if 'TS' in internal_model_name.upper():
+            LOG.debug('in TS FW: get_one_lun_info')
+            ret = self.api_executor.get_one_lun_info(lun_index)
+            del_lun = ET.fromstring(ret['data']).find('LUNInfo').find('row')
+        elif 'ES' in internal_model_name.upper():
+            if fw_version >= "1.1.2" and fw_version <= "1.1.3":
+                LOG.debug('in ES FW before 1.1.2/1.1.3: get_lun_info')
+                del_lun = self.api_executor.get_lun_info(
+                    LUNIndex=lun_index)
+            elif "1.1.4" <= fw_version <= "2.0.9999":
+                LOG.debug('in ES FW after 1.1.4: get_one_lun_info')
+                ret = self.api_executor.get_one_lun_info(lun_index)
+                del_lun = (ET.fromstring(ret['data']).find('LUNInfo')
+                           .find('row'))
+
         if del_lun is None:
             LOG.debug('Volume %s does not exist.', lun_naa)
             return
-
-        lun_index = del_lun.find('LUNIndex').text
-        LOG.debug('LUNIndex: %s', lun_index)
 
         # if lun is mapping at target, the delete action will fail
         if del_lun.find('LUNStatus').text == '2':
@@ -290,10 +401,10 @@ class QnapISCSIDriver(san.SanISCSIDriver):
             self.api_executor.disable_lun(lun_index, target_index)
             self.api_executor.unmap_lun(lun_index, target_index)
 
-        is_lun_busy = False
+        retry_delete = False
         while True:
-            is_lun_busy = self.api_executor.delete_lun(lun_index)
-            if not is_lun_busy:
+            retry_delete = self.api_executor.delete_lun(lun_index)
+            if not retry_delete:
                 break
 
         elapsed_time = time.time() - start_time
@@ -341,7 +452,7 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         while True:
             # If snapshot with the name exists, need to change to
             # a different name
-            create_snapshot_name = self._gen_random_name()
+            create_snapshot_name = 'Q%d' % int(time.time())
             snapshot = self.api_executor.get_snapshot_info(
                 lun_index=lun_index, snapshot_name=create_snapshot_name)
             if snapshot is None:
@@ -388,11 +499,14 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         max_wait_sec = 600
         try_times = 0
         lun_naa = ""
+        lun_index = ""
         while True:
             created_lun = self.api_executor.get_lun_info(
                 LUNName=cloned_lun_name)
             if created_lun.find('LUNNAA') is not None:
                 lun_naa = created_lun.find('LUNNAA').text
+                lun_index = created_lun.find('LUNIndex').text
+                LOG.debug('LUNIndex: %s', lun_index)
 
             try_times = try_times + 3
             eventlet.sleep(self.TIME_INTERVAL)
@@ -402,8 +516,17 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         LOG.debug('LUNNAA: %s', lun_naa)
         if (volume['size'] > src_vref['size']):
             self._extend_lun(volume, lun_naa)
+        internal_model_name = (self.nasInfoCache
+                               [self.configuration.qnap_management_url][1])
 
+        if 'TS' in internal_model_name.upper():
+            LOG.debug('in TS FW: delete_snapshot_api')
+            self.api_executor.delete_snapshot_api(snapshot_id)
+        elif 'ES' in internal_model_name.upper():
+            LOG.debug('in ES FW: do nothing')
+            pass
         _metadata = self._get_volume_metadata(volume)
+        _metadata['LUNIndex'] = lun_index
         _metadata['LUNNAA'] = lun_naa
         _metadata['LunName'] = cloned_lun_name
         return {'metadata': _metadata}
@@ -461,7 +584,7 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         LOG.debug('snapshot_id: %s', snap_metadata['snapshot_id'])
         snapshot_id = snap_metadata['snapshot_id']
 
-        self.api_executor.api_delete_snapshot(snapshot_id)
+        self.api_executor.delete_snapshot_api(snapshot_id)
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create a volume from a snapshot."""
@@ -487,11 +610,14 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         max_wait_sec = 600
         try_times = 0
         lun_naa = ""
+        lun_index = ""
         while True:
             created_lun = self.api_executor.get_lun_info(
                 LUNName=create_lun_name)
             if created_lun.find('LUNNAA') is not None:
                 lun_naa = created_lun.find('LUNNAA').text
+                lun_index = created_lun.find('LUNIndex').text
+                LOG.debug('LUNIndex: %s', lun_index)
 
             try_times = try_times + 3
             eventlet.sleep(self.TIME_INTERVAL)
@@ -502,13 +628,14 @@ class QnapISCSIDriver(san.SanISCSIDriver):
             self._extend_lun(volume, lun_naa)
 
         _metadata = self._get_volume_metadata(volume)
+        _metadata['LUNIndex'] = lun_index
         _metadata['LUNNAA'] = lun_naa
         _metadata['LunName'] = create_lun_name
         return {'metadata': _metadata}
 
     def get_volume_stats(self, refresh=False):
         """Get volume stats. This is more of getting group stats."""
-        LOG.debug('in get_volume_stats')
+        LOG.debug('in get_volume_stats refresh: %s', refresh)
 
         if refresh:
             backend_name = (self.configuration.safe_get(
@@ -538,10 +665,14 @@ class QnapISCSIDriver(san.SanISCSIDriver):
                 free_capacity_gb=freesize_bytes / units.Gi,
                 provisioned_capacity_gb=provisioned_bytes / units.Gi,
                 reserved_percentage=self.configuration.reserved_percentage,
-                QoS_support=False)
+                QoS_support=False,
+                qnap_thin_provision=["True", "False"],
+                qnap_compression=["True", "False"],
+                qnap_deduplication=["True", "False"],
+                qnap_ssd_cache=["True", "False"])
             self.group_stats['pools'] = [single_pool]
 
-            return self.group_stats
+        return self.group_stats
 
     def extend_volume(self, volume, new_size):
         """Extend an existing volume."""
@@ -552,15 +683,12 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         volume['size'] = new_size
         self._extend_lun(volume, '')
 
-    def initialize_connection(self, volume, connector):
-        """Create a target with initiator iqn to attach a volume."""
-        start_time = time.time()
-        LOG.debug('in initialize_connection')
-        LOG.debug('volume: %s', volume.__dict__)
-        LOG.debug('connector: %s', connector)
-
-        lun_status = self.enum('createing', 'unmapped', 'mapped')
-
+    def _get_portal_info(self, volume, connector, lun_slot_id, lun_owner):
+        """Get portal info."""
+        # Cache portal info for twenty seconds
+        # If connectors were the same then use the portal info which was cached
+        LOG.debug('get into _get_portal_info')
+        self.initiator = connector['initiator']
         ret = self.api_executor.get_iscsi_portal_info()
         root = ET.fromstring(ret['data'])
         iscsi_port = root.find('iSCSIPortal').find('servicePort').text
@@ -568,9 +696,96 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         target_iqn_prefix = root.find(
             'iSCSIPortal').find('targetIQNPrefix').text
         LOG.debug('targetIQNPrefix: %s', target_iqn_prefix)
-        target_iqn_postfix = (root.find('iSCSIPortal').
-                              find('targetIQNPostfix').text)
-        LOG.debug('target_iqn_postfix: %s', target_iqn_postfix)
+
+        internal_model_name = (self.nasInfoCache
+                               [self.configuration.qnap_management_url][1])
+        LOG.debug('internal_model_name: %s', internal_model_name)
+        fw_version = (self.nasInfoCache
+                      [self.configuration.qnap_management_url][2])
+        LOG.debug('fw_version: %s', fw_version)
+
+        target_index = ''
+        target_iqn = ''
+
+        # create a new target if no target has ACL connector['initiator']
+        LOG.debug('exist target_index: %s', target_index)
+        if not target_index:
+            target_name = self._gen_random_name()
+            LOG.debug('target_name: %s', target_name)
+            target_index = self.api_executor.create_target(
+                target_name, lun_owner)
+            LOG.debug('targetIndex: %s', target_index)
+
+            retryCount = 0
+            retrySleepTime = 2
+            while retryCount <= 5:
+                target_info = self.api_executor.get_target_info(target_index)
+                if target_info.find('targetIQN').text is not None:
+                    break
+                eventlet.sleep(retrySleepTime)
+                retrySleepTime = retrySleepTime + 2
+                retryCount = retryCount + 1
+
+            target_iqn = target_info.find('targetIQN').text
+            LOG.debug('target_iqn: %s', target_iqn)
+
+            # TS NAS have to remove default ACL
+            default_acl = (
+                target_iqn_prefix[:target_iqn_prefix.find(":") + 1])
+            default_acl = default_acl + "all:iscsi.default.ffffff"
+            LOG.debug('default_acl: %s', default_acl)
+            self.api_executor.remove_target_init(target_iqn, default_acl)
+            # add ACL
+            self.api_executor.add_target_init(
+                target_iqn, connector['initiator'],
+                self.configuration.use_chap_auth,
+                self.configuration.chap_username,
+                self.configuration.chap_password)
+
+        # Get information for multipath
+        target_iqns = []
+        slotid_list = []
+        eth_list, slotid_list = Util.retriveFormCache(
+            self.configuration.qnap_management_url,
+            lambda: self.api_executor.get_ethernet_ip(type='data'),
+            30)
+
+        LOG.debug('slotid_list: %s', slotid_list)
+        target_portals = []
+        target_portals.append(
+            self.configuration.target_ip_address + ':' + iscsi_port)
+        # target_iqns.append(target_iqn)
+        for index, eth in enumerate(eth_list):
+            # TS NAS do not have slot_id
+            if not slotid_list:
+                target_iqns.append(target_iqn)
+            else:
+                # To support ALUA, target portal and target inq should
+                # be consistent.
+                # EX: 10.77.230.31:3260 at controller B and it should map
+                # to the target at controller B
+                target_iqns.append(
+                    target_iqn[:-2] + '.' + slotid_list[index])
+
+            if eth == self.configuration.target_ip_address:
+                continue
+            target_portals.append(eth + ':' + iscsi_port)
+
+        self.iscsi_port = iscsi_port
+        self.target_index = target_index
+        self.target_iqn = target_iqn
+        self.target_iqns = target_iqns
+        self.target_portals = target_portals
+
+        return (iscsi_port, target_index, target_iqn,
+                target_iqns, target_portals)
+
+    @lockutils.synchronized('create_export', 'cinder-', True)
+    def create_export(self, context, volume, connector):
+        start_time = time.time()
+        LOG.debug('in create_export')
+        LOG.debug('volume: %s', volume.__dict__)
+        LOG.debug('connector: %s', connector)
 
         lun_naa = self._get_lun_naa_from_volume_metadata(volume)
         if lun_naa == '':
@@ -581,9 +796,33 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         LOG.debug('volume[name]: %s', volume['name'])
         LOG.debug('volume[display_name]: %s', volume['display_name'])
 
-        selected_lun = self.api_executor.get_lun_info(LUNNAA=lun_naa)
-        lun_index = selected_lun.find('LUNIndex').text
+        lun_index = ''
+        for metadata in volume['volume_metadata']:
+            if metadata['key'] == 'LUNIndex':
+                lun_index = metadata['value']
+                break
         LOG.debug('LUNIndex: %s', lun_index)
+        internal_model_name = (self.nasInfoCache
+                               [self.configuration.qnap_management_url][1])
+        LOG.debug('internal_model_name: %s', internal_model_name)
+        fw_version = self.nasInfoCache[self.configuration
+                                           .qnap_management_url][2]
+        LOG.debug('fw_version: %s', fw_version)
+        if 'TS' in internal_model_name.upper():
+            LOG.debug('in TS FW: get_one_lun_info')
+            ret = self.api_executor.get_one_lun_info(lun_index)
+            selected_lun = (ET.fromstring(ret['data']).find('LUNInfo')
+                            .find('row'))
+        elif 'ES' in internal_model_name.upper():
+            if fw_version >= "1.1.2" and fw_version <= "1.1.3":
+                LOG.debug('in ES FW before 1.1.2/1.1.3: get_lun_info')
+                selected_lun = self.api_executor.get_lun_info(
+                    LUNNAA=lun_naa)
+            elif "1.1.4" <= fw_version <= "2.0.9999":
+                LOG.debug('in ES FW after 1.1.4: get_one_lun_info')
+                ret = self.api_executor.get_one_lun_info(lun_index)
+                selected_lun = (ET.fromstring(ret['data']).find('LUNInfo')
+                                .find('row'))
 
         lun_owner = ''
         lun_slot_id = ''
@@ -593,109 +832,145 @@ class QnapISCSIDriver(san.SanISCSIDriver):
             lun_slot_id = '0' if (lun_owner == 'SCA') else '1'
             LOG.debug('lun_slot_id: %s', lun_slot_id)
 
-        ret = self.api_executor.get_all_iscsi_portal_setting()
-        root = ET.fromstring(ret['data'])
+        # LOG.debug('self.initiator: %s', self.initiator)
+        LOG.debug('connector: %s', connector['initiator'])
 
-        target_index = ''
-        target_iqn = ''
+        iscsi_port, target_index, target_iqn, target_iqns, target_portals = (
+            self._get_portal_info(volume, connector, lun_slot_id, lun_owner))
 
-        # find the targets have acl with connector['initiator']
-        target_with_initiator_list = []
-        target_acl_tree = root.find('targetACL')
-        target_acl_list = target_acl_tree.findall('row')
-        tmp_target_iqn = ''
-        for targetACL in target_acl_list:
-            tmp_target_iqn = targetACL.find('targetIQN').text
-            # If lun and the targetiqn in different controller,
-            # skip the targetiqn, in case lun in sca map to target of scb
-            LOG.debug('lun_slot_id: %s', lun_slot_id)
-            LOG.debug('tmp_target_iqn[-1]: %s', tmp_target_iqn[-1])
-            if (lun_slot_id != ''):
-                if (lun_slot_id != tmp_target_iqn[-1]):
-                    LOG.debug('skip the targetiqn')
-                    continue
+        self.api_executor.map_lun(lun_index, target_index)
 
-            target_init_info_list = targetACL.findall('targetInitInfo')
-            for targetInitInfo in target_init_info_list:
-                if(targetInitInfo.find('initiatorIQN').text ==
-                   connector['initiator']):
-                    target_with_initiator_list.append(
-                        targetACL.find('targetIndex').text)
+        max_wait_sec = 600
+        try_times = 0
+        LUNNumber = ""
+        target_lun_id = -999
+        while True:
+            if 'TS' in internal_model_name.upper():
+                LOG.debug('in TS FW: get_one_lun_info')
+                ret = self.api_executor.get_one_lun_info(lun_index)
+                root = ET.fromstring(ret['data'])
+                target_lun_id = int(root.find('LUNInfo').find('row')
+                                    .find('LUNTargetList').find('row')
+                                    .find('LUNNumber').text)
 
-        # find the target in target_with_initiator_list with ready status
-        target_tree = root.find('iSCSITargetList')
-        target_list = target_tree.findall('targetInfo')
-        for target_with_initiator in target_with_initiator_list:
-            for target in target_list:
-                if(target_with_initiator == target.find('targetIndex').text):
-                    if int(target.find('targetStatus').text) >= 0:
-                        target_index = target_with_initiator
-                        target_iqn = target.find('targetIQN').text
+                try_times = try_times + 3
+                eventlet.sleep(self.TIME_INTERVAL)
+                if(try_times > max_wait_sec or target_lun_id != -999):
+                    break
 
-        # create a new target if no target has ACL connector['initiator']
-        LOG.debug('exist target_index: %s', target_index)
-        if not target_index:
-            target_name = self._gen_random_name()
-            LOG.debug('target_name: %s', target_name)
-            target_index = self.api_executor.create_target(
-                target_name, lun_owner)
-            LOG.debug('targetIndex: %s', target_index)
-            target_info = self.api_executor.get_target_info(target_index)
-            target_iqn = target_info.find('targetIQN').text
-            LOG.debug('target_iqn: %s', target_iqn)
+            elif 'ES' in internal_model_name.upper():
+                if fw_version >= "1.1.2" and fw_version <= "1.1.3":
+                    LOG.debug('in ES FW before 1.1.2/1.1.3: get_lun_info')
+                    root = self.api_executor.get_lun_info(LUNNAA=lun_naa)
+                    if len(list(root.find('LUNTargetList'))) != 0:
+                        LUNNumber = root.find('LUNTargetList').find(
+                            'row').find('LUNNumber').text
+                    target_lun_id = int(LUNNumber)
 
-            # TS NAS have to remove default ACL
-            default_acl = target_iqn_prefix[:target_iqn_prefix.find(":") + 1]
-            default_acl = default_acl + "all:iscsi.default.ffffff"
-            LOG.debug('default_acl: %s', default_acl)
-            self.api_executor.remove_target_init(target_iqn, default_acl)
-            # add ACL
-            self.api_executor.add_target_init(
-                target_iqn, connector['initiator'])
+                    try_times = try_times + 3
+                    eventlet.sleep(self.TIME_INTERVAL)
+                    if(try_times > max_wait_sec or LUNNumber != ""):
+                        break
+                elif "1.1.4" <= fw_version <= "2.0.9999":
+                    LOG.debug('in ES FW after 1.1.4: get_one_lun_info')
+                    ret = self.api_executor.get_one_lun_info(lun_index)
+                    root = ET.fromstring(ret['data'])
+                    target_lun_id = int(root.find('LUNInfo')
+                                        .find('row').find('LUNTargetList')
+                                        .find('row').find('LUNNumber').text)
 
-        LOG.debug('LUNStatus: %s', selected_lun.find('LUNStatus').text)
-        # lun does not map to any target
-        if selected_lun.find('LUNStatus').text == str(lun_status.unmapped):
-            self.api_executor.map_lun(lun_index, target_index)
+                    try_times = try_times + 3
+                    eventlet.sleep(self.TIME_INTERVAL)
+                    if(try_times > max_wait_sec or target_lun_id != -999):
+                        break
+                else:
+                    break
+            else:
+                break
 
         properties = {}
-        properties['target_discovered'] = True
-        properties['target_portal'] = (self.configuration.iscsi_ip_address +
+        properties['target_discovered'] = False
+        properties['target_portal'] = (self.configuration.target_ip_address +
                                        ':' + iscsi_port)
-
         properties['target_iqn'] = target_iqn
         LOG.debug('properties[target_iqn]: %s', properties['target_iqn'])
-        lun_naa = self._get_lun_naa_from_volume_metadata(volume)
-        LOG.debug('LUNNAA: %s', lun_naa)
-        # LUNNumber of lun will be updated after map lun to target, so here
-        # get lnu info again
-        mapped_lun = self.api_executor.get_lun_info(LUNNAA=lun_naa)
-        target_lun_id = int(mapped_lun.find('LUNTargetList').find(
-            'row').find('LUNNumber').text)
+
         LOG.debug('target_lun_id: %s', target_lun_id)
         properties['target_lun'] = target_lun_id
         properties['volume_id'] = volume['id']  # used by xen currently
 
-        """Below are settings for multipath"""
-        target_iqns = []
-        eth_list = self.api_executor.get_ethernet_ip(type='data')
-        target_portals = []
-        target_portals.append(
-            self.configuration.iscsi_ip_address + ':' + iscsi_port)
-        target_iqns.append(target_iqn)
-        for eth in eth_list:
-            if eth == self.configuration.iscsi_ip_address:
-                continue
-            target_portals.append(eth + ':' + iscsi_port)
-            target_iqns.append(target_iqn)
+        multipath = connector.get('multipath', False)
+        if multipath:
+            """Below are settings for multipath"""
+            properties['target_portals'] = target_portals
+            properties['target_iqns'] = target_iqns
+            properties['target_luns'] = (
+                [target_lun_id] * len(target_portals))
+            LOG.debug('properties: %s', properties)
 
-        properties['target_portals'] = target_portals
-        properties['target_iqns'] = target_iqns
-        properties['target_luns'] = [target_lun_id] * len(target_portals)
-        LOG.debug('properties: %s', properties)
+        provider_location = '%(host)s:%(port)s,1 %(name)s %(tgt_lun)s' % {
+            'host': self.configuration.target_ip_address,
+            'port': iscsi_port,
+            'name': target_iqn,
+            'tgt_lun': target_lun_id,
+        }
+
+        if self.configuration.use_chap_auth:
+            provider_auth = 'CHAP %s %s' % (self.configuration.chap_username,
+                                            self.configuration.chap_password)
+        else:
+            provider_auth = None
+
+        elapsed_time = time.time() - start_time
+        LOG.debug('create_export elapsed_time: %s', elapsed_time)
+
+        LOG.debug('create_export volid: %(volid)s, provider_location: %(loc)s',
+                  {'volid': volume['id'], 'loc': provider_location})
+
+        return (
+            {'provider_location': provider_location,
+             'provider_auth': provider_auth})
+
+    def initialize_connection(self, volume, connector):
+        start_time = time.time()
+        LOG.debug('in initialize_connection')
+
+        if not volume['provider_location']:
+            err = _("Param volume['provider_location'] is invalid.")
+            raise exception.InvalidParameterValue(err=err)
+
+        result = volume['provider_location'].split(' ')
+        if len(result) < 2:
+            raise exception.InvalidInput(reason=volume['provider_location'])
+
+        data = result[0].split(',')
+        if len(data) < 2:
+            raise exception.InvalidInput(reason=volume['provider_location'])
+
+        iqn = result[1]
+        LOG.debug('iqn: %s', iqn)
+        target_lun_id = int(result[2], 10)
+        LOG.debug('target_lun_id: %d', target_lun_id)
+
+        properties = {}
+        properties['target_discovered'] = False
+        properties['target_portal'] = (self.configuration.target_ip_address +
+                                       ':' + self.iscsi_port)
+        properties['target_iqn'] = iqn
+        properties['target_lun'] = target_lun_id
+        properties['volume_id'] = volume['id']  # used by xen currently
+
+        if self.configuration.use_chap_auth:
+            properties['auth_method'] = 'CHAP'
+            properties['auth_username'] = self.configuration.chap_username
+            properties['auth_password'] = self.configuration.chap_password
 
         elapsed_time = time.time() - start_time
         LOG.debug('initialize_connection elapsed_time: %s', elapsed_time)
+
+        LOG.debug('initialize_connection volid:'
+                  ' %(volid)s, properties: %(prop)s',
+                  {'volid': volume['id'], 'prop': properties})
 
         return {
             'driver_volume_type': 'iscsi',
@@ -709,6 +984,7 @@ class QnapISCSIDriver(san.SanISCSIDriver):
 
     def terminate_connection(self, volume, connector, **kwargs):
         """Driver entry point to unattach a volume from an instance."""
+
         start_time = time.time()
         LOG.debug('in terminate_connection')
         LOG.debug('volume: %s', volume.__dict__)
@@ -717,10 +993,35 @@ class QnapISCSIDriver(san.SanISCSIDriver):
         # get lun index
         lun_naa = self._get_lun_naa_from_volume_metadata(volume)
         LOG.debug('lun_naa: %s', lun_naa)
-        selected_lun = self.api_executor.get_lun_info(
-            LUNNAA=lun_naa)
-        lun_index = selected_lun.find('LUNIndex').text
+        lun_index = ''
+        for metadata in volume['volume_metadata']:
+            if metadata['key'] == 'LUNIndex':
+                lun_index = metadata['value']
+                break
         LOG.debug('LUNIndex: %s', lun_index)
+
+        internal_model_name = (self.nasInfoCache
+                               [self.configuration.qnap_management_url][1])
+        LOG.debug('internal_model_name: %s', internal_model_name)
+        fw_version = self.nasInfoCache[self.configuration
+                                           .qnap_management_url][2]
+        LOG.debug('fw_version: %s', fw_version)
+
+        if 'TS' in internal_model_name.upper():
+            LOG.debug('in TS FW: get_one_lun_info')
+            ret = self.api_executor.get_one_lun_info(lun_index)
+            selected_lun = (ET.fromstring(ret['data']).find('LUNInfo')
+                            .find('row'))
+        elif 'ES' in internal_model_name.upper():
+            if fw_version >= "1.1.2" and fw_version <= "1.1.3":
+                LOG.debug('in ES FW before 1.1.2/1.1.3: get_lun_info')
+                selected_lun = self.api_executor.get_lun_info(
+                    LUNIndex=lun_index)
+            elif "1.1.4" <= fw_version <= "2.0.9999":
+                LOG.debug('in ES FW after 1.1.4: get_one_lun_info')
+                ret = self.api_executor.get_one_lun_info(lun_index)
+                selected_lun = (ET.fromstring(ret['data']).find('LUNInfo')
+                                .find('row'))
 
         lun_status = self.enum('createing', 'unmapped', 'mapped')
 
@@ -735,11 +1036,22 @@ class QnapISCSIDriver(san.SanISCSIDriver):
                         .find('row').find('targetIndex').text)
         LOG.debug('target_index: %s', target_index)
 
+        start_time1 = time.time()
         self.api_executor.disable_lun(lun_index, target_index)
+        elapsed_time1 = time.time() - start_time1
+        LOG.debug('terminate_connection disable_lun elapsed_time : %s',
+                  elapsed_time1)
+
+        start_time2 = time.time()
         self.api_executor.unmap_lun(lun_index, target_index)
+        elapsed_time2 = time.time() - start_time2
+        LOG.debug('terminate_connection unmap_lun elapsed_time : %s',
+                  elapsed_time2)
 
         elapsed_time = time.time() - start_time
+
         LOG.debug('terminate_connection elapsed_time : %s', elapsed_time)
+        self.api_executor.delete_target(target_index)
 
     def update_migrated_volume(
             self, context, volume, new_volume, original_volume_status):
@@ -750,12 +1062,24 @@ class QnapISCSIDriver(san.SanISCSIDriver):
 
         _metadata = self._get_volume_metadata(new_volume)
 
-        # metadata will not be swap after migration wiht liberty version
-        # , and the metadata of new volume is diifferent with the metadata
-        #  of original volume. Therefore, we need to update the migrated volume
+        # metadata will not be swap after migration with liberty version
+        # and the metadata of new volume is different with the metadata
+        # of original volume. Therefore, we need to update the migrated volume.
         if not hasattr(new_volume, '_orig_metadata'):
             model_update = {'metadata': _metadata}
             return model_update
+
+    @utils.synchronized('_attach_volume')
+    def _detach_volume(self, context, attach_info, volume, properties,
+                       force=False, remote=False):
+        super(QnapISCSIDriver, self)._detach_volume(context, attach_info,
+                                                    volume, properties,
+                                                    force, remote)
+
+    @utils.synchronized('_attach_volume')
+    def _attach_volume(self, context, volume, properties, remote=False):
+        return super(QnapISCSIDriver, self)._attach_volume(context, volume,
+                                                           properties, remote)
 
 
 def _connection_checker(func):
@@ -771,7 +1095,7 @@ def _connection_checker(func):
                     r".*Session id expired$")
                 matches = pattern.match(six.text_type(e))
                 if matches:
-                    if attempts < 5:
+                    if attempts < 4:
                         LOG.debug('Session might have expired.'
                                   ' Trying to relogin')
                         self._login()
@@ -784,6 +1108,9 @@ def _connection_checker(func):
 
 class QnapAPIExecutor(object):
     """Makes QNAP API calls for ES NAS."""
+    es_create_lun_lock = threading.Lock()
+    es_delete_lun_lock = threading.Lock()
+    es_lun_locks = {}
 
     def __init__(self, *args, **kwargs):
         """Init function."""
@@ -807,7 +1134,6 @@ class QnapAPIExecutor(object):
 
     def get_basic_info(self, management_url):
         """Get the basic information of NAS."""
-        LOG.debug('in get_basic_info')
         management_ip, management_port, management_ssl = (
             self._parse_management_url(management_url))
         connection = None
@@ -827,7 +1153,6 @@ class QnapAPIExecutor(object):
         connection.request('GET', '/cgi-bin/authLogin.cgi')
         response = connection.getresponse()
         data = response.read()
-        LOG.debug('response data: %s', data)
 
         root = ET.fromstring(data)
 
@@ -839,10 +1164,12 @@ class QnapAPIExecutor(object):
 
     def _execute_and_get_response_details(self, nas_ip, url, post_parm=None):
         """Will prepare response after executing an http request."""
-        LOG.debug('port: %(port)s, ssl: %(ssl)s',
-                  {'port': self.port, 'ssl': self.ssl})
+        LOG.debug('_execute_and_get_response_details url: %s', url)
+        LOG.debug('_execute_and_get_response_details post_parm: %s', post_parm)
 
         res_details = {}
+
+        start_time1 = time.time()
 
         # Prepare the connection
         if self.ssl:
@@ -857,6 +1184,11 @@ class QnapAPIExecutor(object):
         else:
             connection = http_client.HTTPConnection(nas_ip, self.port)
 
+        elapsed_time1 = time.time() - start_time1
+        LOG.debug('connection elapsed_time: %s', elapsed_time1)
+
+        start_time2 = time.time()
+
         # Make the connection
         if post_parm is None:
             connection.request('GET', url)
@@ -866,6 +1198,9 @@ class QnapAPIExecutor(object):
                 "charset": "utf-8"}
             connection.request('POST', url, post_parm, headers)
 
+        elapsed_time2 = time.time() - start_time2
+        LOG.debug('request elapsed_time: %s', elapsed_time2)
+
         # Extract the response as the connection was successful
         start_time = time.time()
         response = connection.getresponse()
@@ -873,7 +1208,7 @@ class QnapAPIExecutor(object):
         LOG.debug('cgi elapsed_time: %s', elapsed_time)
         # Read the response
         data = response.read()
-        LOG.debug('response data: %s', data)
+        LOG.debug('response status: %s', response.status)
         # Extract http error msg if any
         error_details = None
         res_details['data'] = data
@@ -885,12 +1220,12 @@ class QnapAPIExecutor(object):
 
     def execute_login(self):
         """Login and return sid."""
-        params = {}
-        params['user'] = self.username
+        params = OrderedDict()
         params['pwd'] = base64.b64encode(self.password.encode("utf-8"))
         params['serviceKey'] = '1'
+        params['user'] = self.username
 
-        sanitized_params = {}
+        sanitized_params = OrderedDict()
 
         for key in params:
             value = params[key]
@@ -903,53 +1238,61 @@ class QnapAPIExecutor(object):
         res_details = self._execute_and_get_response_details(
             self.ip, url, sanitized_params)
         root = ET.fromstring(res_details['data'])
+        LOG.debug('execute_login data: %s', res_details['data'])
         session_id = root.find('authSid').text
+        LOG.debug('execute_login session_id: %s', session_id)
         return session_id
 
     def _login(self):
         """Execute Https Login API."""
         self.sid = self.execute_login()
-        LOG.debug('sid: %s', self.sid)
 
     def _get_res_details(self, url, **kwargs):
-        sanitized_params = {}
+        sanitized_params = OrderedDict()
 
-        for key, value in six.iteritems(kwargs):
-            LOG.debug('%(key)s = %(val)s',
-                      {'key': key, 'val': value})
+        # Sort the dict of parameters
+        params = utils.create_ordereddict(kwargs)
+
+        for key, value in params.items():
             if value is not None:
                 sanitized_params[key] = six.text_type(value)
 
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
-        LOG.debug('sanitized_params: %s', sanitized_params)
-        url = url + sanitized_params
-        LOG.debug('url: %s', url)
+        encoded_params = urllib.parse.urlencode(sanitized_params)
+        url = url + encoded_params
 
         res_details = self._execute_and_get_response_details(self.ip, url)
 
         return res_details
 
     @_connection_checker
-    def create_lun(self, volume, pool_name, create_lun_name, reserve):
+    def create_lun(self, volume, pool_name, create_lun_name, reserve,
+                   ssd_cache, compress, dedup):
         """Create lun."""
+        self.es_create_lun_lock.acquire()
+
         lun_thin_allocate = ''
         if reserve:
             lun_thin_allocate = '1'
         else:
             lun_thin_allocate = '0'
 
-        res_details = self._get_res_details(
-            '/cgi-bin/disk/iscsi_lun_setting.cgi?',
-            func='add_lun',
-            FileIO='no',
-            LUNThinAllocate=lun_thin_allocate,
-            LUNName=create_lun_name,
-            LUNPath=create_lun_name,
-            poolID=pool_name,
-            lv_ifssd='no',
-            LUNCapacity=volume['size'],
-            lv_threshold='80',
-            sid=self.sid)
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_lun_setting.cgi?',
+                func='add_lun',
+                FileIO='no',
+                LUNThinAllocate=lun_thin_allocate,
+                LUNName=create_lun_name,
+                LUNPath=create_lun_name,
+                poolID=pool_name,
+                lv_ifssd='yes' if ssd_cache else 'no',
+                compression='1' if compress else '0',
+                dedup='sha256' if dedup else 'off',
+                LUNCapacity=volume['size'],
+                lv_threshold='80',
+                sid=self.sid)
+        finally:
+            self.es_create_lun_lock.release()
 
         root = ET.fromstring(res_details['data'])
 
@@ -965,14 +1308,19 @@ class QnapAPIExecutor(object):
     @_connection_checker
     def delete_lun(self, vol_id, *args, **kwargs):
         """Execute delete lun API."""
-        LOG.debug('Deleting volume id %s', vol_id)
-        res_details = self._get_res_details(
-            '/cgi-bin/disk/iscsi_lun_setting.cgi?',
-            func='remove_lun',
-            run_background='1',
-            ha_sync='1',
-            LUNIndex=vol_id,
-            sid=self.sid)
+
+        self.es_delete_lun_lock.acquire()
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_lun_setting.cgi?',
+                func='remove_lun',
+                run_background='1',
+                ha_sync='1',
+                LUNIndex=vol_id,
+                sid=self.sid)
+        finally:
+            self.es_delete_lun_lock.release()
 
         data_set_is_busy = "-205041"
         root = ET.fromstring(res_details['data'])
@@ -990,7 +1338,7 @@ class QnapAPIExecutor(object):
 
     @_connection_checker
     def get_specific_poolinfo(self, pool_id):
-        """Execute deleteInitiatorGrp API."""
+        """Execute get specific poolinfo API."""
         res_details = self._get_res_details(
             '/cgi-bin/disk/disk_manage.cgi?',
             store='poolInfo',
@@ -1011,7 +1359,6 @@ class QnapAPIExecutor(object):
         pool_info_tree = pool_list.findall('row')
         for pool in pool_info_tree:
             if pool_id == pool.find('poolID').text:
-                LOG.debug('poolID: %s', pool.find('poolID').text)
                 return pool
 
     @_connection_checker
@@ -1037,23 +1384,38 @@ class QnapAPIExecutor(object):
                 data=_('Create target failed'))
 
         root = ET.fromstring(res_details['data'])
-        target_index = root.find('result').text
-        return target_index
+        targetIndex = root.find('result').text
+        return targetIndex
 
     @_connection_checker
-    def add_target_init(self, target_iqn, init_iqn):
+    def delete_target(self, target_index):
+        """Delete target on nas."""
+        res_details = self._get_res_details(
+            '/cgi-bin/disk/iscsi_target_setting.cgi?',
+            func='remove_target',
+            targetIndex=target_index,
+            sid=self.sid)
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text != '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Delete target failed'))
+
+    @_connection_checker
+    def add_target_init(self, target_iqn, init_iqn, use_chap_auth,
+                        chap_username, chap_password):
         """Add target acl."""
-        LOG.debug('targetIqn = %(tgt)s, initIqn = %(init)s',
-                  {'tgt': target_iqn, 'init': init_iqn})
         res_details = self._get_res_details(
             '/cgi-bin/disk/iscsi_target_setting.cgi?',
             func='add_init',
             targetIQN=target_iqn,
             initiatorIQN=init_iqn,
             initiatorAlias=init_iqn,
-            bCHAPEnable='0',
-            CHAPUserName='',
-            CHAPPasswd='',
+            bCHAPEnable='1' if use_chap_auth else '0',
+            CHAPUserName=chap_username,
+            CHAPPasswd=chap_password,
             bMutualCHAPEnable='0',
             mutualCHAPUserName='',
             mutualCHAPPasswd='',
@@ -1075,14 +1437,16 @@ class QnapAPIExecutor(object):
     @_connection_checker
     def map_lun(self, lun_index, target_index):
         """Map lun to sepecific target."""
-        LOG.debug('LUNIndex: %(lun)s, targetIndex: %(tgt)s',
-                  {'lun': lun_index, 'tgt': target_index})
-        res_details = self._get_res_details(
-            '/cgi-bin/disk/iscsi_target_setting.cgi?',
-            func='add_lun',
-            LUNIndex=lun_index,
-            targetIndex=target_index,
-            sid=self.sid)
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_target_setting.cgi?',
+                func='add_lun',
+                LUNIndex=lun_index,
+                targetIndex=target_index,
+                sid=self.sid)
+        finally:
+            pass
 
         root = ET.fromstring(res_details['data'])
         if root.find('authPassed').text == '0':
@@ -1097,13 +1461,17 @@ class QnapAPIExecutor(object):
     @_connection_checker
     def disable_lun(self, lun_index, target_index):
         """Disable lun from sepecific target."""
-        res_details = self._get_res_details(
-            '/cgi-bin/disk/iscsi_target_setting.cgi?',
-            func='edit_lun',
-            LUNIndex=lun_index,
-            targetIndex=target_index,
-            LUNEnable=0,
-            sid=self.sid)
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_target_setting.cgi?',
+                func='edit_lun',
+                LUNIndex=lun_index,
+                targetIndex=target_index,
+                LUNEnable=0,
+                sid=self.sid)
+        finally:
+            pass
 
         root = ET.fromstring(res_details['data'])
         if root.find('authPassed').text == '0':
@@ -1116,13 +1484,17 @@ class QnapAPIExecutor(object):
 
     @_connection_checker
     def unmap_lun(self, lun_index, target_index):
-        """Unmap lun to sepecific target."""
-        res_details = self._get_res_details(
-            '/cgi-bin/disk/iscsi_target_setting.cgi?',
-            func='remove_lun',
-            LUNIndex=lun_index,
-            targetIndex=target_index,
-            sid=self.sid)
+        """Unmap lun from sepecific target."""
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_target_setting.cgi?',
+                func='remove_lun',
+                LUNIndex=lun_index,
+                targetIndex=target_index,
+                sid=self.sid)
+        finally:
+            pass
 
         root = ET.fromstring(res_details['data'])
         if root.find('authPassed').text == '0':
@@ -1152,9 +1524,6 @@ class QnapAPIExecutor(object):
     @_connection_checker
     def get_lun_info(self, **kwargs):
         """Execute get_lun_info API."""
-        for key, value in six.iteritems(kwargs):
-            LOG.debug('%(key)s = %(val)s',
-                      {'key': key, 'val': value})
         res_details = self._get_res_details(
             '/cgi-bin/disk/iscsi_portal_setting.cgi?',
             func='extra_get',
@@ -1167,33 +1536,43 @@ class QnapAPIExecutor(object):
                 data=_('Session id expired'))
 
         if (('LUNIndex' in kwargs) or ('LUNName' in kwargs) or
-           ('LUNNAA' in kwargs)):
+                ('LUNNAA' in kwargs)):
 
             lun_list = root.find('iSCSILUNList')
             lun_info_tree = lun_list.findall('LUNInfo')
             for lun in lun_info_tree:
                 if ('LUNIndex' in kwargs):
                     if (kwargs['LUNIndex'] == lun.find('LUNIndex').text):
-                        LOG.debug('LUNIndex:%s',
-                                  lun.find('LUNIndex').text)
                         return lun
                 elif ('LUNName' in kwargs):
                     if (kwargs['LUNName'] == lun.find('LUNName').text):
-                        LOG.debug('LUNName:%s', lun.find('LUNName').text)
                         return lun
                 elif ('LUNNAA' in kwargs):
                     if (kwargs['LUNNAA'] == lun.find('LUNNAA').text):
-                        LOG.debug('LUNNAA:%s', lun.find('LUNNAA').text)
                         return lun
 
         return None
 
     @_connection_checker
+    def get_one_lun_info(self, lunID):
+        """Execute get_one_lun_info API."""
+        res_details = self._get_res_details(
+            '/cgi-bin/disk/iscsi_portal_setting.cgi?',
+            func='extra_get',
+            lun_info='1',
+            lunID=lunID,
+            sid=self.sid)
+
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        else:
+            return res_details
+
+    @_connection_checker
     def get_snapshot_info(self, **kwargs):
         """Execute get_snapshot_info API."""
-        for key, value in six.iteritems(kwargs):
-            LOG.debug('%(key)s = %(val)s',
-                      {'key': key, 'val': value})
         res_details = self._get_res_details(
             '/cgi-bin/disk/snapshot.cgi?',
             func='extra_get',
@@ -1218,14 +1597,13 @@ class QnapAPIExecutor(object):
         for snapshot in snapshot_tree:
             if (kwargs['snapshot_name'] ==
                     snapshot.find('snapshot_name').text):
-                LOG.debug('snapshot_name:%s', kwargs['snapshot_name'])
                 return snapshot
 
         return None
 
     @_connection_checker
     def create_snapshot_api(self, lun_id, snapshot_name):
-        """Execute CGI to create snapshot from source lun NAA."""
+        """Execute CGI to create snapshot from source lun."""
         res_details = self._get_res_details(
             '/cgi-bin/disk/snapshot.cgi?',
             func='create_snapshot',
@@ -1245,8 +1623,8 @@ class QnapAPIExecutor(object):
                 data=_('create snapshot failed'))
 
     @_connection_checker
-    def api_delete_snapshot(self, snapshot_id):
-        """Execute CGI to delete snapshot from source lun NAA."""
+    def delete_snapshot_api(self, snapshot_id):
+        """Execute CGI to delete snapshot by snapshot id."""
         res_details = self._get_res_details(
             '/cgi-bin/disk/snapshot.cgi?',
             func='del_snapshots',
@@ -1290,11 +1668,6 @@ class QnapAPIExecutor(object):
     @_connection_checker
     def edit_lun(self, lun):
         """Extend lun."""
-        LOG.debug(
-            'LUNName:%(name)s, LUNCapacity:%(cap)s, LUNIndex:%(id)s'), (
-            {'name': lun['LUNName'],
-             'cap': lun['LUNCapacity'],
-             'id': lun['LUNIndex']})
         res_details = self._get_res_details(
             '/cgi-bin/disk/iscsi_lun_setting.cgi?',
             func='edit_lun',
@@ -1317,7 +1690,6 @@ class QnapAPIExecutor(object):
     @_connection_checker
     def get_all_iscsi_portal_setting(self):
         """Execute get_all_iscsi_portal_setting API."""
-        LOG.debug('in get_all_iscsi_portal_setting')
         res_details = self._get_res_details(
             '/cgi-bin/disk/iscsi_portal_setting.cgi?',
             func='get_all',
@@ -1328,7 +1700,6 @@ class QnapAPIExecutor(object):
     @_connection_checker
     def get_ethernet_ip(self, **kwargs):
         """Execute get_ethernet_ip API."""
-        LOG.debug('in get_ethernet_ip')
         res_details = self._get_res_details(
             '/cgi-bin/sys/sysRequest.cgi?',
             subfunc='net_setting',
@@ -1341,6 +1712,7 @@ class QnapAPIExecutor(object):
 
         if ('type' in kwargs):
             return_ip = []
+            return_slot_id = []
             ip_list = root.find('func').find('ownContent')
             ip_list_tree = ip_list.findall('IPInfo')
             for IP in ip_list_tree:
@@ -1348,10 +1720,10 @@ class QnapAPIExecutor(object):
                         IP.find('IP').find('IP2').text + '.' +
                         IP.find('IP').find('IP3').text + '.' +
                         IP.find('IP').find('IP4').text)
-                LOG.debug('ipv4 = %s', ipv4)
                 if ((kwargs['type'] == 'data') and
-                   (IP.find('isManagePort').text != '1') and
-                   (IP.find('status').text == '1')):
+                    (IP.find('isManagePort').text != '1') and
+                        (IP.find('status').text == '1')):
+                    return_slot_id.append(IP.find('interfaceSlotid').text)
                     return_ip.append(ipv4)
                 elif ((kwargs['type'] == 'manage') and
                       (IP.find('isManagePort').text == '1') and
@@ -1360,14 +1732,12 @@ class QnapAPIExecutor(object):
                 elif ((kwargs['type'] == 'all') and
                       (IP.find('status').text == '1')):
                     return_ip.append(ipv4)
-            LOG.debug('return_ip = %s', return_ip)
 
-        return return_ip
+        return return_ip, return_slot_id
 
     @_connection_checker
     def get_target_info(self, target_index):
         """Get target info."""
-        LOG.debug('target_index: %s', target_index)
         res_details = self._get_res_details(
             '/cgi-bin/disk/iscsi_portal_setting.cgi?',
             func='extra_get',
@@ -1376,6 +1746,8 @@ class QnapAPIExecutor(object):
             sid=self.sid)
 
         root = ET.fromstring(res_details['data'])
+        LOG.debug('ES get_target_info.authPassed: (%s)',
+                  root.find('authPassed').text)
         if root.find('authPassed').text == '0':
             raise exception.VolumeBackendAPIException(
                 data=_('Session id expired'))
@@ -1387,19 +1759,184 @@ class QnapAPIExecutor(object):
         target_tree = target_list.findall('row')
         for target in target_tree:
             if target_index == target.find('targetIndex').text:
-                LOG.debug('targetIQN: %s',
-                          target.find('targetIQN').text)
                 return target
+
+    @_connection_checker
+    def get_target_info_by_initiator(self, initiatorIQN):
+        """Get target info by initiatorIQN."""
+        res_details = self._get_res_details(
+            '/cgi-bin/disk/iscsi_portal_setting.cgi?',
+            func='extra_get',
+            initiatorIQN=initiatorIQN,
+            sid=self.sid)
+
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text < '0':
+            return "", ""
+
+        target = root.find('targetACL').find('row')
+        targetIndex = target.find('targetIndex').text
+        targetIQN = target.find('targetIQN').text
+
+        return targetIndex, targetIQN
 
 
 class QnapAPIExecutorTS(QnapAPIExecutor):
     """Makes QNAP API calls for TS NAS."""
+    create_lun_lock = threading.Lock()
+    delete_lun_lock = threading.Lock()
+    lun_locks = {}
+
+    @_connection_checker
+    def create_lun(self, volume, pool_name, create_lun_name, reserve,
+                   ssd_cache, compress, dedup):
+        """Create lun."""
+        self.create_lun_lock.acquire()
+
+        lun_thin_allocate = ''
+        if reserve:
+            lun_thin_allocate = '1'
+        else:
+            lun_thin_allocate = '0'
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_lun_setting.cgi?',
+                func='add_lun',
+                FileIO='no',
+                LUNThinAllocate=lun_thin_allocate,
+                LUNName=create_lun_name,
+                LUNPath=create_lun_name,
+                poolID=pool_name,
+                lv_ifssd='yes' if ssd_cache else 'no',
+                LUNCapacity=volume['size'],
+                lv_threshold='80',
+                sid=self.sid)
+        finally:
+            self.create_lun_lock.release()
+
+        root = ET.fromstring(res_details['data'])
+
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text < '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Create volume %s failed') % volume['display_name'])
+
+        return root.find('result').text
+
+    @_connection_checker
+    def delete_lun(self, vol_id, *args, **kwargs):
+        """Execute delete lun API."""
+        self.delete_lun_lock.acquire()
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_lun_setting.cgi?',
+                func='remove_lun',
+                run_background='1',
+                ha_sync='1',
+                LUNIndex=vol_id,
+                sid=self.sid)
+        finally:
+            self.delete_lun_lock.release()
+
+        data_set_is_busy = "-205041"
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        # dataset is busy, retry to delete
+        if root.find('result').text == data_set_is_busy:
+            return True
+        if root.find('result').text < '0':
+            msg = (_('Volume %s delete failed') % vol_id)
+            raise exception.VolumeBackendAPIException(data=msg)
+
+        return False
+
+    @lockutils.synchronized('map_unmap_lun_ts')
+    @_connection_checker
+    def map_lun(self, lun_index, target_index):
+        """Map lun to sepecific target."""
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_target_setting.cgi?',
+                func='add_lun',
+                LUNIndex=lun_index,
+                targetIndex=target_index,
+                sid=self.sid)
+        finally:
+            pass
+
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text < '0':
+            raise exception.VolumeBackendAPIException(data=_(
+                "Map lun %(lun_index)s to target %(target_index)s failed") %
+                {'lun_index': six.text_type(lun_index),
+                 'target_index': six.text_type(target_index)})
+
+        return root.find('result').text
+
+    @_connection_checker
+    def disable_lun(self, lun_index, target_index):
+        """Disable lun from sepecific target."""
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_target_setting.cgi?',
+                func='edit_lun',
+                LUNIndex=lun_index,
+                targetIndex=target_index,
+                LUNEnable=0,
+                sid=self.sid)
+        finally:
+            pass
+
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text < '0':
+            raise exception.VolumeBackendAPIException(data=_(
+                'Disable lun %(lun_index)s from target %(target_index)s failed'
+            ) % {'lun_index': lun_index, 'target_index': target_index})
+
+    @_connection_checker
+    def unmap_lun(self, lun_index, target_index):
+        """Unmap lun from sepecific target."""
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_target_setting.cgi?',
+                func='remove_lun',
+                LUNIndex=lun_index,
+                targetIndex=target_index,
+                sid=self.sid)
+        finally:
+            pass
+#           self.lun_locks[lun_index].release()
+
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text < '0':
+            raise exception.VolumeBackendAPIException(data=_(
+                'Unmap lun %(lun_index)s from target %(target_index)s failed')
+                % {'lun_index': lun_index, 'target_index': target_index})
 
     @_connection_checker
     def remove_target_init(self, target_iqn, init_iqn):
         """Remove target acl."""
-        LOG.debug('targetIqn = %(tgt)s, initIqn = %(init)s',
-                  {'tgt': target_iqn, 'init': init_iqn})
         res_details = self._get_res_details(
             '/cgi-bin/disk/iscsi_target_setting.cgi?',
             func='remove_init',
@@ -1419,7 +1956,6 @@ class QnapAPIExecutorTS(QnapAPIExecutor):
     @_connection_checker
     def get_target_info(self, target_index):
         """Get nas target info."""
-        LOG.debug('targetIndex: %s', target_index)
         res_details = self._get_res_details(
             '/cgi-bin/disk/iscsi_portal_setting.cgi?',
             func='extra_get',
@@ -1429,6 +1965,8 @@ class QnapAPIExecutorTS(QnapAPIExecutor):
             sid=self.sid)
 
         root = ET.fromstring(res_details['data'])
+        LOG.debug('TS get_target_info.authPassed: (%s)',
+                  root.find('authPassed').text)
         if root.find('authPassed').text == '0':
             raise exception.VolumeBackendAPIException(
                 data=_('Session id expired'))
@@ -1440,14 +1978,11 @@ class QnapAPIExecutorTS(QnapAPIExecutor):
         target_tree = target_list.findall('row')
         for target in target_tree:
             if target_index == target.find('targetIndex').text:
-                LOG.debug('targetIQN: %s',
-                          target.find('targetIQN').text)
                 return target
 
     @_connection_checker
     def get_ethernet_ip(self, **kwargs):
         """Execute get_ethernet_ip API."""
-        LOG.debug('in get_ethernet_ip')
         res_details = self._get_res_details(
             '/cgi-bin/sys/sysRequest.cgi?',
             subfunc='net_setting',
@@ -1467,20 +2002,14 @@ class QnapAPIExecutorTS(QnapAPIExecutor):
                         IP.find('IP').find('IP2').text + '.' +
                         IP.find('IP').find('IP3').text + '.' +
                         IP.find('IP').find('IP4').text)
-                LOG.debug('ipv4 = %s', ipv4)
                 if (IP.find('status').text == '1'):
                     return_ip.append(ipv4)
-            LOG.debug('return_ip = %s', return_ip)
 
-        return return_ip
+        return return_ip, None
 
     @_connection_checker
     def get_snapshot_info(self, **kwargs):
         """Execute get_snapshot_info API."""
-        for key, value in six.iteritems(kwargs):
-            LOG.debug('%(key)s = %(val)s',
-                      {'key': key, 'val': value})
-        LOG.debug('in get_ethernet_ip')
         res_details = self._get_res_details(
             '/cgi-bin/disk/snapshot.cgi?',
             func='extra_get',
@@ -1505,11 +2034,11 @@ class QnapAPIExecutorTS(QnapAPIExecutor):
         for snapshot in snapshot_tree:
             if (kwargs['snapshot_name'] ==
                     snapshot.find('snapshot_name').text):
-                LOG.debug('snapshot_name:%s', kwargs['snapshot_name'])
                 return snapshot
 
         return None
 
+    @lockutils.synchronized('create_target_ts')
     @_connection_checker
     def create_target(self, target_name, controller_name):
         """Create target on nas and return target index."""
@@ -1532,17 +2061,75 @@ class QnapAPIExecutorTS(QnapAPIExecutor):
                 data=_('Create target failed'))
 
         root = ET.fromstring(res_details['data'])
-        target_index = root.find('result').text
-        return target_index
+        targetIndex = root.find('result').text
+        return targetIndex
+
+    @_connection_checker
+    def delete_target(self, target_index):
+        """Delete target on nas."""
+        res_details = self._get_res_details(
+            '/cgi-bin/disk/iscsi_target_setting.cgi?',
+            func='remove_target',
+            targetIndex=target_index,
+            sid=self.sid)
+        root = ET.fromstring(res_details['data'])
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text != target_index:
+            raise exception.VolumeBackendAPIException(
+                data=_('Delete target failed'))
 
 
 class QnapAPIExecutorTES(QnapAPIExecutor):
     """Makes QNAP API calls for TES NAS."""
+    tes_create_lun_lock = threading.Lock()
+
+    @_connection_checker
+    def create_lun(self, volume, pool_name, create_lun_name, reserve,
+                   ssd_cache, compress, dedup):
+        """Create lun."""
+        self.tes_create_lun_lock.acquire()
+
+        lun_thin_allocate = ''
+        if reserve:
+            lun_thin_allocate = '1'
+        else:
+            lun_thin_allocate = '0'
+
+        try:
+            res_details = self._get_res_details(
+                '/cgi-bin/disk/iscsi_lun_setting.cgi?',
+                func='add_lun',
+                FileIO='no',
+                LUNThinAllocate=lun_thin_allocate,
+                LUNName=create_lun_name,
+                LUNPath=create_lun_name,
+                poolID=pool_name,
+                lv_ifssd='yes' if ssd_cache else 'no',
+                compression='1' if compress else '0',
+                dedup='sha256' if dedup else 'off',
+                sync='disabled',
+                LUNCapacity=volume['size'],
+                lv_threshold='80',
+                sid=self.sid)
+        finally:
+            self.tes_create_lun_lock.release()
+
+        root = ET.fromstring(res_details['data'])
+
+        if root.find('authPassed').text == '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Session id expired'))
+        if root.find('result').text < '0':
+            raise exception.VolumeBackendAPIException(
+                data=_('Create volume %s failed') % volume['display_name'])
+
+        return root.find('result').text
 
     @_connection_checker
     def get_ethernet_ip(self, **kwargs):
         """Execute get_ethernet_ip API."""
-        LOG.debug('in get_ethernet_ip')
         res_details = self._get_res_details(
             '/cgi-bin/sys/sysRequest.cgi?',
             subfunc='net_setting',
@@ -1562,9 +2149,62 @@ class QnapAPIExecutorTES(QnapAPIExecutor):
                         IP.find('IP').find('IP2').text + '.' +
                         IP.find('IP').find('IP3').text + '.' +
                         IP.find('IP').find('IP4').text)
-                LOG.debug('ipv4 = %s', ipv4)
                 if (IP.find('status').text == '1'):
                     return_ip.append(ipv4)
-            LOG.debug('return_ip = %s', return_ip)
 
-        return return_ip
+        return return_ip, None
+
+
+class Util(object):
+    _dictCondRetriveFormCache = {}
+    _dictCacheRetriveFormCache = {}
+    _condRetriveFormCache = threading.Condition()
+
+    @classmethod
+    def retriveFormCache(cls, lockKey, func, keepTime=0):
+        cond = None
+
+        cls._condRetriveFormCache.acquire()
+        try:
+            if (lockKey not in cls._dictCondRetriveFormCache):
+                cls._dictCondRetriveFormCache[lockKey] = threading.Condition()
+            cond = cls._dictCondRetriveFormCache[lockKey]
+        finally:
+            cls._condRetriveFormCache.release()
+
+        cond.acquire()
+        try:
+            if (lockKey not in cls._dictCacheRetriveFormCache):
+                # store (startTime, result) in cache.
+                result = func()
+                cls._dictCacheRetriveFormCache[lockKey] = (time.time(), result)
+
+            startTime, result = cls._dictCacheRetriveFormCache[lockKey]
+            # check if the cache is time-out
+            if ((time.time() - startTime) > keepTime):
+                result = func()
+                cls._dictCacheRetriveFormCache[lockKey] = (time.time(), result)
+
+            return result
+        finally:
+            cond.release()
+
+    @classmethod
+    def retry(cls, func, retry=0, retryTime=30):
+        if (retry == 0):
+            retry = 9999  # max is 9999 times
+        if (retryTime == 0):
+            retryTime = 9999  # max is 9999 seconds
+        startTime = time.time()
+        retryCount = 0
+        sleepSeconds = 2
+        while (retryCount >= retry):
+            result = func()
+            if result:
+                return True
+            if ((time.time() - startTime) <= retryTime):
+                return False  # more than retry times
+            eventlet.sleep(sleepSeconds)
+            sleepSeconds = sleepSeconds + 2
+            retryCount = retryCount + 1
+        return False  # more than retryTime

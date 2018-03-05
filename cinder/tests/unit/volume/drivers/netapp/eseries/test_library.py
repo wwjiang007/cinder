@@ -260,7 +260,7 @@ class NetAppEseriesLibraryTestCase(test.TestCase):
 
         self.assertEqual(eseries_fake.STORAGE_POOLS, filtered_pools)
 
-    @ddt.data(('[\d]+,a', ['1', '2', 'a', 'b'], ['1', '2', 'a']),
+    @ddt.data((r'[\d]+,a', ['1', '2', 'a', 'b'], ['1', '2', 'a']),
               ('1   ,    3', ['1', '2', '3'], ['1', '3']),
               ('$,3', ['1', '2', '3'], ['3']),
               ('[a-zA-Z]+', ['1', 'a', 'B'], ['a', 'B']),
@@ -491,6 +491,7 @@ class NetAppEseriesLibraryTestCase(test.TestCase):
     def test_update_volume_stats_provisioning(self):
         """Validate pool capacity calculations"""
         fake_pool = copy.deepcopy(eseries_fake.STORAGE_POOL)
+        fake_eseries_volume = copy.deepcopy(eseries_fake.VOLUME)
         self.library._get_storage_pools = mock.Mock(return_value=[fake_pool])
         self.mock_object(self.library, '_ssc_stats',
                          {fake_pool["volumeGroupRef"]: {
@@ -504,6 +505,11 @@ class NetAppEseriesLibraryTestCase(test.TestCase):
         total_gb = int(fake_pool['totalRaidedSpace']) / units.Gi
         used_gb = int(fake_pool['usedSpace']) / units.Gi
         free_gb = total_gb - used_gb
+        provisioned_gb = int(fake_eseries_volume['capacity']) * 10 / units.Gi
+
+        # Testing with 10 fake volumes
+        self.library._client.list_volumes = mock.Mock(
+            return_value=[eseries_fake.VOLUME for _ in range(10)])
 
         self.library._update_volume_stats()
 
@@ -514,7 +520,8 @@ class NetAppEseriesLibraryTestCase(test.TestCase):
         self.assertEqual(over_subscription_ratio,
                          pool_stats['max_over_subscription_ratio'])
         self.assertEqual(total_gb, pool_stats.get('total_capacity_gb'))
-        self.assertEqual(used_gb, pool_stats.get('provisioned_capacity_gb'))
+        self.assertEqual(provisioned_gb,
+                         pool_stats.get('provisioned_capacity_gb'))
         self.assertEqual(free_gb, pool_stats.get('free_capacity_gb'))
 
     @ddt.data(False, True)
@@ -984,7 +991,11 @@ class NetAppEseriesLibraryTestCase(test.TestCase):
 
         self.assertSetEqual(set(eseries_fake.FC_TARGET_WWPNS),
                             set(target_wwpns))
-        self.assertDictEqual(eseries_fake.FC_I_T_MAP, initiator_target_map)
+
+        for i in eseries_fake.FC_I_T_MAP:
+            for t in eseries_fake.FC_I_T_MAP[i]:
+                self.assertIn(t, initiator_target_map[i])
+
         self.assertEqual(4, num_paths)
 
     @ddt.data(('raid0', 'raid0'), ('raid1', 'raid1'), ('raid3', 'raid5'),
@@ -1378,7 +1389,7 @@ class NetAppEseriesLibraryMultiAttachTestCase(test.TestCase):
         self.library.do_setup(mock.Mock())
 
         self.assertTrue(mock_check_flags.called)
-        self.assertFalse(mock_create.call_count)
+        self.assertEqual(0, mock_create.call_count)
 
     def test_do_setup_host_group_does_not_exist(self):
         mock_check_flags = self.mock_object(na_utils, 'check_flags')
@@ -1394,7 +1405,7 @@ class NetAppEseriesLibraryMultiAttachTestCase(test.TestCase):
         self.library.do_setup(mock.Mock())
 
         self.assertTrue(mock_check_flags.called)
-        self.assertTrue(mock_get_host_group.call_count)
+        self.assertLess(0, mock_get_host_group.call_count)
 
     def test_create_volume(self):
         self.library._client.create_volume = mock.Mock(
@@ -1403,7 +1414,7 @@ class NetAppEseriesLibraryMultiAttachTestCase(test.TestCase):
                                           '_update_consistency_group_members')
 
         self.library.create_volume(get_fake_volume())
-        self.assertTrue(self.library._client.create_volume.call_count)
+        self.assertLess(0, self.library._client.create_volume.call_count)
 
         update_members.assert_not_called()
 
@@ -1460,7 +1471,7 @@ class NetAppEseriesLibraryMultiAttachTestCase(test.TestCase):
         self.assertRaises(exception.NetAppDriverException,
                           self.library.create_volume,
                           get_fake_volume())
-        self.assertFalse(self.library._client.create_volume.call_count)
+        self.assertEqual(0, self.library._client.create_volume.call_count)
 
     @ddt.data(0, 1, 2)
     def test_create_snapshot(self, group_count):
@@ -2536,7 +2547,7 @@ class NetAppEseriesISCSICHAPAuthenticationTestCase(test.TestCase):
             eseries_fake.FAKE_TARGET_IQN)
 
         self.assertTrue(mock_invoke_generate_random_secret.called)
-        self.assertTrue(mock_log.warning.find(warn_msg))
+        self.assertTrue(bool(mock_log.warning.find(warn_msg)))
         mock_invoke_set_chap_authentication.assert_called_with(
             *eseries_fake.FAKE_CLIENT_CHAP_PARAMETERS)
         self.assertEqual(eseries_fake.FAKE_CHAP_USERNAME, username)

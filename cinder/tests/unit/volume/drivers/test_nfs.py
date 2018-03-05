@@ -33,6 +33,7 @@ from cinder.tests.unit import fake_volume
 from cinder.volume import configuration as conf
 from cinder.volume.drivers import nfs
 from cinder.volume.drivers import remotefs
+from cinder.volume import utils as vutils
 
 
 class RemoteFsDriverTestCase(test.TestCase):
@@ -414,6 +415,9 @@ class NfsDriverTestCase(test.TestCase):
         self.configuration.nas_mount_options = None
         self.configuration.volume_dd_blocksize = '1M'
 
+        self.mock_object(vutils, 'get_max_over_subscription_ratio',
+                         return_value=1)
+
         self.context = context.get_admin_context()
 
     def _set_driver(self, extra_confs=None):
@@ -639,7 +643,7 @@ class NfsDriverTestCase(test.TestCase):
         drv._mounted_shares = []
 
         self.assertRaises(exception.NfsNoSharesMounted, drv._find_share,
-                          self.TEST_SIZE_IN_GB)
+                          self._simple_volume())
 
     def test_find_share(self):
         """_find_share simple use case."""
@@ -647,13 +651,16 @@ class NfsDriverTestCase(test.TestCase):
         drv = self._driver
         drv._mounted_shares = [self.TEST_NFS_EXPORT1, self.TEST_NFS_EXPORT2]
 
+        volume = fake_volume.fake_volume_obj(self.context,
+                                             size=self.TEST_SIZE_IN_GB)
+
         with mock.patch.object(
                 drv, '_get_capacity_info') as mock_get_capacity_info:
             mock_get_capacity_info.side_effect = [
                 (5 * units.Gi, 2 * units.Gi, 2 * units.Gi),
                 (10 * units.Gi, 3 * units.Gi, 1 * units.Gi)]
             self.assertEqual(self.TEST_NFS_EXPORT2,
-                             drv._find_share(self.TEST_SIZE_IN_GB))
+                             drv._find_share(volume))
             calls = [mock.call(self.TEST_NFS_EXPORT1),
                      mock.call(self.TEST_NFS_EXPORT2)]
             mock_get_capacity_info.assert_has_calls(calls)
@@ -672,7 +679,7 @@ class NfsDriverTestCase(test.TestCase):
                 (10 * units.Gi, 0, 10 * units.Gi)]
 
             self.assertRaises(exception.NfsNoSuitableShareFound,
-                              drv._find_share, self.TEST_SIZE_IN_GB)
+                              drv._find_share, self._simple_volume())
             calls = [mock.call(self.TEST_NFS_EXPORT1),
                      mock.call(self.TEST_NFS_EXPORT2)]
             mock_get_capacity_info.assert_has_calls(calls)
@@ -753,7 +760,7 @@ class NfsDriverTestCase(test.TestCase):
             result = drv.create_volume(volume)
             self.assertEqual(self.TEST_NFS_EXPORT1,
                              result['provider_location'])
-            mock_find_share.assert_called_once_with(self.TEST_SIZE_IN_GB)
+            mock_find_share.assert_called_once_with(volume)
 
     def test_delete_volume(self):
         """delete_volume simple test case."""
@@ -1192,7 +1199,9 @@ class NfsDriverTestCase(test.TestCase):
         drv._copy_volume_from_snapshot(fake_snap, dest_volume, size)
 
         mock_read_info_file.assert_called_once_with(info_path)
-        mock_img_info.assert_called_once_with(snap_path, run_as_root=True)
+        mock_img_info.assert_called_once_with(snap_path,
+                                              force_share=True,
+                                              run_as_root=True)
         used_qcow = nfs_conf['nfs_qcow2_volumes']
         mock_convert_image.assert_called_once_with(
             src_vol_path, dest_vol_path, 'qcow2' if used_qcow else 'raw',
@@ -1262,7 +1271,7 @@ class NfsDriverTestCase(test.TestCase):
             src_volume_path, new_volume_path, 'qcow2' if used_qcow else 'raw',
             run_as_root=True)
         mock_ensure.assert_called_once()
-        mock_find_share.assert_called_once_with(new_volume.size)
+        mock_find_share.assert_called_once_with(new_volume)
 
     def test_create_volume_from_snapshot_status_not_available(self):
         """Expect an error when the snapshot's status is not 'available'."""
@@ -1305,7 +1314,9 @@ class NfsDriverTestCase(test.TestCase):
 
         conn_info = drv.initialize_connection(volume, None)
 
-        mock_img_utils.assert_called_once_with(vol_path, run_as_root=True)
+        mock_img_utils.assert_called_once_with(vol_path,
+                                               force_share=True,
+                                               run_as_root=True)
         self.assertEqual('nfs', conn_info['driver_volume_type'])
         self.assertEqual(volume.name, conn_info['data']['name'])
         self.assertEqual(self.TEST_MNT_POINT_BASE,

@@ -23,6 +23,7 @@ import uuid
 
 from cinder import exception
 import cinder.image.glance
+from cinder.tests.unit import fake_constants
 
 
 class _FakeImageService(object):
@@ -34,7 +35,7 @@ class _FakeImageService(object):
         # So, make sure we've got one..
         timestamp = datetime.datetime(2011, 1, 1, 1, 2, 3)
 
-        image1 = {'id': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
+        image1 = {'id': fake_constants.IMAGE_ID,
                   'name': 'fakeimage123456',
                   'created_at': timestamp,
                   'updated_at': timestamp,
@@ -47,7 +48,8 @@ class _FakeImageService(object):
                   'disk_format': 'raw',
                   'properties': {'kernel_id': 'nokernel',
                                  'ramdisk_id': 'nokernel',
-                                 'architecture': 'x86_64'}}
+                                 'architecture': 'x86_64'},
+                  'size': 12345678}
 
         image2 = {'id': 'a2459075-d96c-40d5-893e-577ff92e721c',
                   'name': 'fakeimage123456',
@@ -61,7 +63,8 @@ class _FakeImageService(object):
                   'container_format': 'ami',
                   'disk_format': 'ami',
                   'properties': {'kernel_id': 'nokernel',
-                                 'ramdisk_id': 'nokernel'}}
+                                 'ramdisk_id': 'nokernel'},
+                  'size': 1}
 
         image3 = {'id': '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6',
                   'name': 'fakeimage123456',
@@ -75,7 +78,8 @@ class _FakeImageService(object):
                   'container_format': None,
                   'disk_format': None,
                   'properties': {'kernel_id': 'nokernel',
-                                 'ramdisk_id': 'nokernel'}}
+                                 'ramdisk_id': 'nokernel'},
+                  'size': 1000000000000}
 
         image4 = {'id': 'cedef40a-ed67-4d10-800e-17455edce175',
                   'name': 'fakeimage123456',
@@ -89,7 +93,8 @@ class _FakeImageService(object):
                   'container_format': 'ami',
                   'disk_format': 'ami',
                   'properties': {'kernel_id': 'nokernel',
-                                 'ramdisk_id': 'nokernel'}}
+                                 'ramdisk_id': 'nokernel'},
+                  'size': 20000000}
 
         image5 = {'id': 'c905cedb-7281-47e4-8a62-f26bc5fc4c77',
                   'name': 'fakeimage123456',
@@ -105,7 +110,8 @@ class _FakeImageService(object):
                   'disk_format': 'ami',
                   'properties': {
                       'kernel_id': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
-                      'ramdisk_id': None}}
+                      'ramdisk_id': None},
+                  'size': 50000}
 
         image6 = {'id': 'a440c04b-79fa-479c-bed1-0b816eaec379',
                   'name': 'fakeimage6',
@@ -121,7 +127,8 @@ class _FakeImageService(object):
                   'properties': {'kernel_id': 'nokernel',
                                  'ramdisk_id': 'nokernel',
                                  'architecture': 'x86_64',
-                                 'auto_disk_config': 'False'}}
+                                 'auto_disk_config': 'False'},
+                  'size': 7777777}
 
         image7 = {'id': '70a599e0-31e7-49b7-b260-868f441e862b',
                   'name': 'fakeimage7',
@@ -137,7 +144,26 @@ class _FakeImageService(object):
                   'properties': {'kernel_id': 'nokernel',
                                  'ramdisk_id': 'nokernel',
                                  'architecture': 'x86_64',
-                                 'auto_disk_config': 'True'}}
+                                 'auto_disk_config': 'True'},
+                  'size': 1234000000}
+
+        image8 = {'id': 'b0a599e0-41d7-3582-b260-769f443c862a',
+                  'name': 'fakeimage8',
+                  'created_at': timestamp,
+                  'updated_at': timestamp,
+                  'deleted_at': None,
+                  'deleted': False,
+                  'status': 'active',
+                  'is_public': False,
+                  'container_format': 'bare',
+                  'disk_format': 'raw',
+                  'properties':
+                  {'block_device_mapping': [
+                      {'boot_index': 0, 'source_type': 'snapshot',
+                       'snapshot_id': fake_constants.SNAPSHOT_ID}],
+                      'ramdisk_id': 'nokernel',
+                      'architecture': 'x86_64',
+                      'auto_disk_config': 'True'}}
 
         self.create(None, image1)
         self.create(None, image2)
@@ -146,6 +172,7 @@ class _FakeImageService(object):
         self.create(None, image5)
         self.create(None, image6)
         self.create(None, image7)
+        self.create(None, image8)
         self._imagedata = {}
         self.temp_images = mock.MagicMock()
         super(_FakeImageService, self).__init__()

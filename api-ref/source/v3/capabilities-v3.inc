@@ -15,7 +15,6 @@ Shows capabilities for a storage back end on the host.
 The ``hostname`` takes the form of ``hostname@volume_backend_name``.
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
@@ -31,7 +30,7 @@ Response Parameters
 .. rest_parameters:: parameters.yaml
 
    - pool_name: pool_name
-   - description: description
+   - description: description_10
    - volume_backend_name: volume_backend_name
    - namespace: namespace
    - visibility: visibility

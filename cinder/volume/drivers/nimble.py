@@ -38,6 +38,7 @@ from cinder.i18n import _
 from cinder import interface
 from cinder.objects import volume
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.san import san
 from cinder.volume import volume_types
@@ -68,6 +69,7 @@ SM_SUBNET_MGMT_PLUS_DATA = 'mgmt-data'
 SM_STATE_MSG = "is already in requested state"
 SM_OBJ_EXIST_MSG = "Object exists"
 SM_OBJ_ENOENT_MSG = "No such object"
+SM_OBJ_HAS_CLONE = "has a clone"
 IOPS_ERR_MSG = "Please set valid IOPS limit in the range"
 LUN_ID = '0'
 WARN_LEVEL = 80
@@ -86,14 +88,14 @@ nimble_opts = [
     cfg.StrOpt('nimble_subnet_label',
                default='*',
                help='Nimble Subnet Label'),
-    cfg.StrOpt('nimble_verify_certificate',
-               default=False,
-               help='Whether to verify Nimble SSL Certificate'),
+    cfg.BoolOpt('nimble_verify_certificate',
+                default=False,
+                help='Whether to verify Nimble SSL Certificate'),
     cfg.StrOpt('nimble_verify_cert_path',
                help='Path to Nimble Array SSL certificate'), ]
 
 CONF = cfg.CONF
-CONF.register_opts(nimble_opts)
+CONF.register_opts(nimble_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 class NimbleDriverException(exception.VolumeDriverException):
@@ -102,6 +104,10 @@ class NimbleDriverException(exception.VolumeDriverException):
 
 class NimbleAPIException(exception.VolumeBackendAPIException):
     message = _("Unexpected response from Nimble API")
+
+
+class NimbleVolumeBusyException(exception.VolumeIsBusy):
+    message = _("Nimble Cinder Driver: Volume Busy")
 
 
 class NimbleBaseVolumeDriver(san.SanDriver):
@@ -210,7 +216,18 @@ class NimbleBaseVolumeDriver(san.SanDriver):
         eventlet.sleep(DEFAULT_SLEEP)
         self.APIExecutor.online_vol(volume['name'], False)
         LOG.debug("Deleting volume %(vol)s", {'vol': volume['name']})
-        self.APIExecutor.delete_vol(volume['name'])
+        try:
+            self.APIExecutor.delete_vol(volume['name'])
+        except NimbleAPIException as ex:
+            LOG.debug("delete volume exception: %s", ex)
+            if SM_OBJ_HAS_CLONE in six.text_type(ex):
+                LOG.warning('Volume %(vol)s : %(state)s',
+                            {'vol': volume['name'],
+                             'state': SM_OBJ_HAS_CLONE})
+                # set the volume back to be online and raise busy exception
+                self.APIExecutor.online_vol(volume['name'], True)
+                raise exception.VolumeIsBusy(volume_name=volume['name'])
+            raise
         # Nimble backend does not delete the snapshot from the parent volume
         # if there is a dependent clone. So the deletes need to be in reverse
         # order i.e.
@@ -438,7 +455,7 @@ class NimbleBaseVolumeDriver(san.SanDriver):
             if 'access_control_records' in vol_info and (
                vol_info['access_control_records'] is not None):
                 msg = (_('Volume %s has ACL associated with it. Remove ACL '
-                         'for managing using Openstack') % target_vol_name)
+                         'for managing using OpenStack') % target_vol_name)
                 raise exception.InvalidVolume(reason=msg)
             data['data']['agent_type'] = AGENT_TYPE_OPENSTACK_GST
         else:
@@ -601,7 +618,7 @@ class NimbleBaseVolumeDriver(san.SanDriver):
                     wwpn = str(initiator['wwpn']).replace(":", "")
                     wwpns_list.append(wwpn)
                 LOG.debug("initiator_wwpns=%(initiator)s "
-                          "wwpns_list_from_array=%(wwpns)s" %
+                          "wwpns_list_from_array=%(wwpns)s",
                           {'initiator': initiator_wwpns,
                            'wwpns': wwpns_list})
                 if set(initiator_wwpns) == set(wwpns_list):
@@ -733,7 +750,7 @@ class NimbleISCSIDriver(NimbleBaseVolumeDriver, san.SanISCSIDriver):
     def _get_data_ip(self, netconfig):
         """Get data ip."""
         subnet_label = self.configuration.nimble_subnet_label
-        LOG.debug('subnet_label used %(netlabel)s, netconfig %(netconf)s' %
+        LOG.debug('subnet_label used %(netlabel)s, netconfig %(netconf)s',
                   {'netlabel': subnet_label, 'netconf': netconfig})
         ret_data_ip = ''
         for subnet in netconfig['array_list'][0]['nic_list']:
@@ -817,7 +834,7 @@ class NimbleFCDriver(NimbleBaseVolumeDriver, driver.FibreChannelDriver):
 
     def _build_initiator_target_map(self, target_wwns, connector):
         """Build the target_wwns and the initiator target map."""
-        LOG.debug("_build_initiator_target_map for %(wwns)s" %
+        LOG.debug("_build_initiator_target_map for %(wwns)s",
                   {'wwns': target_wwns})
         init_targ_map = {}
 
@@ -908,7 +925,7 @@ class NimbleFCDriver(NimbleBaseVolumeDriver, driver.FibreChannelDriver):
             raise NimbleDriverException(
                 _('No initiator group found for initiator %s') %
                 initiator_name)
-        LOG.debug("initiator_target_map %s" % init_targ_map)
+        LOG.debug("initiator_target_map %s", init_targ_map)
         self.APIExecutor.remove_acl(volume, initiator_group_name)
         eventlet.sleep(DEFAULT_SLEEP)
         # FIXME to check for other volumes attached to the host and then
@@ -921,7 +938,7 @@ class NimbleFCDriver(NimbleBaseVolumeDriver, driver.FibreChannelDriver):
 
     def get_wwpns_from_array(self, array_name):
         """Retrieve the wwpns from the array"""
-        LOG.debug("get_wwpns_from_array %s" % array_name)
+        LOG.debug("get_wwpns_from_array %s", array_name)
         target_wwpns = []
         interface_info = self.APIExecutor.get_fc_interface_list(array_name)
         LOG.info("interface_info %(interface_info)s",
@@ -1025,12 +1042,12 @@ class NimbleRestAPIExecutor(object):
     def get_performance_policy_id(self, perf_policy_name):
         api = 'performance_policies/'
         filter = {'name': perf_policy_name}
-        LOG.debug("Perfomance policy Name %s" % perf_policy_name)
+        LOG.debug("Performance policy Name %s", perf_policy_name)
         r = self.get_query(api, filter)
         if not r.json()['data']:
             raise NimbleAPIException(_("No performance policy found for:"
                                      "%(perf)s") % {'perf': perf_policy_name})
-        LOG.debug("Performance policy ID :%(perf)s" %
+        LOG.debug("Performance policy ID :%(perf)s",
                   {'perf': r.json()['data'][0]['id']})
         return r.json()['data'][0]['id']
 
@@ -1081,6 +1098,12 @@ class NimbleRestAPIExecutor(object):
                  {'name': response['name']})
         return response['name']
 
+    def _is_ascii(self, value):
+        try:
+            return all(ord(c) < 128 for c in value)
+        except TypeError:
+            return False
+
     def _execute_create_vol(self, volume, pool_name, reserve, protocol,
                             is_gst_enabled):
         """Create volume
@@ -1092,9 +1115,20 @@ class NimbleRestAPIExecutor(object):
         volume_size = volume['size'] * units.Ki
         reserve_size = 100 if reserve else 0
         # Set volume description
-        display_list = [getattr(volume, 'display_name', ''),
-                        getattr(volume, 'display_description', '')]
-        description = ':'.join(filter(None, display_list))
+        display_name = getattr(volume, 'display_name', '')
+        display_description = getattr(volume, 'display_description', '')
+        if self._is_ascii(display_name) and self._is_ascii(
+                display_description):
+            display_list = [getattr(volume, 'display_name', ''),
+                            getattr(volume, 'display_description', '')]
+            description = ':'.join(filter(None, display_list))
+        elif self._is_ascii(display_name):
+            description = display_name
+        elif self._is_ascii(display_description):
+            description = display_description
+        else:
+            description = ""
+
         # Limit description size to 254 characters
         description = description[:254]
         pool_id = self.get_pool_id(pool_name)
@@ -1377,7 +1411,7 @@ class NimbleRestAPIExecutor(object):
                                        "snap_id: %(snap)s volume id: %(vol)s")
                                      % {'snap': snap_id,
                                         'vol': vol_id})
-        LOG.debug("SnapInfo :%s" % six.text_type(r.json()['data'][0]))
+        LOG.debug("SnapInfo :%s", r.json()['data'][0])
         return r.json()['data'][0]
 
     def get_snap_info(self, snap_name, vol_name):
@@ -1396,7 +1430,7 @@ class NimbleRestAPIExecutor(object):
         filter = {'id': snap_id}
         r = self.get_query(api, filter)
         if not r.json()['data']:
-            raise NimbleAPIException(_("Snapshot: %s doesnt exist") % snap_id)
+            raise NimbleAPIException(_("Snapshot: %s doesn't exist") % snap_id)
         return r.json()['data'][0]
 
     @utils.retry(NimbleAPIException, 2, 3)
@@ -1409,12 +1443,12 @@ class NimbleRestAPIExecutor(object):
         try:
             LOG.debug("data :%s", data)
             self.put(api, data)
-            LOG.debug("Volume %(vol)s is in requested online state :%(flag)s" %
+            LOG.debug("Volume %(vol)s is in requested online state :%(flag)s",
                       {'vol': volume_name,
                        'flag': online_flag})
         except Exception as ex:
             msg = (_("Error  %s") % ex)
-            LOG.debug("online_vol_exception: %s" % msg)
+            LOG.debug("online_vol_exception: %s", msg)
             if msg.__contains__("Object is %s" % SM_STATE_MSG):
                 LOG.warning('Volume %(vol)s : %(state)s',
                             {'vol': volume_name,
@@ -1433,11 +1467,10 @@ class NimbleRestAPIExecutor(object):
         try:
             self.put(api, data)
             LOG.debug("Snapshot %(snap)s is in requested online state "
-                      ":%(flag)s" % {
-                          'snap': snap_name,
-                          'flag': online_flag})
+                      ":%(flag)s",
+                      {'snap': snap_name, 'flag': online_flag})
         except Exception as ex:
-            LOG.debug("online_snap_exception: %s" % ex)
+            LOG.debug("online_snap_exception: %s", ex)
             if six.text_type(ex).__contains__("Object %s" % SM_STATE_MSG):
                 LOG.warning('Snapshot %(snap)s :%(state)s',
                             {'snap': snap_name,
@@ -1663,10 +1696,18 @@ class NimbleRestAPIExecutor(object):
         url = self.uri + api
         r = requests.delete(url, headers=self.headers, verify=self.verify)
         if r.status_code != 201 and r.status_code != 200:
-            msg = _("Failed to execute api %(api) : %(msg)s %(code)s") % {
+            base = "Failed to execute api %(api)s: Error Code: %(code)s" % {
                 'api': api,
-                'msg': r.json()['messages'][1]['text'],
                 'code': r.status_code}
+            LOG.debug("Base error : %(base)s", {'base': base})
+            try:
+                msg = _("%(base)s Message: %(msg)s") % {
+                    'base': base,
+                    'msg': r.json()['messages'][1]['text']}
+            except IndexError:
+                msg = _("%(base)s Message: %(msg)s") % {
+                    'base': base,
+                    'msg': six.text_type(r.json())}
             raise NimbleAPIException(msg)
         return r.json()
 

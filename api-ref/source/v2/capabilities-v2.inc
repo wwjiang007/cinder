@@ -9,21 +9,20 @@ Shows capabilities for a storage back end.
 Show back-end capabilities
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/capabilities/{hostname}
+.. rest_method::  GET /v2/{project_id}/capabilities/{hostname}
 
 Shows capabilities for a storage back end on the host.
 The ``hostname`` takes the form of ``hostname@volume_backend_name``.
 
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - hostname: hostname
 
 Response Parameters

@@ -199,6 +199,45 @@ class SnapshotTestCase(base.BaseVolumeTestCase):
                           'fake_name',
                           'fake_description')
 
+    @mock.patch('cinder.objects.volume.Volume.get_by_id')
+    def test_create_snapshot_in_db_invalid_volume_status(self, mock_get):
+        test_volume1 = tests_utils.create_volume(
+            self.context,
+            status='available',
+            host=CONF.host)
+        test_volume2 = tests_utils.create_volume(
+            self.context,
+            status='deleting',
+            host=CONF.host)
+        mock_get.return_value = test_volume2
+        volume_api = cinder.volume.api.API()
+
+        self.assertRaises(exception.InvalidVolume,
+                          volume_api.create_snapshot_in_db,
+                          self.context, test_volume1, "fake_snapshot_name",
+                          "fake_description", False, {}, None,
+                          commit_quota=False)
+
+    @mock.patch('cinder.objects.volume.Volume.get_by_id')
+    def test_create_snapshot_in_db_invalid_metadata(self, mock_get):
+        test_volume = tests_utils.create_volume(
+            self.context,
+            status='available',
+            host=CONF.host)
+        mock_get.return_value = test_volume
+        volume_api = cinder.volume.api.API()
+
+        with mock.patch.object(QUOTAS, 'add_volume_type_opts'),\
+            mock.patch.object(QUOTAS, 'reserve') as mock_reserve,\
+                mock.patch.object(QUOTAS, 'commit') as mock_commit:
+            self.assertRaises(exception.InvalidInput,
+                              volume_api.create_snapshot_in_db,
+                              self.context, test_volume, "fake_snapshot_name",
+                              "fake_description", False, "fake_metadata", None,
+                              commit_quota=True)
+            mock_reserve.assert_not_called()
+            mock_commit.assert_not_called()
+
     def test_create_snapshot_failed_maintenance(self):
         """Test exception handling when create snapshot in maintenance."""
         test_volume = tests_utils.create_volume(
@@ -342,7 +381,7 @@ class SnapshotTestCase(base.BaseVolumeTestCase):
         # get volume's volume_glance_metadata
         ctxt = context.get_admin_context()
         vol_glance_meta = db.volume_glance_metadata_get(ctxt, volume_id)
-        self.assertTrue(vol_glance_meta)
+        self.assertTrue(bool(vol_glance_meta))
 
         # create snapshot from bootable volume
         snap = create_snapshot(volume_id)
@@ -351,7 +390,7 @@ class SnapshotTestCase(base.BaseVolumeTestCase):
         # get snapshot's volume_glance_metadata
         snap_glance_meta = db.volume_snapshot_glance_metadata_get(
             ctxt, snap.id)
-        self.assertTrue(snap_glance_meta)
+        self.assertTrue(bool(snap_glance_meta))
 
         # ensure that volume's glance metadata is copied
         # to snapshot's glance metadata
@@ -387,11 +426,10 @@ class SnapshotTestCase(base.BaseVolumeTestCase):
         # get volume's volume_glance_metadata
         ctxt = context.get_admin_context()
         vol_glance_meta = db.volume_glance_metadata_get(ctxt, volume_id)
-        self.assertTrue(vol_glance_meta)
+        self.assertTrue(bool(vol_glance_meta))
         snap = create_snapshot(volume_id)
-        snap_stat = snap.status
-        self.assertTrue(snap.id)
-        self.assertTrue(snap_stat)
+        self.assertEqual(36, len(snap.id))  # dynamically-generated UUID
+        self.assertEqual('creating', snap.status)
 
         # set to return DB exception
         with mock.patch.object(db, 'volume_glance_metadata_copy_to_snapshot')\

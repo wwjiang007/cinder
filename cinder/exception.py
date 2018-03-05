@@ -22,9 +22,6 @@ SHOULD include dedicated exception logging.
 
 """
 
-import sys
-
-from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_versionedobjects import exception as obj_exc
 import six
@@ -36,15 +33,6 @@ from cinder.i18n import _
 
 
 LOG = logging.getLogger(__name__)
-
-exc_log_opts = [
-    cfg.BoolOpt('fatal_exception_format_errors',
-                default=False,
-                help='Make exception message format errors fatal.'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(exc_log_opts)
 
 
 class ConvertedException(webob.exc.WSGIHTTPException):
@@ -98,6 +86,9 @@ class CinderException(Exception):
 
         for k, v in self.kwargs.items():
             if isinstance(v, Exception):
+                # NOTE(tommylikehu): If this is a cinder exception it will
+                # return the msg object, so we won't be preventing
+                # translations.
                 self.kwargs[k] = six.text_type(v)
 
         if self._should_format():
@@ -105,18 +96,14 @@ class CinderException(Exception):
                 message = self.message % kwargs
 
             except Exception:
-                exc_info = sys.exc_info()
-                # kwargs doesn't match a variable in the message
-                # log the issue and the kwargs
-                LOG.exception('Exception in string format operation')
-                for name, value in kwargs.items():
-                    LOG.error("%(name)s: %(value)s",
-                              {'name': name, 'value': value})
-                if CONF.fatal_exception_format_errors:
-                    six.reraise(*exc_info)
-                # at least get the core message out if something happened
+                # NOTE(melwitt): This is done in a separate method so it can be
+                # monkey-patched during testing to make it a hard failure.
+                self._log_exception()
                 message = self.message
         elif isinstance(message, Exception):
+            # NOTE(tommylikehu): If this is a cinder exception it will
+            # return the msg object, so we won't be preventing
+            # translations.
             message = six.text_type(message)
 
         # NOTE(luisg): We put the actual message in 'msg' so that we can access
@@ -125,11 +112,23 @@ class CinderException(Exception):
         self.msg = message
         super(CinderException, self).__init__(message)
 
+    def _log_exception(self):
+        # kwargs doesn't match a variable in the message
+        # log the issue and the kwargs
+        LOG.exception('Exception in string format operation:')
+        for name, value in self.kwargs.items():
+            LOG.error("%(name)s: %(value)s",
+                      {'name': name, 'value': value})
+
     def _should_format(self):
         return self.kwargs['message'] is None or '%(message)' in self.message
 
+    # NOTE(tommylikehu): self.msg is already an unicode compatible object
+    # as the __init__ method ensures of it, and we should not be modifying
+    # it in any way with str(), unicode(), or six.text_type() as we would
+    # be preventing translations from happening.
     def __unicode__(self):
-        return six.text_type(self.msg)
+        return self.msg
 
 
 class VolumeBackendAPIException(CinderException):
@@ -200,6 +199,10 @@ class InvalidInput(Invalid):
     message = _("Invalid input received: %(reason)s")
 
 
+class InvalidAvailabilityZone(Invalid):
+    message = _("Availability zone '%(az)s' is invalid.")
+
+
 class InvalidVolumeType(Invalid):
     message = _("Invalid volume type: %(reason)s")
 
@@ -247,6 +250,11 @@ class ImageUnacceptable(Invalid):
     message = _("Image %(image_id)s is unacceptable: %(reason)s")
 
 
+class ImageTooBig(Invalid):
+    message = _("Image %(image_id)s size exceeded available "
+                "disk space: %(reason)s")
+
+
 class DeviceUnavailable(Invalid):
     message = _("The device in the path %(path)s is unavailable: %(reason)s")
 
@@ -256,7 +264,7 @@ class SnapshotUnavailable(VolumeBackendAPIException):
 
 
 class InvalidUUID(Invalid):
-    message = _("Expected a uuid but received %(uuid)s.")
+    message = _("Expected a UUID but received %(uuid)s.")
 
 
 class InvalidAPIVersionString(Invalid):
@@ -320,7 +328,7 @@ class MessageNotFound(NotFound):
 
 class VolumeAttachmentNotFound(NotFound):
     message = _("Volume attachment could not be found with "
-                "filter: %(filter)s .")
+                "filter: %(filter)s.")
 
 
 class VolumeMetadataNotFound(NotFound):
@@ -400,6 +408,10 @@ class SnapshotNotFound(NotFound):
 
 class ServerNotFound(NotFound):
     message = _("Instance %(uuid)s could not be found.")
+
+
+class VolumeSnapshotNotFound(NotFound):
+    message = _("No snapshots found for volume %(volume_id)s.")
 
 
 class VolumeIsBusy(CinderException):
@@ -734,6 +746,11 @@ class BackupMetadataUnsupportedVersion(BackupDriverException):
     message = _("Unsupported backup metadata version requested")
 
 
+class BackupMetadataNotFound(NotFound):
+    message = _("Backup %(backup_id)s has no metadata with "
+                "key %(metadata_key)s.")
+
+
 class BackupVerifyUnsupportedDriver(BackupDriverException):
     message = _("Unsupported backup verify driver")
 
@@ -844,6 +861,11 @@ class UnableToFailOver(CinderException):
 class ReplicationError(CinderException):
     message = _("Volume %(volume_id)s replication "
                 "error: %(reason)s")
+
+
+class ReplicationGroupError(CinderException):
+    message = _("Group %(group_id)s replication "
+                "error: %(reason)s.")
 
 
 class ReplicationNotFound(NotFound):
@@ -966,6 +988,10 @@ class RemoteFSNoSharesMounted(RemoteFSException):
 
 class RemoteFSNoSuitableShareFound(RemoteFSException):
     message = _("There is no share which can host %(volume_size)sG")
+
+
+class RemoteFSInvalidBackingFile(VolumeDriverException):
+    message = _("File %(path)s has invalid backing file %(backing_file)s.")
 
 
 # NFS driver
@@ -1095,45 +1121,6 @@ class InvalidGroupSnapshotStatus(Invalid):
     message = _("Invalid GroupSnapshot Status: %(reason)s")
 
 
-# Hitachi Block Storage Driver
-class HBSDError(VolumeDriverException):
-    message = _("HBSD error occurs.")
-
-
-class HBSDCmdError(HBSDError):
-
-    def __init__(self, message=None, ret=None, err=None):
-        self.ret = ret
-        self.stderr = err
-
-        super(HBSDCmdError, self).__init__(message=message)
-
-
-class HBSDBusy(HBSDError):
-    message = "Device or resource is busy."
-
-
-class HBSDNotFound(NotFound):
-    message = _("Storage resource could not be found.")
-
-
-class HBSDVolumeIsBusy(VolumeIsBusy):
-    message = _("Volume %(volume_name)s is busy.")
-
-
-# Hitachi VSP Driver
-class VSPError(VolumeDriverException):
-    message = _("VSP error occurred. %(message)s")
-
-
-class VSPBusy(VSPError):
-    message = _("Device or resource is busy.")
-
-
-class VSPNotSupported(VSPError):
-    message = _("The function on the storage is not supported.")
-
-
 # Datera driver
 class DateraAPIException(VolumeBackendAPIException):
     message = _("Bad response from Datera API")
@@ -1156,42 +1143,20 @@ class ISCSITargetDetachFailed(CinderException):
     message = _("Failed to detach iSCSI target for volume %(volume_id)s.")
 
 
+class TargetUpdateFailed(CinderException):
+    message = _("Failed to update target for volume %(volume_id)s.")
+
+
 class ISCSITargetHelperCommandFailed(CinderException):
     message = "%(error_message)s"
 
 
-# X-IO driver exception.
-class XIODriverException(VolumeDriverException):
-    message = _("X-IO Volume Driver exception!")
-
-
-# Violin Memory drivers
-class ViolinInvalidBackendConfig(VolumeDriverException):
-    message = _("Volume backend config is invalid: %(reason)s")
-
-
-class ViolinRequestRetryTimeout(VolumeDriverException):
-    message = _("Backend service retry timeout hit: %(timeout)s sec")
-
-
-class ViolinBackendErr(VolumeBackendAPIException):
-    message = _("Backend reports: %(message)s")
-
-
-class ViolinBackendErrExists(VolumeBackendAPIException):
-    message = _("Backend reports: item already exists")
-
-
-class ViolinBackendErrNotFound(NotFound):
-    message = _("Backend reports: item not found")
-
-
-class ViolinResourceNotFound(NotFound):
-    message = _("Backend reports: %(message)s")
-
-
 class BadHTTPResponseStatus(VolumeDriverException):
     message = _("Bad HTTP response status %(status)s")
+
+
+class BadResetResourceStatus(CinderException):
+    message = _("Bad reset resource status : %(message)s")
 
 
 # ZADARA STORAGE VPSA driver exception
@@ -1239,10 +1204,10 @@ class XtremIOSnapshotsLimitExceeded(VolumeDriverException):
     message = _("Exceeded the limit of snapshots per volume")
 
 
-# Infortrend EonStor DS Driver
-class InfortrendCliException(VolumeDriverException):
-    message = _("Infortrend CLI exception: %(err)s Param: %(param)s "
-                "(Return Code: %(rc)s) (Output: %(out)s)")
+# StorPool driver
+class StorPoolConfigurationInvalid(CinderException):
+    message = _("Invalid parameter %(param)s in the %(section)s section "
+                "of the /etc/storpool.conf file: %(error)s")
 
 
 # DOTHILL drivers
@@ -1270,6 +1235,10 @@ class DotHillNotTargetPortal(VolumeDriverException):
     message = _("No active iSCSI portals with supplied iSCSI IPs")
 
 
+class DotHillDriverNotSupported(VolumeDriverException):
+    message = _("The Dot Hill driver is no longer supported.")
+
+
 # Sheepdog
 class SheepdogError(VolumeBackendAPIException):
     message = _("An error has occurred in SheepdogDriver. "
@@ -1290,21 +1259,6 @@ class MetadataAbsent(CinderException):
 class NotSupportedOperation(Invalid):
     message = _("Operation not supported: %(operation)s.")
     code = 405
-
-
-# Hitachi HNAS drivers
-class HNASConnError(VolumeDriverException):
-    message = "%(message)s"
-
-
-# Coho drivers
-class CohoException(VolumeDriverException):
-    message = _("Coho Data Cinder driver failure: %(message)s")
-
-
-# Tegile Storage drivers
-class TegileAPIException(VolumeBackendAPIException):
-    message = _("Unexpected response from Tegile IntelliFlash API")
 
 
 # NexentaStor driver exception
@@ -1347,15 +1301,6 @@ class SynoLUNNotExist(VolumeDriverException):
     message = _("LUN not found by UUID: %(uuid)s.")
 
 
-# Reduxio driver
-class RdxAPICommandException(VolumeDriverException):
-    message = _("Reduxio API Command Exception")
-
-
-class RdxAPIConnectionException(VolumeDriverException):
-    message = _("Reduxio API Connection Exception")
-
-
 class AttachmentSpecsNotFound(NotFound):
     message = _("Attachment %(attachment_id)s has no "
                 "key %(specs_key)s.")
@@ -1389,3 +1334,18 @@ class ErrorInHyperScaleVersion(VolumeDriverException):
 
 class ErrorInParsingArguments(VolumeDriverException):
     message = _("Error in parsing message arguments : Invalid Payload")
+
+
+# GPFS driver
+class GPFSDriverUnsupportedOperation(VolumeBackendAPIException):
+    message = _("GPFS driver unsupported operation: %(msg)s")
+
+
+class InvalidName(Invalid):
+    message = _("An invalid 'name' value was provided. %(reason)s")
+
+
+class ServiceUserTokenNoAuth(CinderException):
+    message = _("The [service_user] send_service_user_token option was "
+                "requested, but no service auth could be loaded. Please check "
+                "the [service_user] configuration section.")

@@ -105,9 +105,11 @@ class ReplicationStatus(BaseCinderEnum):
     FAILING_OVER = 'failing-over'
     FAILOVER_ERROR = 'failover-error'
     FAILED_OVER = 'failed-over'
+    ENABLING = 'enabling'
+    DISABLING = 'disabling'
 
     ALL = (ERROR, ENABLED, DISABLED, NOT_CAPABLE, FAILOVER_ERROR, FAILING_OVER,
-           FAILED_OVER)
+           FAILED_OVER, ENABLING, DISABLING)
 
 
 class ReplicationStatusField(BaseEnumField):
@@ -124,9 +126,10 @@ class SnapshotStatus(BaseCinderEnum):
     ERROR_DELETING = 'error_deleting'
     UNMANAGING = 'unmanaging'
     BACKING_UP = 'backing-up'
+    RESTORING = 'restoring'
 
     ALL = (ERROR, AVAILABLE, CREATING, DELETING, DELETED,
-           UPDATING, ERROR_DELETING, UNMANAGING, BACKING_UP)
+           UPDATING, ERROR_DELETING, UNMANAGING, BACKING_UP, RESTORING)
 
 
 class SnapshotStatusField(BaseEnumField):
@@ -160,3 +163,7 @@ class VolumeAttachStatus(BaseCinderEnum):
 
 class VolumeAttachStatusField(BaseEnumField):
     AUTO_TYPE = VolumeAttachStatus()
+
+
+class DictOfNullableField(fields.AutoTypedField):
+    AUTO_TYPE = fields.Dict(fields.FieldType(), nullable=True)

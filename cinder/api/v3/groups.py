@@ -22,6 +22,7 @@ import webob
 from webob import exc
 
 from cinder.api import common
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
 from cinder.api.v3.views import groups as views_groups
 from cinder import exception
@@ -31,9 +32,6 @@ from cinder import rpc
 from cinder.volume import group_types
 
 LOG = logging.getLogger(__name__)
-
-GROUP_API_VERSION = '3.13'
-GROUP_CREATE_FROM_SRC_API_VERSION = '3.14'
 
 
 class GroupsController(wsgi.Controller):
@@ -52,7 +50,7 @@ class GroupsController(wsgi.Controller):
                     "CG APIs.") % {'group_type': group_type_id}
             raise exc.HTTPBadRequest(explanation=msg)
 
-    @wsgi.Controller.api_version(GROUP_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_VOLUME)
     def show(self, req, id):
         """Return data about the given group."""
         LOG.debug('show called for member %s', id)
@@ -67,7 +65,7 @@ class GroupsController(wsgi.Controller):
 
         return self._view_builder.detail(req, group)
 
-    @wsgi.Controller.api_version('3.20')
+    @wsgi.Controller.api_version(mv.GROUP_VOLUME_RESET_STATUS)
     @wsgi.action("reset_status")
     def reset_status(self, req, id, body):
         return self._reset_status(req, id, body)
@@ -108,7 +106,7 @@ class GroupsController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=error.msg)
         return webob.Response(status_int=http_client.ACCEPTED)
 
-    @wsgi.Controller.api_version(GROUP_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_VOLUME)
     @wsgi.action("delete")
     def delete_group(self, req, id, body):
         return self._delete(req, id, body)
@@ -119,10 +117,7 @@ class GroupsController(wsgi.Controller):
         context = req.environ['cinder.context']
         del_vol = False
         if body:
-            if not self.is_valid_body(body, 'delete'):
-                msg = _("Missing required element 'delete' in "
-                        "request body.")
-                raise exc.HTTPBadRequest(explanation=msg)
+            self.assert_valid_body(body, 'delete')
 
             grp_body = body['delete']
             try:
@@ -149,12 +144,12 @@ class GroupsController(wsgi.Controller):
 
         return webob.Response(status_int=http_client.ACCEPTED)
 
-    @wsgi.Controller.api_version(GROUP_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_VOLUME)
     def index(self, req):
         """Returns a summary list of groups."""
         return self._get_groups(req, is_detail=False)
 
-    @wsgi.Controller.api_version(GROUP_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_VOLUME)
     def detail(self, req):
         """Returns a detailed list of groups."""
         return self._get_groups(req, is_detail=True)
@@ -163,12 +158,16 @@ class GroupsController(wsgi.Controller):
         """Returns a list of groups through view builder."""
         context = req.environ['cinder.context']
         filters = req.params.copy()
+        api_version = req.api_version_request
         marker, limit, offset = common.get_pagination_params(filters)
         sort_keys, sort_dirs = common.get_sort_params(filters)
 
         filters.pop('list_volume', None)
-        if req.api_version_request.matches(common.FILTERING_VERSION):
-            common.reject_invalid_filters(context, filters, 'group')
+        if api_version.matches(mv.RESOURCE_FILTER):
+            support_like = (True if api_version.matches(
+                mv.LIKE_FILTER) else False)
+            common.reject_invalid_filters(context, filters, 'group',
+                                          support_like)
 
         groups = self.group_api.get_all(
             context, filters=filters, marker=marker, limit=limit,
@@ -192,7 +191,7 @@ class GroupsController(wsgi.Controller):
                 req, new_groups)
         return groups
 
-    @wsgi.Controller.api_version(GROUP_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_VOLUME)
     @wsgi.response(http_client.ACCEPTED)
     def create(self, req, body):
         """Create a new group."""
@@ -238,7 +237,7 @@ class GroupsController(wsgi.Controller):
         retval = self._view_builder.summary(req, new_group)
         return retval
 
-    @wsgi.Controller.api_version(GROUP_CREATE_FROM_SRC_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_SNAPSHOTS)
     @wsgi.action("create-from-src")
     @wsgi.response(http_client.ACCEPTED)
     def create_from_src(self, req, body):
@@ -303,7 +302,7 @@ class GroupsController(wsgi.Controller):
         retval = self._view_builder.summary(req, new_group)
         return retval
 
-    @wsgi.Controller.api_version(GROUP_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_VOLUME)
     def update(self, req, id, body):
         """Update the group.
 
@@ -367,6 +366,99 @@ class GroupsController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=error.msg)
 
         return webob.Response(status_int=http_client.ACCEPTED)
+
+    @wsgi.Controller.api_version(mv.GROUP_REPLICATION)
+    @wsgi.action("enable_replication")
+    def enable_replication(self, req, id, body):
+        """Enables replications for a group."""
+        context = req.environ['cinder.context']
+        if body:
+            self.assert_valid_body(body, 'enable_replication')
+
+        LOG.info('Enable replication group with id: %s.', id,
+                 context=context)
+
+        try:
+            group = self.group_api.get(context, id)
+            self.group_api.enable_replication(context, group)
+            # Not found exception will be handled at the wsgi level
+        except (exception.InvalidGroup, exception.InvalidGroupType,
+                exception.InvalidVolume, exception.InvalidVolumeType) as error:
+            raise exc.HTTPBadRequest(explanation=error.msg)
+
+        return webob.Response(status_int=202)
+
+    @wsgi.Controller.api_version(mv.GROUP_REPLICATION)
+    @wsgi.action("disable_replication")
+    def disable_replication(self, req, id, body):
+        """Disables replications for a group."""
+        context = req.environ['cinder.context']
+        if body:
+            self.assert_valid_body(body, 'disable_replication')
+
+        LOG.info('Disable replication group with id: %s.', id,
+                 context=context)
+
+        try:
+            group = self.group_api.get(context, id)
+            self.group_api.disable_replication(context, group)
+            # Not found exception will be handled at the wsgi level
+        except (exception.InvalidGroup, exception.InvalidGroupType,
+                exception.InvalidVolume, exception.InvalidVolumeType) as error:
+            raise exc.HTTPBadRequest(explanation=error.msg)
+
+        return webob.Response(status_int=202)
+
+    @wsgi.Controller.api_version(mv.GROUP_REPLICATION)
+    @wsgi.action("failover_replication")
+    def failover_replication(self, req, id, body):
+        """Fails over replications for a group."""
+        context = req.environ['cinder.context']
+        if body:
+            self.assert_valid_body(body, 'failover_replication')
+
+            grp_body = body['failover_replication']
+            try:
+                allow_attached = strutils.bool_from_string(
+                    grp_body.get('allow_attached_volume', False),
+                    strict=True)
+            except ValueError:
+                msg = (_("Invalid value '%s' for allow_attached_volume flag.")
+                       % grp_body)
+                raise exc.HTTPBadRequest(explanation=msg)
+            secondary_backend_id = grp_body.get('secondary_backend_id')
+
+        LOG.info('Failover replication group with id: %s.', id,
+                 context=context)
+
+        try:
+            group = self.group_api.get(context, id)
+            self.group_api.failover_replication(context, group, allow_attached,
+                                                secondary_backend_id)
+            # Not found exception will be handled at the wsgi level
+        except (exception.InvalidGroup, exception.InvalidGroupType,
+                exception.InvalidVolume, exception.InvalidVolumeType) as error:
+            raise exc.HTTPBadRequest(explanation=error.msg)
+
+        return webob.Response(status_int=202)
+
+    @wsgi.Controller.api_version(mv.GROUP_REPLICATION)
+    @wsgi.action("list_replication_targets")
+    def list_replication_targets(self, req, id, body):
+        """List replication targets for a group."""
+        context = req.environ['cinder.context']
+        if body:
+            self.assert_valid_body(body, 'list_replication_targets')
+
+        LOG.info('List replication targets for group with id: %s.', id,
+                 context=context)
+
+        # Not found exception will be handled at the wsgi level
+        group = self.group_api.get(context, id)
+        replication_targets = self.group_api.list_replication_targets(
+            context, group)
+
+        return replication_targets
 
 
 def create_resource():

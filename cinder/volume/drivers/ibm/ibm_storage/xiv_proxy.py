@@ -14,8 +14,10 @@
 #    under the License.
 #
 import datetime
+import re
 import six
 import socket
+
 
 from oslo_log import log as logging
 from oslo_utils import importutils
@@ -25,8 +27,7 @@ if pyxcli:
     from pyxcli import client
     from pyxcli import errors
     from pyxcli.events import events
-    from pyxcli.mirroring import errors as m_errors
-    from pyxcli.mirroring import volume_recovery_manager
+    from pyxcli.mirroring import mirrored_entities
     from pyxcli import transports
 
 from cinder import context
@@ -38,6 +39,8 @@ from cinder.volume.drivers.ibm.ibm_storage import certificate
 from cinder.volume.drivers.ibm.ibm_storage import cryptish
 from cinder.volume.drivers.ibm.ibm_storage import proxy
 from cinder.volume.drivers.ibm.ibm_storage import strings
+from cinder.volume.drivers.ibm.ibm_storage import xiv_replication as repl
+from cinder.volume import group_types
 from cinder.volume import qos_specs
 from cinder.volume import utils
 from cinder.volume import volume_types
@@ -54,6 +57,7 @@ SYNC = 'sync'
 ASYNC = 'async'
 SYNC_TIMEOUT = 300
 SYNCHED_STATES = ['synchronized', 'rpo ok']
+PYXCLI_VERSION = '1.1.5'
 
 LOG = logging.getLogger(__name__)
 
@@ -92,39 +96,28 @@ DELETE_VOLUME_BASE_ERROR = ("Unable to delete volume '%(volume)s': "
 MANAGE_VOLUME_BASE_ERROR = _("Unable to manage the volume '%(volume)s': "
                              "%(error)s.")
 
-
-class Rate(object):
-
-    def __init__(self, rpo, schedule):
-        self.rpo = rpo
-        self.schedule = schedule
-        self.schedule_name = self._schedule_name_from_schedule(self.schedule)
-
-    def _schedule_name_from_schedule(self, schedule):
-        if schedule == '00:00:20':
-            return 'min_interval'
-        return ("cinder_%(sched)s" %
-                {'sched': schedule.replace(':', '_')})
+INCOMPATIBLE_PYXCLI = _('Incompatible pyxcli found. Required: %(required)s '
+                        'Found: %(found)s')
 
 
 class XIVProxy(proxy.IBMStorageProxy):
     """Proxy between the Cinder Volume and Spectrum Accelerate Storage.
 
     Supports IBM XIV, Spectrum Accelerate, A9000, A9000R
+    Version: 2.1.0
+    Required pyxcli version: 1.1.5
+
+    .. code:: text
+
+      2.0 - First open source driver version
+      2.1.0 - Support Consistency groups through Generic volume groups
+            - Support XIV/A9000 Volume independent QoS
+            - Support groups replication
+
     """
-    async_rates = (
-        Rate(rpo=30, schedule='00:00:20'),
-        Rate(rpo=60, schedule='00:00:20'),
-        Rate(rpo=300, schedule='00:02:00'),
-        Rate(rpo=600, schedule='00:05:00'),
-        Rate(rpo=3600, schedule='00:15:00'),
-        Rate(rpo=7200, schedule='00:30:00'),
-        Rate(rpo=14400, schedule='01:00:00'),
-        Rate(rpo=43200, schedule='03:00:00'),
-    )
 
     def __init__(self, storage_info, logger, exception,
-                 driver=None, active_backend_id=None):
+                 driver=None, active_backend_id=None, host=None):
         """Initialize Proxy."""
         if not active_backend_id:
             active_backend_id = strings.PRIMARY_BACKEND_ID
@@ -145,6 +138,22 @@ class XIVProxy(proxy.IBMStorageProxy):
 
     @proxy._trace_time
     def setup(self, context):
+        msg = ''
+        if pyxcli:
+            if pyxcli.version != PYXCLI_VERSION:
+                msg = (INCOMPATIBLE_PYXCLI %
+                       {'required': PYXCLI_VERSION,
+                        'found': pyxcli.version
+                        })
+        else:
+            msg = (SETUP_BASE_ERROR %
+                   {'title': strings.TITLE,
+                    'details': "IBM Python XCLI Client (pyxcli) not found"
+                    })
+        if msg != '':
+            LOG.error(msg)
+            raise self._get_exception()(msg)
+
         """Connect ssl client."""
         LOG.info("Setting up connection to %(title)s...\n"
                  "Active backend_id: '%(id)s'.",
@@ -176,19 +185,16 @@ class XIVProxy(proxy.IBMStorageProxy):
             self.ibm_storage_remote_cli = self._init_xcli(remote_id)
         self._event_service_start()
         self._update_stats()
+        LOG.info("IBM Storage %(common_ver)s "
+                 "xiv_proxy %(proxy_ver)s. ",
+                 {'common_ver': self.full_version,
+                  'proxy_ver': self.full_version})
         self._update_system_id()
         if remote_id:
             self._update_active_schedule_objects()
             self._update_remote_schedule_objects()
         LOG.info("Connection to the IBM storage "
                  "system established successfully.")
-
-    def _get_schedule_from_rpo(self, rpo):
-        return [rate for rate in self.async_rates
-                if rate.rpo == rpo][0].schedule_name
-
-    def _get_supported_rpo(self):
-        return [rate.rpo for rate in self.async_rates]
 
     @proxy._trace_time
     def _update_active_schedule_objects(self):
@@ -198,7 +204,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         min_interval.
         """
         schedules = self._call_xiv_xcli("schedule_list").as_dict('name')
-        for rate in self.async_rates:
+        for rate in repl.Replication.async_rates:
             if rate.schedule == '00:00:20':
                 continue
             name = rate.schedule_name
@@ -215,9 +221,18 @@ class XIVProxy(proxy.IBMStorageProxy):
                         data=msg)
             else:
                 LOG.debug('create %(sch)s', {'sch': name})
-                self._call_xiv_xcli("schedule_create",
-                                    schedule=name, type='interval',
-                                    interval=rate.schedule)
+                try:
+                    self._call_xiv_xcli("schedule_create",
+                                        schedule=name, type='interval',
+                                        interval=rate.schedule)
+                except errors.XCLIError:
+                    msg = (_("Setting up Async mirroring failed, "
+                             "schedule %(sch)s is not supported on system: "
+                             " %(id)s.")
+                           % {'sch': name, 'id': self.system_id})
+                    LOG.error(msg)
+                    raise self.meta['exception'].VolumeBackendAPIException(
+                        data=msg)
 
     @proxy._trace_time
     def _update_remote_schedule_objects(self):
@@ -227,7 +242,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         min_interval.
         """
         schedules = self._call_remote_xiv_xcli("schedule_list").as_dict('name')
-        for rate in self.async_rates:
+        for rate in repl.Replication.async_rates:
             if rate.schedule == '00:00:20':
                 continue
             name = rate.schedule_name
@@ -242,9 +257,18 @@ class XIVProxy(proxy.IBMStorageProxy):
                     raise self.meta['exception'].VolumeBackendAPIException(
                         data=msg)
             else:
-                self._call_remote_xiv_xcli("schedule_create",
-                                           schedule=name, type='interval',
-                                           interval=rate.schedule)
+                try:
+                    self._call_remote_xiv_xcli("schedule_create",
+                                               schedule=name, type='interval',
+                                               interval=rate.schedule)
+                except errors.XCLIError:
+                    msg = (_("Setting up Async mirroring failed, "
+                             "schedule %(sch)s is not supported on system: "
+                             " %(id)s.")
+                           % {'sch': name, 'id': self.system_id})
+                    LOG.error(msg)
+                    raise self.meta['exception'].VolumeBackendAPIException(
+                        data=msg)
 
     def _get_extra_specs(self, type_id):
         """get extra specs to match the type_id
@@ -331,7 +355,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         if specs is None or specs == {}:
             return ''
 
-        for key, value in specs.items():
+        for key, value in sorted(specs.items()):
             perf_class_name += '_' + key + '_' + value
 
         try:
@@ -341,8 +365,10 @@ class XIVProxy(proxy.IBMStorageProxy):
 
             # list is not empty, check if class has the right values
             for perf_class in classes_list:
-                if (not perf_class.max_iops == specs.get('iops', '0') or
-                        not perf_class.max_bw == specs.get('bw', '0')):
+                if (not perf_class.get('max_iops',
+                                       None) == specs.get('iops', '0') or
+                        not perf_class.get('max_bw',
+                                           None) == specs.get('bw', '0')):
                     raise self.meta['exception'].VolumeBackendAPIException(
                         data=PERF_CLASS_VALUES_ERROR %
                         {'details': perf_class_name})
@@ -357,11 +383,23 @@ class XIVProxy(proxy.IBMStorageProxy):
             self._create_qos_class(perf_class_name, specs)
         return perf_class_name
 
+    def _get_type_from_perf_class_name(self, perf_class_name):
+        _type = re.findall('type_(independent|shared)', perf_class_name)
+        return _type[0] if _type else None
+
     def _create_qos_class(self, perf_class_name, specs):
         """Create the qos class on the backend."""
         try:
-            self._call_xiv_xcli("perf_class_create",
-                                perf_class=perf_class_name)
+            # check if we have a shared (default) perf class
+            # or an independent perf class
+            _type = self._get_type_from_perf_class_name(perf_class_name)
+            if _type:
+                self._call_xiv_xcli("perf_class_create",
+                                    perf_class=perf_class_name,
+                                    type=_type)
+            else:
+                self._call_xiv_xcli("perf_class_create",
+                                    perf_class=perf_class_name)
 
         except errors.XCLIError as e:
             details = self._get_code_and_status_or_message(e)
@@ -397,30 +435,12 @@ class XIVProxy(proxy.IBMStorageProxy):
         return self._get_qos_specs(type_id)
 
     def _get_replication_info(self, specs):
-        info = {'enabled': False, 'mode': None, 'rpo': 0}
-        if specs:
-            LOG.debug('_get_replication_info: specs %(specs)s',
-                      {'specs': specs})
-            info['enabled'] = (
-                specs.get('replication_enabled', '').upper() in
-                (u'TRUE', strings.METADATA_IS_TRUE))
-            replication_type = specs.get('replication_type', SYNC).lower()
-            if replication_type in (u'sync', u'<is> sync'):
-                info['mode'] = SYNC
-            elif replication_type in (u'async', u'<is> async'):
-                info['mode'] = ASYNC
-            else:
-                msg = (_("Unsupported replication mode %(mode)s"),
-                       {'mode': replication_type})
-                LOG.error(msg)
-                raise self._get_exception()(message=msg)
-            info['rpo'] = int(specs.get('rpo', u'<is> 0')[5:])
-            if info['rpo'] and info['rpo'] not in self._get_supported_rpo():
-                msg = (_("Unsupported replication RPO %(rpo)s"),
-                       {'rpo': info['rpo']})
-                LOG.error(msg)
-                raise self._get_exception()(message=msg)
-            LOG.debug('_get_replication_info: info %(info)s', {'info': info})
+
+        info, msg = repl.Replication.extract_replication_info_from_specs(specs)
+        if not info:
+            LOG.error(msg)
+            raise self._get_exception()(message=msg)
+
         return info
 
     @proxy._trace_time
@@ -437,8 +457,8 @@ class XIVProxy(proxy.IBMStorageProxy):
             raise self._get_exception()(msg)
         except errors.PoolOutOfSpaceError:
             msg = (_("Unable to create volume: pool '%(pool)s' is "
-                     "out of space."),
-                   {'pool': pool})
+                     "out of space.")
+                   % {'pool': pool})
             LOG.error(msg)
             raise self._get_exception()(msg)
         except errors.XCLIError as e:
@@ -450,32 +470,81 @@ class XIVProxy(proxy.IBMStorageProxy):
     @proxy._trace_time
     def create_volume(self, volume):
         """Creates a volume."""
-        # read CG information
-        cg = self._cg_name_from_volume(volume)
         # read replication information
         specs = self._get_extra_specs(volume.get('volume_type_id', None))
         replication_info = self._get_replication_info(specs)
 
-        if cg and replication_info['enabled']:
-            # An unsupported illegal configuration
-            msg = _("Unable to create volume: "
-                    "Replication of consistency group is not supported")
-            LOG.error(msg)
-            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
-
         self._create_volume(volume)
-        return self.handle_created_vol_properties(cg,
-                                                  replication_info,
+        return self.handle_created_vol_properties(replication_info,
                                                   volume)
 
-    def handle_created_vol_properties(self, cg, replication_info, volume):
+    def handle_created_vol_properties(self, replication_info, volume):
         volume_update = {}
-        if cg:
-            volume_update['consistencygroup_id'] = (
-                volume.get('consistencygroup_id', None))
+
+        LOG.debug('checking replication_info %(rep)s',
+                  {'rep': replication_info})
+        volume_update['replication_status'] = 'disabled'
+        cg = volume.group and utils.is_group_a_cg_snapshot_type(volume.group)
+        if replication_info['enabled']:
             try:
+                repl.VolumeReplication(self).create_replication(
+                    volume.name, replication_info)
+            except Exception as e:
+                details = self._get_code_and_status_or_message(e)
+                msg = ('Failed create_replication for '
+                       'volume %(vol)s: %(err)s',
+                       {'vol': volume['name'], 'err': details})
+                LOG.error(msg)
+                if cg:
+                    cg_name = self._cg_name_from_volume(volume)
+                    self._silent_delete_volume_from_cg(volume, cg_name)
+                self._silent_delete_volume(volume=volume)
+                raise
+            volume_update['replication_status'] = 'enabled'
+
+        if cg:
+            if volume.group.is_replicated:
+                # for replicated Consistency Group:
+                # The Volume must be mirrored, and its mirroring settings must
+                # be identical to those of the Consistency Group:
+                # mirroring type (e.g., synchronous),
+                # mirroring status, mirroring target(backend)
+                group_specs = group_types.get_group_type_specs(
+                    volume.group.group_type_id)
+                group_rep_info = self._get_replication_info(group_specs)
+
+                msg = None
+                if volume_update['replication_status'] != 'enabled':
+                    msg = ('Cannot add non-replicated volume into'
+                           ' replicated group')
+                elif replication_info['mode'] != group_rep_info['mode']:
+                    msg = ('Volume replication type and Group replication type'
+                           ' should be the same')
+                elif volume.host != volume.group.host:
+                    msg = 'Cannot add volume to Group on different host'
+                elif volume.group['replication_status'] == 'enabled':
+                    # if group is mirrored and enabled, compare state.
+                    group_name = self._cg_name_from_group(volume.group)
+                    me = mirrored_entities.MirroredEntities(
+                        self.ibm_storage_cli)
+                    me_objs = me.get_mirror_resources_by_name_map()
+                    vol_obj = me_objs['volumes'][volume.name]
+                    vol_sync_state = vol_obj['sync_state']
+                    cg_sync_state = me_objs['cgs'][group_name]['sync_state']
+
+                    if (vol_sync_state != 'Synchronized' or
+                            cg_sync_state != 'Synchronized'):
+                        msg = ('Cannot add volume to Group. Both volume and '
+                               'group should have sync_state = Synchronized')
+
+                if msg:
+                    LOG.error(msg)
+                    raise self.meta['exception'].VolumeBackendAPIException(
+                        data=msg)
+            try:
+                cg_name = self._cg_name_from_volume(volume)
                 self._call_xiv_xcli(
-                    "cg_add_vol", vol=volume['name'], cg=cg)
+                    "cg_add_vol", vol=volume['name'], cg=cg_name)
             except errors.XCLIError as e:
                 details = self._get_code_and_status_or_message(e)
                 self._silent_delete_volume(volume=volume)
@@ -496,41 +565,273 @@ class XIVProxy(proxy.IBMStorageProxy):
             except errors.XCLIError as e:
                 details = self._get_code_and_status_or_message(e)
                 if cg:
-                    self._silent_delete_volume_from_cg(volume, cg)
+                    cg_name = self._cg_name_from_volume(volume)
+                    self._silent_delete_volume_from_cg(volume, cg_name)
                 self._silent_delete_volume(volume=volume)
                 msg = PERF_CLASS_ADD_ERROR % {'details': details}
                 LOG.error(msg)
                 raise self.meta['exception'].VolumeBackendAPIException(
                     data=msg)
 
-        LOG.debug('checking replication_info %(rep)s',
-                  {'rep': replication_info})
-        volume_update['replication_status'] = 'disabled'
-        if replication_info['enabled']:
-            try:
-                self._replication_create(volume, replication_info)
-            except Exception as e:
-                details = self._get_code_and_status_or_message(e)
-                msg = ('Failed _replication_create for '
-                       'volume %(vol)s: %(err)s',
-                       {'vol': volume['name'], 'err': details})
-                LOG.error(msg)
-                if cg:
-                    self._silent_delete_volume_from_cg(volume, cg)
-                self._silent_delete_volume(volume=volume)
-                raise
-            volume_update['replication_status'] = 'enabled'
-
         return volume_update
+
+    @proxy._trace_time
+    def enable_replication(self, context, group, volumes):
+        """Enable cg replication"""
+        # fetch replication info
+        group_specs = group_types.get_group_type_specs(group.group_type_id)
+        if not group_specs:
+            msg = 'No group specs inside group type'
+            LOG.error(msg)
+            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
+
+        # Add this field to adjust it to generic replication (for volumes)
+        replication_info = self._get_replication_info(group_specs)
+        if utils.is_group_a_cg_snapshot_type(group):
+            # take every vol out of cg - we can't mirror the cg otherwise.
+            if volumes:
+                self._update_consistencygroup(context, group,
+                                              remove_volumes=volumes)
+                for volume in volumes:
+                    enabled_status = fields.ReplicationStatus.ENABLED
+                    if volume['replication_status'] != enabled_status:
+                        repl.VolumeReplication(self).create_replication(
+                            volume.name, replication_info)
+
+            # mirror entire group
+            group_name = self._cg_name_from_group(group)
+            try:
+                self._create_consistencygroup_on_remote(context, group_name)
+            except errors.CgNameExistsError:
+                LOG.debug("CG name %(cg)s exists, no need to open it on "
+                          "secondary backend.", {'cg': group_name})
+            repl.GroupReplication(self).create_replication(group_name,
+                                                           replication_info)
+
+            updated_volumes = []
+            if volumes:
+                # add volumes back to cg
+                self._update_consistencygroup(context, group,
+                                              add_volumes=volumes)
+                for volume in volumes:
+                    updated_volumes.append(
+                        {'id': volume['id'],
+                         'replication_status':
+                             fields.ReplicationStatus.ENABLED})
+            return ({'replication_status': fields.ReplicationStatus.ENABLED},
+                    updated_volumes)
+        else:
+            # For generic groups we replicate all the volumes
+            updated_volumes = []
+            for volume in volumes:
+                repl.VolumeReplication(self).create_replication(
+                    volume.name, replication_info)
+
+            # update status
+            for volume in volumes:
+                updated_volumes.append(
+                    {'id': volume['id'],
+                     'replication_status': fields.ReplicationStatus.ENABLED})
+            return ({'replication_status': fields.ReplicationStatus.ENABLED},
+                    updated_volumes)
+
+    @proxy._trace_time
+    def disable_replication(self, context, group, volumes):
+        """disables CG replication"""
+        group_specs = group_types.get_group_type_specs(group.group_type_id)
+        if not group_specs:
+            msg = 'No group specs inside group type'
+            LOG.error(msg)
+            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
+
+        replication_info = self._get_replication_info(group_specs)
+        updated_volumes = []
+        if utils.is_group_a_cg_snapshot_type(group):
+            # one call deletes replication for cgs and volumes together.
+            group_name = self._cg_name_from_group(group)
+            repl.GroupReplication(self).delete_replication(group_name,
+                                                           replication_info)
+            for volume in volumes:
+                # xiv locks volumes after deletion of replication.
+                # we need to unlock it for further use.
+                try:
+                    self.ibm_storage_cli.cmd.vol_unlock(vol=volume.name)
+                    self.ibm_storage_remote_cli.cmd.vol_unlock(
+                        vol=volume.name)
+                    self.ibm_storage_remote_cli.cmd.cg_remove_vol(
+                        vol=volume.name)
+                except errors.VolumeBadNameError:
+                    LOG.debug("Failed to delete vol %(vol)s - "
+                              "ignoring.", {'vol': volume.name})
+                except errors.XCLIError as e:
+                    details = self._get_code_and_status_or_message(e)
+                    msg = ('Failed to unlock volumes %(details)s' %
+                           {'details': details})
+                    LOG.error(msg)
+                    raise self.meta['exception'].VolumeBackendAPIException(
+                        data=msg)
+                updated_volumes.append(
+                    {'id': volume.id,
+                     'replication_status': fields.ReplicationStatus.DISABLED})
+        else:
+            # For generic groups we replicate all the volumes
+            updated_volumes = []
+            for volume in volumes:
+                repl.VolumeReplication(self).delete_replication(
+                    volume.name, replication_info)
+
+            # update status
+            for volume in volumes:
+                try:
+                    self.ibm_storage_cli.cmd.vol_unlock(vol=volume.name)
+                    self.ibm_storage_remote_cli.cmd.vol_unlock(
+                        vol=volume.name)
+                except errors.XCLIError as e:
+                    details = self._get_code_and_status_or_message(e)
+                    msg = (_('Failed to unlock volumes %(details)s'),
+                           {'details': details})
+                    LOG.error(msg)
+                    raise self.meta['exception'].VolumeBackendAPIException(
+                        data=msg)
+                updated_volumes.append(
+                    {'id': volume['id'],
+                     'replication_status': fields.ReplicationStatus.DISABLED})
+        return ({'replication_status': fields.ReplicationStatus.DISABLED},
+                updated_volumes)
+
+    def get_secondary_backend_id(self, secondary_backend_id):
+        if secondary_backend_id is None:
+            secondary_backend_id = self._get_target()
+        if secondary_backend_id is None:
+            msg = _("No targets defined. Can't perform failover.")
+            LOG.error(msg)
+            raise self.meta['exception'].VolumeBackendAPIException(
+                data=msg)
+        return secondary_backend_id
+
+    def check_for_splitbrain(self, volumes, pool_master, pool_slave):
+        if volumes:
+            # check for split brain situations
+            # check for files that are available on both volumes
+            # and are not in an active mirroring relation
+            split_brain = self._potential_split_brain(
+                self.ibm_storage_cli,
+                self.ibm_storage_remote_cli,
+                volumes, pool_master,
+                pool_slave)
+            if split_brain:
+                # if such a situation exists stop and raise an exception!
+                msg = (_("A potential split brain condition has been found "
+                         "with the following volumes: \n'%(volumes)s.'") %
+                       {'volumes': split_brain})
+                LOG.error(msg)
+                raise self.meta['exception'].VolumeBackendAPIException(
+                    data=msg)
+
+    def failover_replication(self, context, group, volumes,
+                             secondary_backend_id):
+        """Failover a cg with all it's volumes.
+
+        if secondery_id is default, cg needs to be failed back.
+
+        """
+        volumes_updated = []
+        goal_status = ''
+        pool_master = None
+        group_updated = {'replication_status': group.replication_status}
+        LOG.info("failover_replication: of cg %(cg)s "
+                 "from %(active)s to %(id)s",
+                 {'cg': group.get('name'),
+                  'active': self.active_backend_id,
+                  'id': secondary_backend_id})
+        if secondary_backend_id == strings.PRIMARY_BACKEND_ID:
+            # default as active backend id
+            if self._using_default_backend():
+                LOG.info("CG has been failed back. "
+                         "No need to fail back again.")
+                return group_updated, volumes_updated
+            # get the master pool, not using default id.
+            pool_master = self._get_target_params(
+                self.active_backend_id)['san_clustername']
+            pool_slave = self.storage_info[storage.FLAG_KEYS['storage_pool']]
+            goal_status = 'enabled'
+            vol_goal_status = 'available'
+        else:
+            if not self._using_default_backend():
+                LOG.info("cg already failed over.")
+                return group_updated, volumes_updated
+            # using same api as Cheesecake, we need
+            # replciation_device entry. so we use get_targets.
+            secondary_backend_id = self.get_secondary_backend_id(
+                secondary_backend_id)
+            pool_master = self.storage_info[storage.FLAG_KEYS['storage_pool']]
+            pool_slave = self._get_target_params(
+                secondary_backend_id)['san_clustername']
+            goal_status = fields.ReplicationStatus.FAILED_OVER
+            vol_goal_status = fields.ReplicationStatus.FAILED_OVER
+        # we should have secondary_backend_id by here.
+        self.ibm_storage_remote_cli = self._init_xcli(secondary_backend_id)
+
+        # check for split brain in mirrored volumes
+        self.check_for_splitbrain(volumes, pool_master, pool_slave)
+        group_specs = group_types.get_group_type_specs(group.group_type_id)
+        if group_specs is None:
+            msg = "No group specs found. Cannot failover."
+            LOG.error(msg)
+            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
+
+        failback = (secondary_backend_id == strings.PRIMARY_BACKEND_ID)
+        result = False
+        details = ""
+        if utils.is_group_a_cg_snapshot_type(group):
+            result, details = repl.GroupReplication(self).failover(group,
+                                                                   failback)
+        else:
+            replicated_vols = []
+            for volume in volumes:
+                result, details = repl.VolumeReplication(self).failover(
+                    volume, failback)
+                if not result:
+                    break
+                replicated_vols.append(volume)
+            # switch the replicated ones back in case of error
+            if not result:
+                for volume in replicated_vols:
+                    result, details = repl.VolumeReplication(self).failover(
+                        volume, not failback)
+
+        if result:
+                status = goal_status
+                group_updated['replication_status'] = status
+        else:
+            status = 'error'
+        updates = {'status': vol_goal_status}
+        if status == 'error':
+            group_updated['replication_extended_status'] = details
+        # if replication on cg was successful, then all of the volumes
+        # have been successfully replicated as well.
+        for volume in volumes:
+            volumes_updated.append({
+                'id': volume.id,
+                'updates': updates
+            })
+        # replace between active and secondary xcli
+        self._replace_xcli_to_remote_xcli()
+        self.active_backend_id = secondary_backend_id
+        return group_updated, volumes_updated
+
+    def _replace_xcli_to_remote_xcli(self):
+        temp_ibm_storage_cli = self.ibm_storage_cli
+        self.ibm_storage_cli = self.ibm_storage_remote_cli
+        self.ibm_storage_remote_cli = temp_ibm_storage_cli
 
     def _get_replication_target_params(self):
         LOG.debug('_get_replication_target_params.')
-        targets = self._get_targets()
-        if not targets:
+        if not self.targets:
             msg = _("No targets available for replication")
             LOG.error(msg)
             raise self.meta['exception'].VolumeBackendAPIException(data=msg)
-        no_of_targets = len(targets)
+        no_of_targets = len(self.targets)
         if no_of_targets > 1:
             msg = _("Too many targets configured. Only one is supported")
             LOG.error(msg)
@@ -549,89 +850,6 @@ class XIVProxy(proxy.IBMStorageProxy):
             LOG.error(msg)
             raise self.meta['exception'].VolumeBackendAPIException(data=msg)
         return target, params
-
-    def _replication_create(self, volume, replication_info):
-        LOG.debug('_replication_create replication_info %(rep)s',
-                  {'rep': replication_info})
-
-        target, params = self._get_replication_target_params()
-        LOG.info('Target %(target)s: %(params)s',
-                 {'target': target, 'params': six.text_type(params)})
-
-        try:
-            pool = params['san_clustername']
-        except Exception:
-            msg = (_("Missing pool information for target '%(target)s'"),
-                   {'target': target})
-            LOG.error(msg)
-            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
-
-        volume_replication_mgr = volume_recovery_manager.VolumeRecoveryManager(
-            False, self.ibm_storage_cli)
-
-        self._replication_create_mirror(volume, replication_info,
-                                        target, pool, volume_replication_mgr)
-
-    def _replication_create_mirror(self, volume, replication_info,
-                                   target, pool, volume_replication_mgr):
-        LOG.debug('_replication_create_mirror')
-        schedule = None
-        if replication_info['rpo']:
-            schedule = self._get_schedule_from_rpo(replication_info['rpo'])
-            if schedule:
-                LOG.debug('schedule %(sched)s: for rpo %(rpo)s',
-                          {'sched': schedule, 'rpo': replication_info['rpo']})
-            else:
-                LOG.error('Failed to find schedule for rpo %(rpo)s',
-                          {'rpo': replication_info['rpo']})
-                # will fail in the next step
-        try:
-            volume_replication_mgr.create_mirror(
-                resource_name=volume['name'],
-                target_name=target,
-                mirror_type=replication_info['mode'],
-                slave_resource_name=volume['name'],
-                create_slave='yes',
-                remote_pool=pool,
-                rpo=replication_info['rpo'],
-                schedule=schedule,
-                activate_mirror='yes')
-        # TBD - what exceptions will we get here?
-        except Exception as e:
-            details = self._get_code_and_status_or_message(e)
-            msg = (_("Failed replication for %(vol)s: '%(details)s'"),
-                   {'vol': volume['name'], 'details': details})
-            LOG.error(msg)
-            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
-
-    def _replication_delete(self, volume, replication_info):
-        LOG.debug('_replication_delete replication_info %(rep)s',
-                  {'rep': replication_info})
-        targets = self._get_targets()
-        if not targets:
-            LOG.debug('No targets defined for replication')
-
-        volume_replication_mgr = volume_recovery_manager.VolumeRecoveryManager(
-            False, self.ibm_storage_cli)
-        try:
-            volume_replication_mgr.deactivate_mirror(
-                resource_id=volume['name'])
-        except Exception as e:
-            details = self._get_code_and_status_or_message(e)
-            msg = (_("Failed ending replication for %(vol)s: '%(details)s'"),
-                   {'vol': volume['name'], 'details': details})
-            LOG.error(msg)
-            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
-
-        try:
-            volume_replication_mgr.delete_mirror(
-                resource_id=volume['name'])
-        except Exception as e:
-            details = self._get_code_and_status_or_message(e)
-            msg = (_("Failed deleting replica for %(vol)s: '%(details)s'"),
-                   {'vol': volume['name'], 'details': details})
-            LOG.error(msg)
-            raise self.meta['exception'].VolumeBackendAPIException(data=msg)
 
     def _delete_volume(self, vol_name):
         """Deletes a volume on the Storage."""
@@ -686,7 +904,8 @@ class XIVProxy(proxy.IBMStorageProxy):
         replication_info = self._get_replication_info(specs)
         if replication_info['enabled']:
             try:
-                self._replication_delete(volume, replication_info)
+                repl.VolumeReplication(self).delete_replication(
+                    volume.name, replication_info)
             except Exception as e:
                 error = self._get_code_and_status_or_message(e)
                 LOG.error(DELETE_VOLUME_BASE_ERROR,
@@ -883,9 +1102,9 @@ class XIVProxy(proxy.IBMStorageProxy):
         volume_size = float(volume['size'])
         if volume_size < snapshot_size:
             error = (_("Volume size (%(vol_size)sGB) cannot be smaller than "
-                       "the snapshot size (%(snap_size)sGB).."),
-                     {'vol_size': volume_size,
-                      'snap_size': snapshot_size})
+                       "the snapshot size (%(snap_size)sGB)..")
+                     % {'vol_size': volume_size,
+                        'snap_size': snapshot_size})
             LOG.error(error)
             raise self._get_exception()(error)
         self.create_volume(volume)
@@ -893,8 +1112,8 @@ class XIVProxy(proxy.IBMStorageProxy):
             self._call_xiv_xcli(
                 "vol_copy", vol_src=snapshot_name, vol_trg=volume['name'])
         except errors.XCLIError as e:
-            error = (_("Fatal error in copying volume: %(details)s"),
-                     {'details': self._get_code_and_status_or_message(e)})
+            error = (_("Fatal error in copying volume: %(details)s")
+                     % {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             self._silent_delete_volume(volume)
             raise self._get_exception()(error)
@@ -908,8 +1127,8 @@ class XIVProxy(proxy.IBMStorageProxy):
             self._call_xiv_xcli(
                 "vol_resize", vol=volume['name'], size_blocks=size)
         except errors.XCLIError as e:
-            error = (_("Fatal error in resize volume: %(details)s"),
-                     {'details': self._get_code_and_status_or_message(e)})
+            error = (_("Fatal error in resize volume: %(details)s")
+                     % {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             self._silent_delete_volume(volume)
             raise self._get_exception()(error)
@@ -919,9 +1138,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         """create volume from snapshot."""
 
         snapshot_size = float(snapshot['volume_size'])
-        snapshot_name = snapshot['name']
-        self._create_volume_from_snapshot(
-            volume, snapshot_name, snapshot_size)
+        self._create_volume_from_snapshot(volume, snapshot.name, snapshot_size)
 
     @proxy._trace_time
     def create_snapshot(self, snapshot):
@@ -932,8 +1149,8 @@ class XIVProxy(proxy.IBMStorageProxy):
                 "snapshot_create", vol=snapshot['volume_name'],
                 name=snapshot['name'])
         except errors.XCLIError as e:
-            error = (_("Fatal error in snapshot_create: %(details)s"),
-                     {'details': self._get_code_and_status_or_message(e)})
+            error = (_("Fatal error in snapshot_create: %(details)s")
+                     % {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -945,8 +1162,8 @@ class XIVProxy(proxy.IBMStorageProxy):
             self._call_xiv_xcli(
                 "snapshot_delete", snapshot=snapshot['name'])
         except errors.XCLIError as e:
-            error = (_("Fatal error in snapshot_delete: %(details)s"),
-                     {'details': self._get_code_and_status_or_message(e)})
+            error = (_("Fatal error in snapshot_delete: %(details)s")
+                     % {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -964,8 +1181,8 @@ class XIVProxy(proxy.IBMStorageProxy):
                 "vol_resize", vol=volume['name'],
                 size_blocks=size, shrink_volume=shrink)
         except errors.XCLIError as e:
-            error = (_("Fatal error in vol_resize: %(details)s"),
-                     {'details': self._get_code_and_status_or_message(e)})
+            error = (_("Fatal error in vol_resize: %(details)s")
+                     % {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -1004,8 +1221,8 @@ class XIVProxy(proxy.IBMStorageProxy):
                 "vol_move", vol=volume.name,
                 pool=dest_pool)
         except errors.XCLIError as e:
-            error = (_("Fatal error in vol_move: %(details)s"),
-                     {'details': self._get_code_and_status_or_message(e)})
+            error = (_("Fatal error in vol_move: %(details)s")
+                     % {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -1047,16 +1264,16 @@ class XIVProxy(proxy.IBMStorageProxy):
             volumes = self._call_xiv_xcli(
                 "vol_list", vol=existing_volume).as_list
         except errors.XCLIError as e:
-            error = (MANAGE_VOLUME_BASE_ERROR,
-                     {'volume': existing_volume,
-                      'error': self._get_code_and_status_or_message(e)})
+            error = (MANAGE_VOLUME_BASE_ERROR
+                     % {'volume': existing_volume,
+                        'error': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
 
         if len(volumes) != 1:
-            error = (MANAGE_VOLUME_BASE_ERROR,
-                     {'volume': existing_volume,
-                      'error': 'Volume does not exist'})
+            error = (MANAGE_VOLUME_BASE_ERROR
+                     % {'volume': existing_volume,
+                        'error': 'Volume does not exist'})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -1070,9 +1287,9 @@ class XIVProxy(proxy.IBMStorageProxy):
                 vol=existing_volume,
                 new_name=volume['name'])
         except errors.XCLIError as e:
-            error = (MANAGE_VOLUME_BASE_ERROR,
-                     {'volume': existing_volume,
-                      'error': self._get_code_and_status_or_message(e)})
+            error = (MANAGE_VOLUME_BASE_ERROR
+                     % {'volume': existing_volume,
+                        'error': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -1098,8 +1315,8 @@ class XIVProxy(proxy.IBMStorageProxy):
             volumes = self._call_xiv_xcli(
                 "vol_list", vol=existing_volume).as_list
         except errors.XCLIError as e:
-            error = (_("Fatal error in vol_list: %(details)s"),
-                     {'details': self._get_code_and_status_or_message(e)})
+            error = (_("Fatal error in vol_list: %(details)s")
+                     % {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -1180,72 +1397,8 @@ class XIVProxy(proxy.IBMStorageProxy):
                 potential_split_brain.append(name)
         return potential_split_brain
 
-    def _failover_vol(self, volume, volume_replication_mgr,
-                      failover_volume_replication_mgr,
-                      replication_info, failback):
-        """Failover a single volume.
-
-        Attempts to failover a single volume
-        Sequence:
-        1. attempt to switch roles from master
-        2. attempt to change role to master on slave
-
-        returns (success, failure_reason)
-        """
-        LOG.debug("_failover_vol %(vol)s", {'vol': volume['name']})
-
-        # check if mirror is defined and active
-        try:
-            LOG.debug('Check if mirroring is active on %(vol)s.',
-                      {'vol': volume['name']})
-            active = volume_replication_mgr.is_mirror_active(
-                resource_id=volume['name'])
-        except Exception:
-            active = False
-        state = 'active' if active else 'inactive'
-        LOG.debug('Mirroring is %(state)s', {'state': state})
-
-        # In case of failback, mirroring must be active
-        # In case of failover we attempt to move in any condition
-        if failback and not active:
-            msg = ("Volume %(vol)s: no active mirroring and can not "
-                   "failback",
-                   {'vol': volume['name']})
-            LOG.error(msg)
-            return False, msg
-
-        try:
-            volume_replication_mgr.switch_roles(resource_id=volume['name'])
-            return True, None
-        except Exception as e:
-            # failed attempt to switch_roles from the master
-            details = self._get_code_and_status_or_message(e)
-            LOG.warning('Failed to perform switch_roles on'
-                        ' %(vol)s: %(err)s. '
-                        'Continue to change_role',
-                        {'vol': volume['name'], 'err': details})
-
-        try:
-            # this is the ugly stage we come to brute force
-            LOG.warning('Attempt to change_role to master')
-            failover_volume_replication_mgr.failover_by_id(
-                resource_id=volume['name'])
-            return True, None
-        except m_errors.NoMirrorDefinedError as e:
-            details = self._get_code_and_status_or_message(e)
-            msg = ("Volume %(vol)s no replication defined: %(err)s" %
-                   {'vol': volume['name'], 'err': details})
-            LOG.error(msg)
-            return False, msg
-        except Exception as e:
-            details = self._get_code_and_status_or_message(e)
-            msg = ('Volume %(vol)s change_role failed: %(err)s' %
-                   {'vol': volume['name'], 'err': details})
-            LOG.error(msg)
-            return False, msg
-
     @proxy._trace_time
-    def failover_host(self, context, volumes, secondary_id):
+    def failover_host(self, context, volumes, secondary_id, groups=None):
         """Failover a full backend.
 
         Fails over the volume back and forth, if secondary_id is 'default',
@@ -1265,7 +1418,7 @@ class XIVProxy(proxy.IBMStorageProxy):
             if self._using_default_backend():
                 LOG.info("Host has been failed back. No need "
                          "to fail back again.")
-                return self.active_backend_id, volume_update_list
+                return self.active_backend_id, volume_update_list, []
             pool_slave = self.storage_info[storage.FLAG_KEYS['storage_pool']]
             pool_master = self._get_target_params(
                 self.active_backend_id)['san_clustername']
@@ -1273,16 +1426,9 @@ class XIVProxy(proxy.IBMStorageProxy):
         else:
             if not self._using_default_backend():
                 LOG.info("Already failed over. No need to failover again.")
-                return self.active_backend_id, volume_update_list
+                return self.active_backend_id, volume_update_list, []
             # case: need to select a target
-            if secondary_id is None:
-                secondary_id = self._get_target()
-            # still no targets..
-            if secondary_id is None:
-                msg = _("No targets defined. Can't perform failover")
-                LOG.error(msg)
-                raise self.meta['exception'].VolumeBackendAPIException(
-                    data=msg)
+            secondary_id = self.get_secondary_backend_id(secondary_id)
             pool_master = self.storage_info[storage.FLAG_KEYS['storage_pool']]
             try:
                 pool_slave = self._get_target_params(
@@ -1299,45 +1445,21 @@ class XIVProxy(proxy.IBMStorageProxy):
         #  calling _init_xcli with secondary_id
         self.ibm_storage_remote_cli = self._init_xcli(secondary_id)
 
-        # Create volume manager for both master and remote
-        volume_replication_mgr = volume_recovery_manager.VolumeRecoveryManager(
-            False, self.ibm_storage_cli)
-        failover_volume_replication_mgr = (
-            volume_recovery_manager.VolumeRecoveryManager(
-                True, self.ibm_storage_remote_cli))
-
         # get replication_info for all volumes at once
         if len(volumes):
             # check for split brain situations
             # check for files that are available on both volumes
             # and are not in an active mirroring relation
-            split_brain = self._potential_split_brain(
-                self.ibm_storage_cli,
-                self.ibm_storage_remote_cli,
-                volumes, pool_master,
-                pool_slave)
-            if len(split_brain):
-                # if such a situation exists stop and raise an exception!
-                msg = (_("A potential split brain condition has been found "
-                         "with the following volumes: \n'%(volumes)s.'"),
-                       {'volumes': split_brain})
-                LOG.error(msg)
-                raise self.meta['exception'].VolumeBackendAPIException(
-                    data=msg)
-            specs = self._get_extra_specs(
-                volumes[0].get('volume_type_id', None))
-            replication_info = self._get_replication_info(specs)
+            self.check_for_splitbrain(volumes, pool_master, pool_slave)
 
         # loop over volumes and attempt failover
         for volume in volumes:
             LOG.debug("Attempting to failover '%(vol)s'",
                       {'vol': volume['name']})
-            result, details = self._failover_vol(
-                volume,
-                volume_replication_mgr,
-                failover_volume_replication_mgr,
-                replication_info,
-                failback=(secondary_id == strings.PRIMARY_BACKEND_ID))
+
+            result, details = repl.VolumeReplication(self).failover(
+                volume, failback=(secondary_id == strings.PRIMARY_BACKEND_ID))
+
             if result:
                 status = goal_status
             else:
@@ -1352,13 +1474,11 @@ class XIVProxy(proxy.IBMStorageProxy):
             })
 
         # set active xcli to secondary xcli
-        temp_ibm_storage_cli = self.ibm_storage_cli
-        self.ibm_storage_cli = self.ibm_storage_remote_cli
-        self.ibm_storage_remote_cli = temp_ibm_storage_cli
+        self._replace_xcli_to_remote_xcli()
         # set active backend id to secondary id
         self.active_backend_id = secondary_id
 
-        return secondary_id, volume_update_list
+        return secondary_id, volume_update_list, []
 
     @proxy._trace_time
     def retype(self, ctxt, volume, new_type, diff, host):
@@ -1459,6 +1579,8 @@ class XIVProxy(proxy.IBMStorageProxy):
         self.meta['stat']["driver_version"] = self.full_version
         self.meta['stat']["storage_protocol"] = connection_type
         self.meta['stat']['multiattach'] = False
+        self.meta['stat']['group_replication_enabled'] = True
+        self.meta['stat']['consistent_group_replication_enabled'] = True
         self.meta['stat']['QoS_support'] = (
             self._check_storage_version_for_qos_support())
 
@@ -1497,15 +1619,13 @@ class XIVProxy(proxy.IBMStorageProxy):
         self.meta['stat']['thin_provision'] = ('True' if soft_size > hard_size
                                                else 'False')
 
-        targets = self._get_targets()
-        if targets:
+        if self.targets:
             self.meta['stat']['replication_enabled'] = True
-            # TBD - replication_type should be according to type
             self.meta['stat']['replication_type'] = [SYNC, ASYNC]
-            self.meta['stat']['rpo'] = self._get_supported_rpo()
-            self.meta['stat']['replication_count'] = len(targets)
+            self.meta['stat']['rpo'] = repl.Replication.get_supported_rpo()
+            self.meta['stat']['replication_count'] = len(self.targets)
             self.meta['stat']['replication_targets'] = [target for target in
-                                                        six.iterkeys(targets)]
+                                                        self.targets.keys()]
 
         self.meta['stat']['timestamp'] = datetime.datetime.utcnow()
 
@@ -1515,7 +1635,7 @@ class XIVProxy(proxy.IBMStorageProxy):
     @proxy._trace_time
     def create_cloned_volume(self, volume, src_vref):
         """Create cloned volume."""
-        cg = self._cg_name_from_volume(volume)
+
         # read replication information
         specs = self._get_extra_specs(volume.get('volume_type_id', None))
         replication_info = self._get_replication_info(specs)
@@ -1525,8 +1645,8 @@ class XIVProxy(proxy.IBMStorageProxy):
         volume_size = float(volume['size'])
         if volume_size < src_vref_size:
             error = (_("New volume size (%(vol_size)s GB) cannot be less"
-                       "than the source volume size (%(src_size)s GB).."),
-                     {'vol_size': volume_size, 'src_size': src_vref_size})
+                       "than the source volume size (%(src_size)s GB)..")
+                     % {'vol_size': volume_size, 'src_size': src_vref_size})
             LOG.error(error)
             raise self._get_exception()(error)
 
@@ -1538,10 +1658,10 @@ class XIVProxy(proxy.IBMStorageProxy):
                 vol_trg=volume['name'])
         except errors.XCLIError as e:
             error = (_("Failed to copy from '%(src)s' to '%(vol)s': "
-                       "%(details)s"),
-                     {'src': src_vref.get('name', ''),
-                      'vol': volume.get('name', ''),
-                      'details': self._get_code_and_status_or_message(e)})
+                       "%(details)s")
+                     % {'src': src_vref.get('name', ''),
+                        'vol': volume.get('name', ''),
+                        'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             self._silent_delete_volume(volume=volume)
             raise self._get_exception()(error)
@@ -1556,12 +1676,13 @@ class XIVProxy(proxy.IBMStorageProxy):
                     vol=volume['name'],
                     size_blocks=size)
             except errors.XCLIError as e:
-                error = (_("Fatal error in vol_resize: %(details)s"),
-                         {'details': self._get_code_and_status_or_message(e)})
+                error = (_("Fatal error in vol_resize: %(details)s")
+                         % {'details':
+                            self._get_code_and_status_or_message(e)})
                 LOG.error(error)
                 self._silent_delete_volume(volume=volume)
                 raise self._get_exception()(error)
-        self.handle_created_vol_properties(cg, replication_info, volume)
+        self.handle_created_vol_properties(replication_info, volume)
 
     @proxy._trace_time
     def volume_exists(self, volume):
@@ -1594,7 +1715,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         '''
         LOG.debug("_cg_name_from_volume: %(vol)s",
                   {'vol': volume['name']})
-        cg_id = volume.get('consistencygroup_id', None)
+        cg_id = volume.get('group_id', None)
         if cg_id:
             cg_name = self._cg_name_from_id(cg_id)
             LOG.debug("Volume %(vol)s is in CG %(cg)s",
@@ -1621,13 +1742,13 @@ class XIVProxy(proxy.IBMStorageProxy):
         '''
         return self._cg_name_from_id(cgsnapshot['group_id'])
 
-    def _group_name_from_cgsnapshot(self, cgsnapshot):
+    def _group_name_from_cgsnapshot_id(self, cgsnapshot_id):
         '''Get storage Snaphost Group name from snapshot.
 
         A utility method to translate from openstack cgsnapshot
         to Snapshot Group name on the storage
         '''
-        return self._group_name_from_id(cgsnapshot['id'])
+        return self._group_name_from_id(cgsnapshot_id)
 
     def _volume_name_from_cg_snapshot(self, cgs, vol):
         # Note: The string is limited by the storage to 63 characters
@@ -1636,18 +1757,6 @@ class XIVProxy(proxy.IBMStorageProxy):
     @proxy._trace_time
     def create_group(self, context, group):
         """Creates a group."""
-
-        for volume_type in group.volume_types:
-            replication_info = self._get_replication_info(
-                volume_type.extra_specs)
-
-            if replication_info.get('enabled'):
-                # An unsupported illegal configuration
-                msg = _("Unable to create group: create group with "
-                        "replication volume type is not supported")
-                LOG.error(msg)
-                raise self.meta['exception'].VolumeBackendAPIException(
-                    data=msg)
 
         if utils.is_group_a_cg_snapshot_type(group):
             cgname = self._cg_name_from_group(group)
@@ -1678,6 +1787,35 @@ class XIVProxy(proxy.IBMStorageProxy):
             raise self._get_exception()(error)
         except errors.XCLIError as e:
             error = (_("Fatal error in cg_create: %(details)s") %
+                     {'details': self._get_code_and_status_or_message(e)})
+            LOG.error(error)
+            raise self._get_exception()(error)
+        model_update = {'status': fields.GroupStatus.AVAILABLE}
+        return model_update
+
+    def _create_consistencygroup_on_remote(self, context, cgname):
+        """Creates a consistency group on secondary machine.
+
+        Return group available even if it already exists (for replication)
+        """
+
+        LOG.info("Creating consistency group %(name)s on secondary.",
+                 {'name': cgname})
+
+        # call remote XCLI
+        try:
+            self._call_remote_xiv_xcli(
+                "cg_create", cg=cgname,
+                pool=self.storage_info[
+                    storage.FLAG_KEYS['storage_pool']]).as_list
+        except errors.CgNameExistsError:
+            model_update = {'status': fields.GroupStatus.AVAILABLE}
+        except errors.CgLimitReachedError:
+            error = _("Maximum number of consistency groups reached")
+            LOG.error(error)
+            raise self._get_exception()(error)
+        except errors.XCLIError as e:
+            error = (_("Fatal error in cg_create on remote: %(details)s") %
                      {'details': self._get_code_and_status_or_message(e)})
             LOG.error(error)
             raise self._get_exception()(error)
@@ -1719,7 +1857,7 @@ class XIVProxy(proxy.IBMStorageProxy):
     def _create_consistencygroup_from_src(self, context, group, volumes,
                                           cgsnapshot, snapshots, source_cg,
                                           sorted_source_vols):
-        """Creates a consistencygroup from source.
+        """Creates a consistency group from source.
 
         Source can be a cgsnapshot with the relevant list of snapshots,
         or another CG with its list of volumes.
@@ -1733,7 +1871,7 @@ class XIVProxy(proxy.IBMStorageProxy):
             LOG.debug("Creating from cgsnapshot %(cg)s",
                       {'cg': self._cg_name_from_group(cgsnapshot)})
             try:
-                self._create_consistencygroup(context, group)
+                self._create_consistencygroup(context, cgname)
             except Exception as e:
                 LOG.error(
                     "Creating CG from cgsnapshot failed: %(details)s",
@@ -1741,7 +1879,8 @@ class XIVProxy(proxy.IBMStorageProxy):
                 raise
             created_volumes = []
             try:
-                groupname = self._group_name_from_cgsnapshot(cgsnapshot)
+                groupname = self._group_name_from_cgsnapshot_id(
+                    cgsnapshot['id'])
                 for volume, source in zip(volumes, snapshots):
                     vol_name = source.volume_name
                     LOG.debug("Original volume: %(vol_name)s",
@@ -1813,6 +1952,14 @@ class XIVProxy(proxy.IBMStorageProxy):
     @proxy._trace_time
     def delete_group(self, context, group, volumes):
         """Deletes a group."""
+        rep_status = group.get('replication_status')
+        enabled = fields.ReplicationStatus.ENABLED
+        failed_over = fields.ReplicationStatus.FAILED_OVER
+        if rep_status == enabled or rep_status == failed_over:
+            msg = _("Disable group replication before deleting group.")
+            LOG.error(msg)
+            raise self._get_exception()(msg)
+
         if utils.is_group_a_cg_snapshot_type(group):
             return self._delete_consistencygroup(context, group, volumes)
         else:
@@ -1921,10 +2068,11 @@ class XIVProxy(proxy.IBMStorageProxy):
                         "cg_add_vol", vol=volume['name'], cg=cgname)
                 except errors.XCLIError as e:
                     error = (_("Failed adding volume %(vol)s to "
-                               "consistency group %(cg)s: %(err)s"),
-                             {'vol': volume['name'],
-                              'cg': cgname,
-                              'err': self._get_code_and_status_or_message(e)})
+                               "consistency group %(cg)s: %(err)s")
+                             % {'vol': volume['name'],
+                                'cg': cgname,
+                                'err':
+                                    self._get_code_and_status_or_message(e)})
                     LOG.error(error)
                     self._cleanup_consistencygroup_update(
                         context, group, add_volumes_update, None)
@@ -1937,12 +2085,19 @@ class XIVProxy(proxy.IBMStorageProxy):
                 try:
                     self._call_xiv_xcli(
                         "cg_remove_vol", vol=volume['name'])
+                except (errors.VolumeNotInConsGroup,
+                        errors.VolumeBadNameError) as e:
+                    # ignore the error if the volume exists in storage but
+                    # not in cg, or the volume does not exist in the storage
+                    details = self._get_code_and_status_or_message(e)
+                    LOG.debug(details)
                 except errors.XCLIError as e:
                     error = (_("Failed removing volume %(vol)s from "
-                               "consistency group %(cg)s: %(err)s"),
-                             {'vol': volume['name'],
-                              'cg': cgname,
-                              'err': self._get_code_and_status_or_message(e)})
+                               "consistency group %(cg)s: %(err)s")
+                             % {'vol': volume['name'],
+                                'cg': cgname,
+                                'err':
+                                    self._get_code_and_status_or_message(e)})
                     LOG.error(error)
                     self._cleanup_consistencygroup_update(
                         context, group, add_volumes_update,
@@ -1987,7 +2142,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         model_update = {'status': fields.GroupSnapshotStatus.AVAILABLE}
 
         cgname = self._cg_name_from_cgsnapshot(cgsnapshot)
-        groupname = self._group_name_from_cgsnapshot(cgsnapshot)
+        groupname = self._group_name_from_cgsnapshot_id(cgsnapshot['id'])
         LOG.info("Creating snapshot %(group)s for CG %(cg)s.",
                  {'group': groupname, 'cg': cgname})
 
@@ -2060,7 +2215,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         """Deletes a CG snapshot."""
 
         cgname = self._cg_name_from_cgsnapshot(cgsnapshot)
-        groupname = self._group_name_from_cgsnapshot(cgsnapshot)
+        groupname = self._group_name_from_cgsnapshot_id(cgsnapshot['id'])
         LOG.info("Deleting snapshot %(group)s for CG %(cg)s.",
                  {'group': groupname, 'cg': cgname})
 
@@ -2069,7 +2224,7 @@ class XIVProxy(proxy.IBMStorageProxy):
             self._call_xiv_xcli(
                 "snap_group_delete", snap_group=groupname).as_list
         except errors.CgDoesNotExistError:
-            error = (_("consistency group %s not found on backend"), cgname)
+            error = _("consistency group %s not found on backend") % cgname
             LOG.error(error)
             raise self._get_exception()(error)
         except errors.PoolSnapshotLimitReachedError:
@@ -2182,7 +2337,7 @@ class XIVProxy(proxy.IBMStorageProxy):
     def _call_host_define(self, host,
                           chap_name=None, chap_secret=None, domain_name=None):
         """Call host_define using XCLI."""
-        LOG.debug("host_define with domain: %s)" % domain_name)
+        LOG.debug("host_define with domain: %s)", domain_name)
         if domain_name:
             if chap_name:
                 return self._call_xiv_xcli(
@@ -2248,7 +2403,7 @@ class XIVProxy(proxy.IBMStorageProxy):
 
     def _get_pool_domain(self, connector):
         pool_name = self.storage_info[storage.FLAG_KEYS['storage_pool']]
-        LOG.debug("pool name from configuration: %s" % pool_name)
+        LOG.debug("pool name from configuration: %s", pool_name)
         domain = None
         try:
             domain = self._call_xiv_xcli(
@@ -2452,31 +2607,32 @@ class XIVProxy(proxy.IBMStorageProxy):
         :returns: array of FC target WWPNs
         """
         target_wwpns = []
+        all_target_ports = []
 
         fc_port_list = self._call_xiv_xcli("fc_port_list")
-        if host is None:
-            target_wwpns += (
-                [t.get('wwpn') for t in
-                 fc_port_list if
-                 t.get('wwpn') != '0000000000000000' and
-                 t.get('role') == 'Target' and
-                 t.get('port_state') == 'Online'])
-        else:
+        all_target_ports += ([t for t in fc_port_list if
+                              t.get('wwpn') != '0000000000000000' and
+                              t.get('role') == 'Target' and
+                              t.get('port_state') == 'Online'])
+
+        if host:
             host_conect_list = self._call_xiv_xcli("host_connectivity_list",
                                                    host=host.get('name'))
             for connection in host_conect_list:
                 fc_port = connection.get('local_fc_port')
                 target_wwpns += (
-                    [t.get('wwpn') for t in
-                     fc_port_list if
-                     t.get('wwpn') != '0000000000000000' and
-                     t.get('role') == 'Target' and
-                     t.get('port_state') == 'Online' and
-                     t.get('component_id') == fc_port])
+                    [target.get('wwpn') for target in all_target_ports if
+                     target.get('component_id') == fc_port])
+
+        if not target_wwpns:
+            LOG.debug('No fc targets found accessible to host: %s. Return list'
+                      ' of all available FC targets', host)
+            target_wwpns = ([target.get('wwpn')
+                             for target in all_target_ports])
 
         fc_targets = list(set(target_wwpns))
         fc_targets.sort(key=self._sort_last_digit)
-        LOG.debug("fc_targets : %s" % fc_targets)
+        LOG.debug("fc_targets : %s", fc_targets)
         return fc_targets
 
     def _sort_last_digit(self, a):
@@ -2594,7 +2750,7 @@ class XIVProxy(proxy.IBMStorageProxy):
         certs = certificate.CertificateCollector()
         path = certs.collect_certificate()
         try:
-            LOG.debug('connect_multiendpoint_ssl with: %s' % address)
+            LOG.debug('connect_multiendpoint_ssl with: %s', address)
             xcli = client.XCLIClient.connect_multiendpoint_ssl(
                 user,
                 clear_pass,
@@ -2610,7 +2766,7 @@ class XIVProxy(proxy.IBMStorageProxy):
             LOG.error(err_msg)
             raise self.meta['exception'].HostNotFound(host=err_msg)
         except Exception as er:
-            err_msg = (SETUP_BASE_ERROR,
+            err_msg = (SETUP_BASE_ERROR %
                        {'title': strings.TITLE, 'details': er})
             LOG.error(err_msg)
             raise self._get_exception()(err_msg)

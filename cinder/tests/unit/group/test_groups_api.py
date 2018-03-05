@@ -49,19 +49,16 @@ class GroupAPITestCase(test.TestCase):
             fake.USER_ID, fake.PROJECT_ID, auth_token=True)
 
     @mock.patch('cinder.objects.Group.get_by_id')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_get(self, mock_policy, mock_group_get):
-        fake_group = 'fake_group'
+    def test_get(self, mock_group_get):
+        fake_group = {'name': 'fake_group'}
         mock_group_get.return_value = fake_group
         grp = self.group_api.get(self.ctxt, fake.GROUP_ID)
         self.assertEqual(fake_group, grp)
-        mock_policy.assert_called_once_with(self.ctxt, 'get', mock.ANY)
 
     @ddt.data(True, False)
     @mock.patch('cinder.objects.GroupList.get_all')
     @mock.patch('cinder.objects.GroupList.get_all_by_project')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_get_all(self, is_admin, mock_policy, mock_get_all_by_project,
+    def test_get_all(self, is_admin, mock_get_all_by_project,
                      mock_get_all):
         self.group_api.LOG = mock.Mock()
         fake_groups = ['fake_group1', 'fake_group2']
@@ -73,11 +70,9 @@ class GroupAPITestCase(test.TestCase):
             grps = self.group_api.get_all(self.ctxt,
                                           filters={'all_tenants': True})
             self.assertEqual(fake_groups, grps)
-            mock_policy.assert_called_once_with(self.ctxt, 'get_all')
         else:
             grps = self.group_api.get_all(self.user_ctxt)
             self.assertEqual(fake_groups_by_project, grps)
-            mock_policy.assert_called_once_with(self.user_ctxt, 'get_all')
 
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.delete_group')
     @mock.patch('cinder.db.volume_get_all_by_generic_group')
@@ -87,8 +82,7 @@ class GroupAPITestCase(test.TestCase):
     @mock.patch('cinder.objects.Group')
     @mock.patch('cinder.db.group_type_get')
     @mock.patch('cinder.db.volume_types_get_by_name_or_id')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_create_delete(self, mock_policy, mock_volume_types_get,
+    def test_create_delete(self, mock_volume_types_get,
                            mock_group_type_get, mock_group,
                            mock_update_quota, mock_cast_create_group,
                            mock_volumes_update, mock_volume_get_all,
@@ -108,25 +102,23 @@ class GroupAPITestCase(test.TestCase):
                                           fake.GROUP_TYPE_ID,
                                           [fake.VOLUME_TYPE_ID],
                                           availability_zone='nova')
-        mock_policy.assert_called_with(self.ctxt, 'create')
         self.assertEqual(grp.obj_to_primitive(), ret_group.obj_to_primitive())
 
         ret_group.host = "test_host@fakedrv#fakepool"
         ret_group.status = fields.GroupStatus.AVAILABLE
         ret_group.assert_not_frozen = mock.Mock(return_value=True)
+        ret_group.group_snapshots = []
         self.group_api.delete(self.ctxt, ret_group, delete_volumes=True)
         mock_volume_get_all.assert_called_once_with(mock.ANY, ret_group.id)
         mock_volumes_update.assert_called_once_with(self.ctxt, [])
         mock_rpc_delete_group.assert_called_once_with(self.ctxt, ret_group)
-        mock_policy.assert_called_with(self.ctxt, 'delete', mock.ANY)
 
     @mock.patch('cinder.group.api.API._cast_create_group')
     @mock.patch('cinder.group.api.API.update_quota')
     @mock.patch('cinder.objects.Group')
     @mock.patch('cinder.db.group_type_get_by_name')
     @mock.patch('cinder.db.volume_types_get_by_name_or_id')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_create_with_group_name(self, mock_policy, mock_volume_types_get,
+    def test_create_with_group_name(self, mock_volume_types_get,
                                     mock_group_type_get, mock_group,
                                     mock_update_quota, mock_cast_create_group):
         mock_volume_types_get.return_value = [{'id': fake.VOLUME_TYPE_ID}]
@@ -148,14 +140,12 @@ class GroupAPITestCase(test.TestCase):
 
         mock_group_type_get.assert_called_once_with(self.ctxt,
                                                     "fake-grouptype-name")
-        mock_policy.assert_called_with(self.ctxt, 'create')
 
     @mock.patch('cinder.group.api.API._cast_create_group')
     @mock.patch('cinder.group.api.API.update_quota')
     @mock.patch('cinder.db.group_type_get_by_name')
     @mock.patch('cinder.db.volume_types_get_by_name_or_id')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_create_with_multi_types(self, mock_policy, mock_volume_types_get,
+    def test_create_with_multi_types(self, mock_volume_types_get,
                                      mock_group_type_get,
                                      mock_update_quota,
                                      mock_cast_create_group):
@@ -179,12 +169,10 @@ class GroupAPITestCase(test.TestCase):
                                                     "fake-grouptype-name")
         mock_volume_types_get.assert_called_once_with(mock.ANY,
                                                       volume_type_names)
-        mock_policy.assert_called_with(self.ctxt, 'create')
 
     @mock.patch('oslo_utils.timeutils.utcnow')
     @mock.patch('cinder.objects.Group')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_reset_status(self, mock_policy, mock_group, mock_time_util):
+    def test_reset_status(self, mock_group, mock_time_util):
         mock_time_util.return_value = "time_now"
         self.group_api.reset_status(self.ctxt, mock_group,
                                     fields.GroupStatus.AVAILABLE)
@@ -193,15 +181,12 @@ class GroupAPITestCase(test.TestCase):
                         'status': fields.GroupStatus.AVAILABLE}
         mock_group.update.assert_called_once_with(update_field)
         mock_group.save.assert_called_once_with()
-        mock_policy.assert_called_once_with(self.ctxt,
-                                            'reset_status', mock.ANY)
 
     @mock.patch.object(GROUP_QUOTAS, "reserve")
     @mock.patch('cinder.objects.Group')
     @mock.patch('cinder.db.group_type_get_by_name')
     @mock.patch('cinder.db.volume_types_get_by_name_or_id')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_create_group_failed_update_quota(self, mock_policy,
+    def test_create_group_failed_update_quota(self,
                                               mock_volume_types_get,
                                               mock_group_type_get, mock_group,
                                               mock_group_quota_reserve):
@@ -229,7 +214,21 @@ class GroupAPITestCase(test.TestCase):
                           "fake-grouptype-name",
                           [fake.VOLUME_TYPE_ID],
                           availability_zone='nova')
-        mock_policy.assert_called_with(self.ctxt, 'create')
+
+    @mock.patch('cinder.objects.Group')
+    @mock.patch('cinder.db.volume_get')
+    def test__validate_add_volumes(self, mock_volume_get, mock_group):
+        grp = utils.create_group(self.ctxt, group_type_id=fake.GROUP_TYPE_ID,
+                                 volume_type_ids=[fake.VOLUME_TYPE_ID],
+                                 availability_zone='nova', host=None,
+                                 name="name", description="description",
+                                 status=fields.GroupStatus.CREATING)
+        mock_group.return_value = grp
+        fake_volume_obj = fake_volume.fake_volume_obj(self.ctxt)
+        mock_volume_get.return_value = fake_volume_obj
+        self.assertRaises(exception.InvalidVolume,
+                          self.group_api._validate_add_volumes, self.ctxt,
+                          [], ['123456789'], grp)
 
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.update_group')
     @mock.patch('cinder.db.volume_get_all_by_generic_group')
@@ -238,8 +237,7 @@ class GroupAPITestCase(test.TestCase):
     @mock.patch('cinder.objects.Group')
     @mock.patch('cinder.db.group_type_get')
     @mock.patch('cinder.db.volume_types_get_by_name_or_id')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_update(self, mock_policy, mock_volume_types_get,
+    def test_update(self, mock_volume_types_get,
                     mock_group_type_get, mock_group,
                     mock_update_quota, mock_cast_create_group,
                     mock_volume_get_all, mock_rpc_update_group):
@@ -297,23 +295,19 @@ class GroupAPITestCase(test.TestCase):
         mock_rpc_update_group.assert_called_once_with(self.ctxt, ret_group,
                                                       add_volumes=vol1.id,
                                                       remove_volumes=vol2.id)
-        mock_policy.assert_called_with(self.ctxt, 'update', mock.ANY)
 
     @mock.patch('cinder.objects.GroupSnapshot.get_by_id')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_get_group_snapshot(self, mock_policy, mock_group_snap):
+    def test_get_group_snapshot(self, mock_group_snap):
         fake_group_snap = 'fake_group_snap'
         mock_group_snap.return_value = fake_group_snap
         grp_snap = self.group_api.get_group_snapshot(
             self.ctxt, fake.GROUP_SNAPSHOT_ID)
         self.assertEqual(fake_group_snap, grp_snap)
-        mock_policy.assert_called_with(self.ctxt, 'get_group_snapshot')
 
     @ddt.data(True, False)
     @mock.patch('cinder.objects.GroupSnapshotList.get_all')
     @mock.patch('cinder.objects.GroupSnapshotList.get_all_by_project')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_get_all_group_snapshots(self, is_admin, mock_policy,
+    def test_get_all_group_snapshots(self, is_admin,
                                      mock_get_all_by_project,
                                      mock_get_all):
         fake_group_snaps = ['fake_group_snap1', 'fake_group_snap2']
@@ -325,25 +319,19 @@ class GroupAPITestCase(test.TestCase):
             grp_snaps = self.group_api.get_all_group_snapshots(
                 self.ctxt, filters={'all_tenants': True})
             self.assertEqual(fake_group_snaps, grp_snaps)
-            mock_policy.assert_called_with(self.ctxt,
-                                           'get_all_group_snapshots')
         else:
             grp_snaps = self.group_api.get_all_group_snapshots(
                 self.user_ctxt)
             self.assertEqual(fake_group_snaps_by_project, grp_snaps)
-            mock_policy.assert_called_with(self.user_ctxt,
-                                           'get_all_group_snapshots')
 
     @mock.patch('cinder.objects.GroupSnapshot')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_update_group_snapshot(self, mock_policy, mock_group_snap):
+    def test_update_group_snapshot(self, mock_group_snap):
         grp_snap_update = {"name": "new_name",
                            "description": "This is a new description"}
         self.group_api.update_group_snapshot(self.ctxt, mock_group_snap,
                                              grp_snap_update)
         mock_group_snap.update.assert_called_once_with(grp_snap_update)
         mock_group_snap.save.assert_called_once_with()
-        mock_policy.assert_called_with(self.ctxt, 'update_group_snapshot')
 
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.delete_group_snapshot')
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.create_group_snapshot')
@@ -351,8 +339,7 @@ class GroupAPITestCase(test.TestCase):
     @mock.patch('cinder.objects.Group')
     @mock.patch('cinder.objects.GroupSnapshot')
     @mock.patch('cinder.objects.SnapshotList.get_all_for_group_snapshot')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_create_delete_group_snapshot(self, mock_policy,
+    def test_create_delete_group_snapshot(self,
                                           mock_snap_get_all,
                                           mock_group_snap, mock_group,
                                           mock_create_in_db,
@@ -383,12 +370,87 @@ class GroupAPITestCase(test.TestCase):
                                                   ret_group_snap.id)
         mock_create_api.assert_called_once_with(self.ctxt, ret_group_snap)
 
-        mock_policy.assert_called_once_with(self.ctxt, 'create_group_snapshot',
-                                            mock.ANY)
         ret_group_snap.assert_not_frozen = mock.Mock(return_value=True)
         self.group_api.delete_group_snapshot(self.ctxt, ret_group_snap)
         mock_delete_api.assert_called_once_with(mock.ANY, ret_group_snap)
-        mock_policy.assert_called_with(self.ctxt, 'delete_group_snapshot')
+
+    @mock.patch('cinder.volume.api.API.delete')
+    @mock.patch('cinder.objects.VolumeType.get_by_name_or_id')
+    @mock.patch('cinder.db.group_volume_type_mapping_create')
+    @mock.patch('cinder.volume.api.API.create')
+    @mock.patch('cinder.objects.GroupSnapshot.get_by_id')
+    @mock.patch('cinder.objects.SnapshotList.get_all_for_group_snapshot')
+    @mock.patch('cinder.volume.rpcapi.VolumeAPI.create_group_from_src')
+    @mock.patch('cinder.objects.VolumeList.get_all_by_generic_group')
+    def test_create_group_from_snap_volume_failed(
+            self, mock_volume_get_all,
+            mock_rpc_create_group_from_src,
+            mock_snap_get_all, mock_group_snap_get,
+            mock_volume_api_create,
+            mock_mapping_create,
+            mock_get_volume_type, mock_volume_delete):
+        mock_volume_api_create.side_effect = [exception.CinderException]
+        vol_type = fake_volume.fake_volume_type_obj(
+            self.ctxt,
+            id=fake.VOLUME_TYPE_ID,
+            name='fake_volume_type')
+        mock_get_volume_type.return_value = vol_type
+
+        grp_snap = utils.create_group_snapshot(
+            self.ctxt, fake.GROUP_ID,
+            group_type_id=fake.GROUP_TYPE_ID,
+            status=fields.GroupStatus.CREATING)
+        mock_group_snap_get.return_value = grp_snap
+        vol1 = utils.create_volume(
+            self.ctxt,
+            availability_zone='nova',
+            volume_type_id=vol_type['id'],
+            group_id=fake.GROUP_ID)
+
+        snap = utils.create_snapshot(self.ctxt, vol1.id,
+                                     volume_type_id=vol_type['id'],
+                                     status=fields.GroupStatus.CREATING)
+        mock_snap_get_all.return_value = [snap]
+
+        name = "test_group"
+        description = "this is a test group"
+        grp = utils.create_group(self.ctxt, group_type_id=fake.GROUP_TYPE_ID,
+                                 volume_type_ids=[vol_type['id']],
+                                 availability_zone='nova',
+                                 name=name, description=description,
+                                 group_snapshot_id=grp_snap.id,
+                                 status=fields.GroupStatus.CREATING)
+
+        vol2 = utils.create_volume(
+            self.ctxt,
+            availability_zone=grp.availability_zone,
+            volume_type_id=vol_type['id'],
+            group_id=grp.id,
+            snapshot_id=snap.id)
+        mock_volume_get_all.return_value = [vol2]
+
+        self.assertRaises(
+            exception.CinderException,
+            self.group_api._create_group_from_group_snapshot,
+            self.ctxt, grp, grp_snap.id)
+
+        mock_volume_api_create.assert_called_once_with(
+            self.ctxt, 1, None, None,
+            availability_zone=grp.availability_zone,
+            group_snapshot=grp_snap,
+            group=grp,
+            snapshot=snap,
+            volume_type=vol_type)
+
+        mock_rpc_create_group_from_src.assert_not_called()
+
+        mock_volume_delete.assert_called_once_with(self.ctxt, vol2)
+
+        vol2.destroy()
+        grp.destroy()
+        snap.destroy()
+        vol1.destroy()
+        grp_snap.destroy()
 
     @mock.patch('cinder.objects.VolumeType.get_by_name_or_id')
     @mock.patch('cinder.db.group_volume_type_mapping_create')
@@ -468,8 +530,7 @@ class GroupAPITestCase(test.TestCase):
     @mock.patch('cinder.objects.Group.get_by_id')
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.create_group_from_src')
     @mock.patch('cinder.objects.VolumeList.get_all_by_generic_group')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_create_group_from_group(self, mock_policy, mock_volume_get_all,
+    def test_create_group_from_group(self, mock_volume_get_all,
                                      mock_rpc_create_group_from_src,
                                      mock_group_get,
                                      mock_volume_api_create,
@@ -527,13 +588,70 @@ class GroupAPITestCase(test.TestCase):
         vol.destroy()
         grp.destroy()
 
+    @mock.patch('cinder.volume.api.API.delete')
+    @mock.patch('cinder.objects.VolumeType.get_by_name_or_id')
+    @mock.patch('cinder.db.group_volume_type_mapping_create')
+    @mock.patch('cinder.volume.api.API.create')
+    @mock.patch('cinder.objects.Group.get_by_id')
+    @mock.patch('cinder.volume.rpcapi.VolumeAPI.create_group_from_src')
+    @mock.patch('cinder.objects.VolumeList.get_all_by_generic_group')
+    def test_create_group_from_group_create_volume_failed(
+            self, mock_volume_get_all, mock_rpc_create_group_from_src,
+            mock_group_get, mock_volume_api_create, mock_mapping_create,
+            mock_get_volume_type, mock_volume_delete):
+        vol_type = fake_volume.fake_volume_type_obj(
+            self.ctxt,
+            id=fake.VOLUME_TYPE_ID,
+            name='fake_volume_type')
+        mock_get_volume_type.return_value = vol_type
+
+        grp = utils.create_group(self.ctxt, group_type_id=fake.GROUP_TYPE_ID,
+                                 volume_type_ids=[vol_type['id']],
+                                 availability_zone='nova',
+                                 status=fields.GroupStatus.CREATING)
+        mock_group_get.return_value = grp
+
+        vol1 = utils.create_volume(
+            self.ctxt,
+            availability_zone=grp.availability_zone,
+            volume_type_id=fake.VOLUME_TYPE_ID,
+            group_id=grp.id)
+        vol2 = utils.create_volume(
+            self.ctxt,
+            availability_zone=grp.availability_zone,
+            volume_type_id=fake.VOLUME_TYPE_ID,
+            group_id=grp.id)
+        mock_volume_get_all.side_effect = [[vol1, vol2], [vol1]]
+
+        grp2 = utils.create_group(self.ctxt,
+                                  group_type_id=fake.GROUP_TYPE_ID,
+                                  volume_type_ids=[vol_type['id']],
+                                  availability_zone='nova',
+                                  source_group_id=grp.id,
+                                  status=fields.GroupStatus.CREATING)
+
+        mock_volume_api_create.side_effect = [None, exception.CinderException]
+
+        self.assertRaises(
+            exception.CinderException,
+            self.group_api._create_group_from_source_group,
+            self.ctxt, grp2, grp.id)
+
+        mock_rpc_create_group_from_src.assert_not_called()
+        mock_volume_delete.assert_called_once_with(self.ctxt, vol1)
+
+        grp2.destroy()
+        vol2.destroy()
+        vol1.destroy()
+        grp.destroy()
+
     @mock.patch('cinder.group.api.API._create_group_from_group_snapshot')
     @mock.patch('cinder.group.api.API._create_group_from_source_group')
     @mock.patch('cinder.group.api.API.update_quota')
     @mock.patch('cinder.objects.GroupSnapshot.get_by_id')
     @mock.patch('cinder.objects.SnapshotList.get_all_for_group_snapshot')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_create_from_src(self, mock_policy, mock_snap_get_all,
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.validate_host_capacity')
+    def test_create_from_src(self, mock_validate_host, mock_snap_get_all,
                              mock_group_snap_get, mock_update_quota,
                              mock_create_from_group,
                              mock_create_from_snap):
@@ -555,6 +673,7 @@ class GroupAPITestCase(test.TestCase):
                                      volume_type_id=fake.VOLUME_TYPE_ID,
                                      status=fields.SnapshotStatus.AVAILABLE)
         mock_snap_get_all.return_value = [snap]
+        mock_validate_host.return_host = True
 
         grp_snap = utils.create_group_snapshot(
             self.ctxt, grp.id,
@@ -590,8 +709,7 @@ class GroupAPITestCase(test.TestCase):
 
     @mock.patch('oslo_utils.timeutils.utcnow')
     @mock.patch('cinder.objects.GroupSnapshot')
-    @mock.patch('cinder.group.api.check_policy')
-    def test_reset_group_snapshot_status(self, mock_policy,
+    def test_reset_group_snapshot_status(self,
                                          mock_group_snapshot,
                                          mock_time_util):
         mock_time_util.return_value = "time_now"
@@ -602,13 +720,13 @@ class GroupAPITestCase(test.TestCase):
                         'status': fields.GroupSnapshotStatus.ERROR}
         mock_group_snapshot.update.assert_called_once_with(update_field)
         mock_group_snapshot.save.assert_called_once_with()
-        mock_policy.assert_called_once_with(self.ctxt,
-                                            'reset_group_snapshot_status')
 
-    def test_create_group_from_src_frozen(self):
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.validate_host_capacity')
+    def test_create_group_from_src_frozen(self, mock_validate_host):
         service = utils.create_service(self.ctxt, {'frozen': True})
         group = utils.create_group(self.ctxt, host=service.host,
                                    group_type_id='gt')
+        mock_validate_host.return_value = True
         group_api = cinder.group.api.API()
         self.assertRaises(exception.InvalidInput,
                           group_api.create_from_src,

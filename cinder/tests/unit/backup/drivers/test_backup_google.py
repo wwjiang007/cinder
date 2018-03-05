@@ -25,8 +25,10 @@ import hashlib
 import os
 import shutil
 import tempfile
+import threading
 import zlib
 
+from eventlet import tpool
 import mock
 from oslo_utils import units
 
@@ -142,6 +144,12 @@ class GoogleBackupDriverTestCase(test.TestCase):
         backup.create()
         return backup
 
+    def _write_effective_compression_file(self, data_size):
+        """Ensure file contents can be effectively compressed."""
+        self.volume_file.seek(0)
+        self.volume_file.write(bytes([65] * data_size))
+        self.volume_file.seek(0)
+
     def setUp(self):
         super(GoogleBackupDriverTestCase, self).setUp()
         self.flags(backup_gcs_bucket='gcscinderbucket')
@@ -153,8 +161,10 @@ class GoogleBackupDriverTestCase(test.TestCase):
         self.addCleanup(self.volume_file.close)
         # Remove tempdir.
         self.addCleanup(shutil.rmtree, self.temp_dir)
+        self.size_volume_file = 0
         for _i in range(0, 64):
             self.volume_file.write(os.urandom(units.Ki))
+            self.size_volume_file += 1024
 
     @gcs_client
     def test_backup(self):
@@ -182,7 +192,7 @@ class GoogleBackupDriverTestCase(test.TestCase):
         backup = self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='bz2')
         service = google_dr.GoogleBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         service.backup(backup, self.volume_file)
 
     @gcs_client
@@ -191,7 +201,7 @@ class GoogleBackupDriverTestCase(test.TestCase):
         backup = self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='zlib')
         service = google_dr.GoogleBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         service.backup(backup, self.volume_file)
 
     @gcs_client
@@ -443,13 +453,14 @@ class GoogleBackupDriverTestCase(test.TestCase):
     @gcs_client
     @mock.patch.object(google_dr.GoogleBackupDriver, '_backup_metadata',
                        fake_backup_metadata)
-    @mock.patch.object(google_dr.GoogleBackupDriver, 'delete', fake_delete)
+    @mock.patch.object(google_dr.GoogleBackupDriver, 'delete_backup',
+                       fake_delete)
     def test_backup_backup_metadata_fail2(self):
         """Test of when an exception occurs in an exception handler.
 
         In backup(), after an exception occurs in
         self._backup_metadata(), we want to check the process when the
-        second exception occurs in self.delete().
+        second exception occurs in self.delete_backup().
         """
         volume_id = '2164421d-f181-4db7-b9bd-000000eeb628'
 
@@ -523,7 +534,7 @@ class GoogleBackupDriverTestCase(test.TestCase):
         backup = self._create_backup_db_entry(volume_id=volume_id,
                                               service_metadata=object_prefix)
         service = google_dr.GoogleBackupDriver(self.ctxt)
-        service.delete(backup)
+        service.delete_backup(backup)
 
     @gcs_client
     @mock.patch.object(google_dr.GoogleBackupDriver, 'delete_object',
@@ -532,7 +543,7 @@ class GoogleBackupDriverTestCase(test.TestCase):
         volume_id = 'ee30d649-72a6-49a5-b78d-000000edb6b1'
         backup = self._create_backup_db_entry(volume_id=volume_id)
         service = google_dr.GoogleBackupDriver(self.ctxt)
-        service.delete(backup)
+        service.delete_backup(backup)
 
     @gcs_client
     def test_get_compressor(self):
@@ -541,12 +552,25 @@ class GoogleBackupDriverTestCase(test.TestCase):
         self.assertIsNone(compressor)
         compressor = service._get_compressor('zlib')
         self.assertEqual(zlib, compressor)
+        self.assertIsInstance(compressor, tpool.Proxy)
         compressor = service._get_compressor('bz2')
         self.assertEqual(bz2, compressor)
+        self.assertIsInstance(compressor, tpool.Proxy)
         self.assertRaises(ValueError, service._get_compressor, 'fake')
 
     @gcs_client
     def test_prepare_output_data_effective_compression(self):
+        """Test compression works on a native thread."""
+        # Use dictionary to share data between threads
+        thread_dict = {}
+        original_compress = zlib.compress
+
+        def my_compress(data):
+            thread_dict['compress'] = threading.current_thread()
+            return original_compress(data)
+
+        self.mock_object(zlib, 'compress', side_effect=my_compress)
+
         service = google_dr.GoogleBackupDriver(self.ctxt)
         # Set up buffer of 128 zeroed bytes
         fake_data = b'\0' * 128
@@ -554,7 +578,9 @@ class GoogleBackupDriverTestCase(test.TestCase):
         result = service._prepare_output_data(fake_data)
 
         self.assertEqual('zlib', result[0])
-        self.assertGreater(len(fake_data), len(result))
+        self.assertGreater(len(fake_data), len(result[1]))
+        self.assertNotEqual(threading.current_thread(),
+                            thread_dict['compress'])
 
     @gcs_client
     def test_prepare_output_data_no_compression(self):

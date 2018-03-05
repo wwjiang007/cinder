@@ -23,12 +23,12 @@ inline callbacks.
 import copy
 import logging
 import os
+import sys
 import uuid
 
 import fixtures
 import mock
 from oslo_concurrency import lockutils
-from oslo_config import cfg
 from oslo_config import fixture as config_fixture
 from oslo_log.fixture import logging_error as log_fixture
 import oslo_messaging
@@ -36,15 +36,15 @@ from oslo_messaging import conffixture as messaging_conffixture
 from oslo_serialization import jsonutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
-from oslotest import moxstubout
 import six
 import testtools
 
-from cinder.common import config  # noqa Need to register global_opts
+from cinder.common import config
 from cinder import context
 from cinder import coordination
 from cinder.db import migration
 from cinder.db.sqlalchemy import api as sqla_api
+from cinder import exception
 from cinder import i18n
 from cinder.objects import base as objects_base
 from cinder import rpc
@@ -55,18 +55,45 @@ from cinder.tests.unit import fake_notifier
 from cinder.volume import utils
 
 
-CONF = cfg.CONF
+CONF = config.CONF
 
 _DB_CACHE = None
+SESSION_CONFIGURED = False
 
 
 class TestingException(Exception):
     pass
 
 
+class CinderExceptionReraiseFormatError(object):
+    real_log_exception = exception.CinderException._log_exception
+
+    @classmethod
+    def patch(cls):
+        exception.CinderException._log_exception = cls._wrap_log_exception
+
+    @staticmethod
+    def _wrap_log_exception(self):
+        exc_info = sys.exc_info()
+        CinderExceptionReraiseFormatError.real_log_exception(self)
+        six.reraise(*exc_info)
+
+
+# NOTE(melwitt) This needs to be done at import time in order to also catch
+# CinderException format errors that are in mock decorators. In these cases,
+# the errors will be raised during test listing, before tests actually run.
+CinderExceptionReraiseFormatError.patch()
+
+
 class Database(fixtures.Fixture):
 
     def __init__(self, db_api, db_migrate, sql_connection):
+        # NOTE(lhx_): oslo_db.enginefacade is configured in tests the same
+        # way as it's done for any other services that uses the db
+        global SESSION_CONFIGURED
+        if not SESSION_CONFIGURED:
+            sqla_api.configure(CONF)
+            SESSION_CONFIGURED = True
         self.sql_connection = sql_connection
 
         # Suppress logging for test runs
@@ -92,8 +119,18 @@ class TestCase(testtools.TestCase):
     """Test case base class for all unit tests."""
 
     POLICY_PATH = 'cinder/tests/unit/policy.json'
+    RESOURCE_FILTER_PATH = 'etc/cinder/resource_filters.json'
     MOCK_WORKER = True
     MOCK_TOOZ = True
+
+    def __init__(self, *args, **kwargs):
+        super(TestCase, self).__init__(*args, **kwargs)
+
+        # Suppress some log messages during test runs
+        castellan_logger = logging.getLogger('castellan')
+        castellan_logger.setLevel(logging.ERROR)
+        stevedore_logger = logging.getLogger('stevedore')
+        stevedore_logger.setLevel(logging.ERROR)
 
     def _get_joined_notifier(self, *args, **kwargs):
         # We create a new fake notifier but we join the notifications with
@@ -194,6 +231,10 @@ class TestCase(testtools.TestCase):
                                  sql_connection=CONF.database.connection)
         self.useFixture(_DB_CACHE)
 
+        # NOTE(blk-u): WarningsFixture must be after the Database fixture
+        # because sqlalchemy-migrate messes with the warnings filters.
+        self.useFixture(cinder_fixtures.WarningsFixture())
+
         # NOTE(danms): Make sure to reset us back to non-remote objects
         # for each test to avoid interactions. Also, backup the object
         # registry.
@@ -202,11 +243,6 @@ class TestCase(testtools.TestCase):
             objects_base.CinderObjectRegistry._registry._obj_classes)
         self.addCleanup(self._restore_obj_registry)
 
-        # emulate some of the mox stuff, we can't use the metaclass
-        # because it screws with our generators
-        mox_fixture = self.useFixture(moxstubout.MoxStubout())
-        self.mox = mox_fixture.mox
-        self.stubs = mox_fixture.stubs
         self.addCleanup(CONF.reset)
         self.addCleanup(self._common_cleanup)
         self.injected = []
@@ -214,7 +250,6 @@ class TestCase(testtools.TestCase):
 
         fake_notifier.mock_notifier(self)
 
-        self.override_config('fatal_exception_format_errors', True)
         # This will be cleaned up by the NestedTempfile fixture
         lock_path = self.useFixture(fixtures.TempDir()).path
         self.fixture = self.useFixture(
@@ -232,9 +267,16 @@ class TestCase(testtools.TestCase):
                                  ),
                                  self.POLICY_PATH),
                              group='oslo_policy')
-
+        self.override_config('resource_query_filters_file',
+                             os.path.join(
+                                 os.path.abspath(
+                                     os.path.join(
+                                         os.path.dirname(__file__),
+                                         '..',
+                                     )
+                                 ),
+                                 self.RESOURCE_FILTER_PATH))
         self._disable_osprofiler()
-        self._disallow_invalid_uuids()
 
         # NOTE(geguileo): This is required because common get_by_id method in
         # cinder.db.sqlalchemy.api caches get methods and if we use a mocked
@@ -246,6 +288,13 @@ class TestCase(testtools.TestCase):
                              group='coordination')
         coordination.COORDINATOR.start()
         self.addCleanup(coordination.COORDINATOR.stop)
+
+        if six.PY3:
+            # TODO(smcginnis) Python 3 deprecates assertRaisesRegexp to
+            # assertRaisesRegex, but Python 2 does not have the new name. This
+            # can be removed once we stop supporting py2 or the new name is
+            # added.
+            self.assertRaisesRegexp = self.assertRaisesRegex
 
     def _restore_obj_registry(self):
         objects_base.CinderObjectRegistry._registry._obj_classes = \
@@ -261,17 +310,6 @@ class TestCase(testtools.TestCase):
         mock_decorator = mock.MagicMock(side_effect=side_effect)
         p = mock.patch("osprofiler.profiler.trace_cls",
                        return_value=mock_decorator)
-        p.start()
-
-    def _disallow_invalid_uuids(self):
-        def catch_uuid_warning(message, *args, **kwargs):
-            ovo_message = "invalid UUID. Using UUIDFields with invalid UUIDs " \
-                          "is no longer supported"
-            if ovo_message in message:
-                raise AssertionError(message)
-
-        p = mock.patch("warnings.warn",
-                       side_effect=catch_uuid_warning)
         p.start()
 
     def _common_cleanup(self):
@@ -304,8 +342,9 @@ class TestCase(testtools.TestCase):
 
     def flags(self, **kw):
         """Override CONF variables for a test."""
+        group = kw.pop('group', None)
         for k, v in kw.items():
-            self.override_config(k, v)
+            self.override_config(k, v, group)
 
     def start_service(self, name, host=None, **kwargs):
         host = host if host else uuid.uuid4().hex
@@ -345,6 +384,30 @@ class TestCase(testtools.TestCase):
 
             self.assertEqual(call[0], posargs[0])
             self.assertEqual(call[1], posargs[2])
+
+    def assertTrue(self, x, *args, **kwargs):
+        """Assert that value is True.
+
+        If original behavior is required we will need to do:
+            assertTrue(bool(result))
+        """
+        # assertTrue uses msg but assertIs uses message keyword argument
+        args = list(args)
+        msg = kwargs.pop('msg', args.pop(0) if args else '')
+        kwargs.setdefault('message', msg)
+        self.assertIs(True, x, *args, **kwargs)
+
+    def assertFalse(self, x, *args, **kwargs):
+        """Assert that value is False.
+
+        If original behavior is required we will need to do:
+            assertFalse(bool(result))
+        """
+        # assertTrue uses msg but assertIs uses message keyword argument
+        args = list(args)
+        msg = kwargs.pop('msg', args.pop(0) if args else '')
+        kwargs.setdefault('message', msg)
+        self.assertIs(False, x, *args, **kwargs)
 
 
 class ModelsObjectComparatorMixin(object):

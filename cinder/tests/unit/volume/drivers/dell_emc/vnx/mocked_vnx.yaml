@@ -150,6 +150,13 @@ mirror_base: &mirror_base
       _type: VNXMirrorImageState
       value: 'SYNCHRONIZED'
 
+mirror_group_base: &mirror_group_base
+  _properties: &mirror_group_base_prop
+    condition: 'Active'
+    existed: true
+    name: 'base_group'
+    role: 'Primary'
+    state: 'Synchronized'
 
 ###########################################################
 # TestClient
@@ -998,6 +1005,113 @@ test_promote_image:
     _methods:
       get_mirror_view: *mirror_promote_image
 
+# Mirror group tests start
+test_create_mirror_group:
+  vnx:
+    _methods:
+      create_mirror_group: *mirror_group_base
+
+test_create_mirror_group_name_in_use:
+  vnx:
+    _methods:
+      create_mirror_group:
+        _raise:
+          VNXMirrorGroupNameInUseError: Mirror Group name already in use
+      get_mirror_group: *mirror_group_base
+
+test_delete_mirror_group:
+  group: &group_to_delete
+    _methods:
+      delete:
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_delete
+
+test_delete_mirror_group_not_found:
+  group: &group_to_delete_not_found
+    _methods:
+      delete:
+        _raise:
+          VNXMirrorGroupNotFoundError: Unable to locate
+
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_delete_not_found
+
+test_add_mirror:
+  group: &group_to_add
+    _methods:
+      add_mirror:
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_add
+      get_mirror_view: *mirror_base
+
+test_add_mirror_already_added:
+  group: &group_to_add_added
+    _methods:
+      add_mirror:
+        _raise:
+          VNXMirrorGroupAlreadyMemberError: already a member of a group
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_add_added
+      get_mirror_view: *mirror_base
+
+test_remove_mirror:
+  group: &group_to_remove
+    _methods:
+      remove_mirror:
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_remove
+      get_mirror_view: *mirror_base
+
+test_remove_mirror_not_member:
+  group: &group_to_remove_not_member
+    _methods:
+      remove_mirror:
+        _raise:
+          VNXMirrorGroupMirrorNotMemberError: not a member of the group
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_remove_not_member
+      get_mirror_view: *mirror_base
+
+test_promote_mirror_group:
+  group: &group_to_promote
+    _methods:
+      promote_group:
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_promote
+
+test_promote_mirror_group_already_promoted:
+  group: &group_to_promote_already_promoted
+    _methods:
+      promote_group:
+        _raise:
+          VNXMirrorGroupAlreadyPromotedError: no secondary images to promote
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_promote_already_promoted
+
+test_sync_mirror_group:
+  group: &group_to_sync
+    _methods:
+      sync_group:
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_sync
+
+test_fracture_mirror_group:
+  group: &group_to_fracture
+    _methods:
+      fracture_group:
+  vnx:
+    _methods:
+      get_mirror_group: *group_to_fracture
+
 test_get_lun_id:
 
 test_get_lun_id_without_provider_location:
@@ -1011,6 +1125,53 @@ test_get_lun_id_without_provider_location:
     _methods:
       get_lun: *test_get_lun_id_without_provider_location
 
+test_get_ioclass:
+  ioclass_false: &ioclass_false
+    _properties:
+      existed: False
+  ioclass_true: &ioclass_true
+    _properties:
+      existed: True
+    _methods:
+      add_lun:
+  vnx:
+    _methods:
+      get_ioclass: *ioclass_false
+      create_ioclass: *ioclass_true
+
+test_create_ioclass_iops:
+  vnx:
+    _methods:
+      create_ioclass: *ioclass_true
+
+test_create_ioclass_bws:
+  vnx:
+    _methods:
+      create_ioclass: *ioclass_true
+
+test_create_policy:
+  policy: &policy
+    _properties:
+      state: "Running"
+      existed: False
+    _methods:
+      add_class:
+      run_policy:
+  vnx:
+    _methods:
+      get_policy: *policy
+      create_policy: *policy
+
+test_get_running_policy:
+  vnx:
+    _methods:
+      get_policy: [*policy, *policy]
+
+test_add_lun_to_ioclass:
+  vnx:
+    _methods:
+      get_ioclass: *ioclass_true
+
 ###########################################################
 # TestCommonAdapter
 ###########################################################
@@ -1019,6 +1180,15 @@ test_create_volume: *test_create_lun
 test_create_volume_error: *test_create_lun_error
 
 test_create_thick_volume: *test_create_lun
+
+test_create_volume_with_qos:
+  vnx:
+    _properties:
+      <<: *vnx_base_prop
+    _methods:
+      get_pool: *pool_test_create_lun
+      get_ioclass: *ioclass_true
+      get_policy: [*policy]
 
 test_migrate_volume:
   lun: &src_lun_1
@@ -1065,12 +1235,18 @@ test_create_cloned_volume:
   snap: &snap_for_clone
     _methods:
       delete:
+  thick_base_lun: &test_create_cloned_volume_thick_base_lun
+    _properties:
+      is_thin_lun: fase
   smp: &smp_migrate
     _properties:
       <<: *lun_base_prop
       lun_id: 4
       wwn: 'src_wwn'
       poll: false
+      is_thin_lun: false
+      total_capacity_gb: 10
+      primary_lun: *test_create_cloned_volume_thick_base_lun
     _methods:
       migrate:
       update:
@@ -1099,7 +1275,7 @@ test_create_cloned_volume:
     _methods:
       get_lun:
         _side_effect: [*lun_migrate_2,
-        *lun_migrate_2, *smp_migrate, *lun_migrate_2,
+        *lun_migrate_2, *smp_migrate, *lun_migrate_2, *smp_migrate,
         *lun_not_existed_2, *smp_migrate, *smp_migrate,
         *lun_not_existed_2]
       get_migration_session: *session_2
@@ -1132,6 +1308,10 @@ test_create_volume_from_snapshot:
     _methods:
       create_mount_point:
   smp: &smp_from_lun
+    _properties:
+      is_thin_lun: false
+      total_capacity_gb: 10
+      primary_lun: *test_create_cloned_volume_thick_base_lun
     _methods:
       attach_snap:
   vnx:
@@ -1140,7 +1320,7 @@ test_create_volume_from_snapshot:
     _methods:
       get_lun:
         _side_effect: [*lun_from_snapshot, *lun_from_snapshot, *smp_from_lun,
-        *dst_lun, *src_lun_1, *src_lun_1, *lun_not_existed]
+         *smp_from_lun, *dst_lun, *src_lun_1, *src_lun_1, *lun_not_existed]
       get_pool: *pool_test_create_lun
       get_migration_session: *session
 
@@ -1673,6 +1853,29 @@ test_build_provider_location:
     _properties:
       serial: 'vnx-serial'
 
+test_terminate_connection:
+  sg: &sg_terminate_connection
+    _properties:
+      existed: True
+  vnx:
+    _methods:
+      get_sg: *sg_terminate_connection
+
+test_terminate_connection_force_detach:
+  sg: &sg_terminate_connection_force_detach_1
+    _properties:
+      existed: True
+  sg: &sg_terminate_connection_force_detach_2
+    _properties:
+      existed: True
+  sgs: &sgs_terminate_connection_force_detach
+    _methods:
+      shadow_copy: [*sg_terminate_connection_force_detach_1,
+                    *sg_terminate_connection_force_detach_2]
+  vnx:
+    _methods:
+      get_sg: *sgs_terminate_connection_force_detach
+
 test_remove_host_access:
   sg: &sg_remove_host_access
     _properties:
@@ -1703,6 +1906,22 @@ test_setup_lun_replication:
   vnx:
     _properties:
       serial: 'vnx-serial'
+  lun:
+    _properties:
+      lun_id: 222
+      wwn: fake_wwn
+
+test_setup_lun_replication_in_group:
+  group: &group_for_enable
+    _methods:
+      add_mirror:
+  vnx:
+    _properties:
+      serial: 'vnx-serial'
+    _methods:
+      get_mirror_view: *mirror_base
+      get_mirror_group: *group_for_enable
+
   lun:
     _properties:
       lun_id: 222
@@ -1756,6 +1975,11 @@ test_failover_host:
 test_failover_host_invalid_backend_id:
 
 test_failover_host_failback:
+  lun1:
+    _properties:
+      lun_id: 22
+
+test_failover_host_groups:
   lun1:
     _properties:
       lun_id: 22
@@ -1952,6 +2176,32 @@ test_get_tgt_list_and_initiator_tgt_map_allow_port_only:
 
 
 ##########################################################
+# TestReplicationAdapter
+##########################################################
+
+test_enable_replication:
+  vnx:
+    _methods:
+      create_mirror_group: *mirror_group_base
+      get_mirror_view: *mirror_base
+      get_mirror_group: *group_for_enable
+
+test_disable_replication:
+  group: &group_for_disable
+    _methods:
+      remove_mirror:
+      delete:
+
+  vnx:
+    _methods:
+      get_mirror_view: *mirror_base
+      get_mirror_group: *group_for_disable
+
+test_failover_replication:
+
+  lun1: *lun_base
+
+##########################################################
 # TestTaskflow
 ##########################################################
 test_copy_snapshot_task:
@@ -2073,6 +2323,59 @@ test_create_cg_snapshot_task_revert:
     _methods:
       get_cg: *create_cg_snapshot_error
       get_snap: *snap_create_cg_revert
+
+test_extend_smp_task:
+  thin_base_lun: &test_extend_smp_task_thin_base_lun
+    _properties:
+      is_thin_lun: true
+  lun: &lun_test_extend_smp_task
+    _properties:
+      <<: *lun_base_prop
+      name: lun_test_extend_smp_task
+      is_thin_lun: true
+      total_capacity_gb: 10
+      primary_lun: *test_extend_smp_task_thin_base_lun
+  new_lun: &new_lun_test_extend_smp_task
+    _properties:
+      <<: *lun_base_prop
+      name: new_lun_test_extend_smp_task
+      is_thin_lun: true
+      total_capacity_gb: 100
+    _methods:
+      expand:
+      with_no_poll: _context
+      update:
+  vnx:
+    _methods:
+      get_lun:
+       _side_effect: [*lun_test_extend_smp_task, *new_lun_test_extend_smp_task]
+
+test_extend_smp_task_skip_small_size:
+  lun: &lun_test_extend_smp_task_skip_small_size
+    _properties:
+      <<: *lun_base_prop
+      name: lun_test_extend_smp_task_skip_small_size
+      is_thin_lun: true
+      total_capacity_gb: 1
+      primary_lun: *test_extend_smp_task_thin_base_lun
+  vnx:
+    _methods:
+      get_lun: *lun_test_extend_smp_task_skip_small_size
+
+test_extend_smp_task_skip_thick: &test_extend_smp_task_skip_thick
+  thick_base_lun: &test_extend_smp_task_thick_base_lun
+    _properties:
+      is_thin_lun: false
+  lun: &lun_test_extend_smp_task_skip_thick
+    _properties:
+      <<: *lun_base_prop
+      name: lun_test_extend_smp_task_skip_thick
+      is_thin_lun: false
+      total_capacity_gb: 10
+      primary_lun: *test_extend_smp_task_thick_base_lun
+  vnx:
+    _methods:
+      get_lun: *lun_test_extend_smp_task_skip_thick
 
 ###########################################################
 # TestExtraSpecs

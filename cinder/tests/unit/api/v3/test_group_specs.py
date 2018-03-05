@@ -18,14 +18,14 @@ import webob
 
 from cinder import context
 from cinder import db
+from cinder import exception
 from cinder import rpc
 from cinder import test
 
+from cinder.api import microversions as mv
 from cinder.api.v3 import group_specs as v3_group_specs
 from cinder.tests.unit.api import fakes
 from cinder.tests.unit import fake_constants as fake
-
-GROUP_TYPE_MICRO_VERSION = '3.11'
 
 fake_group_specs = {
     'key1': 'value1',
@@ -71,7 +71,7 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res_dict = self.controller.index(req, fake.GROUP_ID)
         group_specs_dict = res_dict['group_specs']
@@ -90,8 +90,9 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
-        self.controller.create(req, fake.GROUP_ID, create_fake_group_specs)
+                                      version=mv.GROUP_TYPE)
+        self.controller.create(req, fake.GROUP_ID,
+                               body=create_fake_group_specs)
         self.assertTrue(mock_rpc_notifier.called)
 
     @mock.patch.object(rpc, 'get_notifier')
@@ -108,11 +109,11 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         self.controller.update(req,
                                fake.GROUP_TYPE_ID,
                                'id',
-                               update_fake_group_specs)
+                               body=update_fake_group_specs)
         self.assertTrue(mock_rpc_notifier.called)
 
     @mock.patch.object(db, 'group_type_specs_get',
@@ -124,7 +125,7 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         res_dict = self.controller.show(req, fake.GROUP_TYPE_ID, 'key1')
         self.assertEqual('value1', res_dict['key1'])
 
@@ -138,7 +139,7 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         self.controller.delete(req, fake.GROUP_TYPE_ID, 'key1')
         self.assertTrue(rpc_notifier_mock.called)
 
@@ -151,12 +152,12 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller.create,
                           req,
                           fake.GROUP_ID,
-                          create_fake_group_specs)
+                          body=create_fake_group_specs)
 
     @mock.patch.object(rpc, 'get_notifier')
     @mock.patch.object(db, 'group_type_get', return_value={})
@@ -166,7 +167,7 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller.delete,
                           req,
@@ -178,16 +179,18 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
-        self.assertRaises(webob.exc.HTTPBadRequest,
+                                      version=mv.GROUP_TYPE)
+        self.assertRaises(exception.ValidationError,
                           self.controller.update,
                           req,
                           fake.GROUP_TYPE_ID,
-                          'id')
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
-                          req, fake.GROUP_TYPE_ID, 'id', fake_group_specs)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
-                          req, fake.GROUP_TYPE_ID, 'key1', fake_group_specs)
+                          'id', body=None)
+        self.assertRaises(exception.ValidationError, self.controller.update,
+                          req, fake.GROUP_TYPE_ID, 'id',
+                          body=fake_group_specs)
+        self.assertRaises(exception.ValidationError, self.controller.update,
+                          req, fake.GROUP_TYPE_ID, 'key1',
+                          body=fake_group_specs)
 
     @mock.patch.object(db, 'group_type_specs_get',
                        return_value=fake_group_specs)
@@ -198,7 +201,7 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller.show,
                           req,
@@ -216,6 +219,6 @@ class GroupSpecsTestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('v3/%s/group_specs' %
                                       fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
-                          req, fake.GROUP_ID, incorrect_fake_group_specs)
+                                      version=mv.GROUP_TYPE)
+        self.assertRaises(exception.ValidationError, self.controller.create,
+                          req, fake.GROUP_ID, body=incorrect_fake_group_specs)

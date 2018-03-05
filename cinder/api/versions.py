@@ -29,23 +29,11 @@ from cinder.api.views import versions as views_versions
 _LINKS = [{
     "rel": "describedby",
     "type": "text/html",
-    "href": "http://docs.openstack.org/",
+    "href": "https://docs.openstack.org/",
 }]
 
 
 _KNOWN_VERSIONS = {
-    "v1.0": {
-        "id": "v1.0",
-        "status": "DEPRECATED",
-        "version": "",
-        "min_version": "",
-        "updated": "2016-05-02T20:25:19Z",
-        "links": _LINKS,
-        "media-types": [{
-            "base": "application/json",
-            "type": "application/vnd.openstack.volume+json;version=1",
-        }]
-    },
     "v2.0": {
         "id": "v2.0",
         "status": "DEPRECATED",
@@ -63,7 +51,7 @@ _KNOWN_VERSIONS = {
         "status": "CURRENT",
         "version": api_version_request._MAX_API_VERSION,
         "min_version": api_version_request._MIN_API_VERSION,
-        "updated": "2016-02-08T12:20:21Z",
+        "updated": api_version_request.UPDATED,
         "links": _LINKS,
         "media-types": [{
             "base": "application/json",
@@ -85,27 +73,27 @@ class Versions(openstack.APIRouter):
                        action='all')
         mapper.redirect('', '/')
 
+    def _setup_ext_routes(self, mapper, ext_mgr):
+        # NOTE(mriedem): The version router doesn't care about extensions.
+        pass
+
+    # NOTE (jose-castro-leon): Avoid to register extensions
+    # on the versions router, the versions router does not offer
+    # resources to be extended.
+    def _setup_extensions(self, ext_mgr):
+        pass
+
 
 class VersionsController(wsgi.Controller):
 
     def __init__(self):
         super(VersionsController, self).__init__(None)
 
-    @wsgi.Controller.api_version('1.0')
+    @wsgi.Controller.api_version('2.0')
     def index(self, req):  # pylint: disable=E0102
         """Return versions supported prior to the microversions epoch."""
         builder = views_versions.get_view_builder(req)
         known_versions = copy.deepcopy(_KNOWN_VERSIONS)
-        known_versions.pop('v2.0')
-        known_versions.pop('v3.0')
-        return builder.build_versions(known_versions)
-
-    @index.api_version('2.0')
-    def index(self, req):  # pylint: disable=E0102
-        """Return versions supported prior to the microversions epoch."""
-        builder = views_versions.get_view_builder(req)
-        known_versions = copy.deepcopy(_KNOWN_VERSIONS)
-        known_versions.pop('v1.0')
         known_versions.pop('v3.0')
         return builder.build_versions(known_versions)
 
@@ -114,12 +102,11 @@ class VersionsController(wsgi.Controller):
         """Return versions supported after the start of microversions."""
         builder = views_versions.get_view_builder(req)
         known_versions = copy.deepcopy(_KNOWN_VERSIONS)
-        known_versions.pop('v1.0')
         known_versions.pop('v2.0')
         return builder.build_versions(known_versions)
 
     # NOTE (cknight): Calling the versions API without
-    # /v1, /v2, or /v3 in the URL will lead to this unversioned
+    # /v2 or /v3 in the URL will lead to this unversioned
     # method, which should always return info about all
     # available versions.
     @wsgi.response(http_client.MULTIPLE_CHOICES)

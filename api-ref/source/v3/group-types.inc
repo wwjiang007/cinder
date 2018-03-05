@@ -3,6 +3,8 @@
 Group types
 ===========
 
+To create a generic volume group, you must specify a group type.
+
 
 Update group type
 ~~~~~~~~~~~~~~~~~
@@ -11,9 +13,8 @@ Update group type
 
 Updates a group type.
 
-To create a generic volume group, you must specify a group type.
-
 Normal response codes: 200
+
 Error response codes: badRequest(400), forbidden(403), itemNotFound(404),
 conflict(409), computeFault(500)
 
@@ -23,9 +24,12 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - group_type: group_type
-   - group_type_id: group_type_id
    - project_id: project_id_path
+   - group_type_id: group_type_id_1
+   - group_type: group_type
+   - name: name_16
+   - description: description_group_type_optional
+   - is_public: is_public_group_type_optional
 
 Request Example
 ---------------
@@ -39,60 +43,12 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - is_public: is_public
-   - group_specs: group_specs
-   - description: description
    - group_type: group_type
-   - name: name
-
-Response Example
-----------------
-
-.. literalinclude:: ./samples/group-type-show-response.json
-   :language: javascript
-
-
-Create group specs for a group type
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. rest_method::  POST /v3/{project_id}/group_types/{group_type_id}/group_specs
-
-Create group specs for a group type.
-
-
-Normal response codes: 202
-Error response codes: badRequest(400), forbidden(403), itemNotFound(404)
-
-
-Request
--------
-
-.. rest_parameters:: parameters.yaml
-
+   - id: group_type_id_2
+   - is_public: is_public_group_type_required
    - group_specs: group_specs
-   - group_type: group_type
-   - group_type_id: group_type_id
-   - project_id: project_id_path
-
-Request Example
----------------
-
-.. literalinclude:: ./samples/group-type-specs-create-request.json
-   :language: javascript
-
-
-
-Response Parameters
--------------------
-
-.. rest_parameters:: parameters.yaml
-
-   - is_public: is_public
-   - group_specs: group_specs
-   - description: description
-   - group_type: group_type
-   - name: name
-
+   - description: description_group_type_required
+   - name: name_16
 
 Response Example
 ----------------
@@ -110,6 +66,7 @@ Shows details for a group type.
 
 
 Normal response codes: 200
+
 Error response codes: itemNotFound(404)
 
 Request
@@ -117,7 +74,47 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - group_type_id: group_type_id
+   - project_id: project_id_path
+   - group_type_id: group_type_id_1
+
+
+Response Parameters
+-------------------
+
+.. rest_parameters:: parameters.yaml
+
+   - group_type: group_type
+   - id: group_type_id_2
+   - name: name_16
+   - is_public: is_public_group_type_required
+   - group_specs: group_specs
+   - description: description_group_type_required
+
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/group-type-show-response.json
+   :language: javascript
+
+
+Show default group type details
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. rest_method::  GET /v3/{project_id}/group_types/default
+
+Shows details for the default group type if configured.
+
+
+Normal response codes: 200
+
+Error response codes: itemNotFound(404)
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
    - project_id: project_id_path
 
 
@@ -126,17 +123,18 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - is_public: is_public
-   - group_specs: group_specs
-   - description: description
    - group_type: group_type
-   - name: name
+   - id: group_type_id_2
+   - name: name_16
+   - is_public: is_public_group_type_required
+   - group_specs: group_specs
+   - description: description_group_type_required
 
 
 Response Example
 ----------------
 
-.. literalinclude:: ./samples/group-type-show-response.json
+.. literalinclude:: ./samples/group-type-default-response.json
    :language: javascript
 
 
@@ -148,6 +146,7 @@ Delete group type
 Deletes a group type.
 
 Normal response codes: 202
+
 Error response codes: badRequest(400), forbidden(403), itemNotFound(404)
 
 
@@ -156,7 +155,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - group_type_id: group_type_id
+   - group_type_id: group_type_id_1
    - project_id: project_id_path
 
 
@@ -169,7 +168,6 @@ Lists group types.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -178,8 +176,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
-   - sort_key: sort_key
-   - sort_dir: sort_dir
+   - sort: sort
    - limit: limit
    - offset: offset
    - marker: marker
@@ -191,9 +188,9 @@ Response Parameters
 .. rest_parameters:: parameters.yaml
 
    - group_types: group_types
+   - id: group_type_id_2
    - group_specs: group_specs
-   - name: name
-   - group_type: group_type
+   - name: name_16
 
 Response Example
 ----------------
@@ -209,10 +206,9 @@ Create group type
 
 Creates a group type.
 
-To create a generic volume group, you must specify a group type.
-
 
 Normal response codes: 202
+
 Error response codes: badRequest(400), forbidden(403), itemNotFound(404),
 conflict(409)
 
@@ -222,8 +218,12 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - group_type: group_type
    - project_id: project_id_path
+   - group_type: group_type
+   - name: name_16
+   - description: description_group_type_optional
+   - is_public: is_public_group_type_optional
+   - group_specs: group_specs
 
 Request Example
 ---------------
@@ -237,11 +237,12 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - is_public: is_public
-   - group_specs: group_specs
-   - description: description
    - group_type: group_type
-   - name: name
+   - id: group_type_id_2
+   - is_public: is_public_group_type_required
+   - group_specs: group_specs
+   - description: description_group_type_required
+   - name: name_16
 
 
 Response Example

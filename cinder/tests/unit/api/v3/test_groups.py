@@ -22,6 +22,7 @@ import mock
 from six.moves import http_client
 import webob
 
+from cinder.api import microversions as mv
 from cinder.api.v3 import groups as v3_groups
 from cinder import context
 from cinder import db
@@ -36,8 +37,7 @@ from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import utils
 from cinder.volume import api as volume_api
 
-GROUP_MICRO_VERSION = '3.13'
-GROUP_FROM_SRC_MICRO_VERSION = '3.14'
+INVALID_GROUP_REPLICATION = mv.get_prior_version(mv.GROUP_REPLICATION)
 
 
 @ddt.ddt
@@ -75,6 +75,7 @@ class GroupsAPITestCase(test.TestCase):
             availability_zone='az1',
             host='fakehost',
             status=fields.GroupStatus.CREATING,
+            replication_status=fields.ReplicationStatus.DISABLED,
             **kwargs):
         """Create a group object."""
         ctxt = ctxt or self.ctxt
@@ -88,6 +89,7 @@ class GroupsAPITestCase(test.TestCase):
         group.volume_type_ids = volume_type_ids
         group.host = host
         group.status = status
+        group.replication_status = replication_status
         group.update(kwargs)
         group.create()
         return group
@@ -130,7 +132,7 @@ class GroupsAPITestCase(test.TestCase):
 
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         res_dict = self.controller.show(req, self.group1.id)
 
         self.assertEqual(1, len(res_dict))
@@ -145,7 +147,10 @@ class GroupsAPITestCase(test.TestCase):
         self.assertEqual([fake.VOLUME_TYPE_ID],
                          res_dict['group']['volume_types'])
 
-    @ddt.data(('3.24', False), ('3.24', True), ('3.25', False), ('3.25', True))
+    @ddt.data((mv.get_prior_version(mv.GROUP_VOLUME_LIST), False),
+              (mv.get_prior_version(mv.GROUP_VOLUME_LIST), True),
+              (mv.GROUP_VOLUME_LIST, False),
+              (mv.GROUP_VOLUME_LIST, True))
     @ddt.unpack
     @mock.patch('cinder.objects.volume_type.VolumeTypeList.get_all_by_group')
     @mock.patch('cinder.objects.volume.VolumeList.get_all_by_generic_group')
@@ -174,10 +179,10 @@ class GroupsAPITestCase(test.TestCase):
         res_dict = self.controller.detail(req)
 
         # If the microversion >= 3.25 and "list_volume=True", "volumes" should
-        # be contained in the response body. Else,"volumes" should not be
+        # be contained in the response body. Else, "volumes" should not be
         # contained in the response body.
         self.assertEqual(3, len(res_dict['groups']))
-        if (version, has_list_volume) == ('3.25', True):
+        if (version, has_list_volume) == (mv.GROUP_VOLUME_LIST, True):
             self.assertEqual([fake.VOLUME_ID],
                              res_dict['groups'][0]['volumes'])
         else:
@@ -207,7 +212,7 @@ class GroupsAPITestCase(test.TestCase):
         # be contained in the response body.
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s?list_volume=True' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version='3.25')
+                                      version=mv.GROUP_VOLUME_LIST)
         res_dict = self.controller.show(req, self.group1.id)
         self.assertEqual(1, len(res_dict))
         self.assertEqual([fake.VOLUME_ID],
@@ -217,16 +222,17 @@ class GroupsAPITestCase(test.TestCase):
         # should not be contained in the response body.
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version='3.25')
+                                      version=mv.GROUP_VOLUME_LIST)
         res_dict = self.controller.show(req, self.group1.id)
         self.assertEqual(1, len(res_dict))
         self.assertIsNone(res_dict['group'].get('volumes', None))
 
         # If the microversion < 3.25, "volumes" should not be contained in the
         # response body.
-        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s?list_volume=True' %
-                                      (fake.PROJECT_ID, self.group1.id),
-                                      version='3.24')
+        req = fakes.HTTPRequest.blank(
+            '/v3/%s/groups/%s?list_volume=True' %
+            (fake.PROJECT_ID, self.group1.id),
+            version=mv.get_prior_version(mv.GROUP_VOLUME_LIST))
         res_dict = self.controller.show(req, self.group1.id)
         self.assertEqual(1, len(res_dict))
         self.assertIsNone(res_dict['group'].get('volumes', None))
@@ -235,11 +241,12 @@ class GroupsAPITestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s' %
                                       (fake.PROJECT_ID,
                                        fake.WILL_NOT_BE_FOUND_ID),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         self.assertRaises(exception.GroupNotFound, self.controller.show,
                           req, fake.WILL_NOT_BE_FOUND_ID)
 
-    @ddt.data('3.30', '3.31')
+    @ddt.data(mv.get_prior_version(mv.RESOURCE_FILTER),
+              mv.RESOURCE_FILTER, mv.LIKE_FILTER)
     @mock.patch('cinder.api.common.reject_invalid_filters')
     def test_group_list_with_general_filter(self, version, mock_update):
         url = '/v3/%s/groups' % fake.PROJECT_ID
@@ -248,9 +255,11 @@ class GroupsAPITestCase(test.TestCase):
                                       use_admin_context=False)
         self.controller.index(req)
 
-        if version != '3.30':
+        if version != mv.get_prior_version(mv.RESOURCE_FILTER):
+            support_like = True if version == mv.LIKE_FILTER else False
             mock_update.assert_called_once_with(req.environ['cinder.context'],
-                                                mock.ANY, 'group')
+                                                mock.ANY, 'group',
+                                                support_like)
 
     def test_list_groups_json(self):
         self.group2.group_type_id = fake.GROUP_TYPE2_ID
@@ -267,7 +276,7 @@ class GroupsAPITestCase(test.TestCase):
         self.group3.save()
 
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         res_dict = self.controller.index(req)
 
         self.assertEqual(1, len(res_dict))
@@ -289,7 +298,7 @@ class GroupsAPITestCase(test.TestCase):
         url = '/v3/%s/groups?limit=1' % fake.PROJECT_ID
         if is_detail:
             url = '/v3/%s/groups/detail?limit=1' % fake.PROJECT_ID
-        req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
+        req = fakes.HTTPRequest.blank(url, version=mv.GROUP_VOLUME)
 
         if is_detail:
             res_dict = self.controller.detail(req)
@@ -314,7 +323,7 @@ class GroupsAPITestCase(test.TestCase):
         url = '/v3/%s/groups?offset=1' % fake.PROJECT_ID
         if is_detail:
             url = '/v3/%s/groups/detail?offset=1' % fake.PROJECT_ID
-        req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
+        req = fakes.HTTPRequest.blank(url, version=mv.GROUP_VOLUME)
         res_dict = self.controller.index(req)
 
         self.assertEqual(1, len(res_dict))
@@ -331,7 +340,7 @@ class GroupsAPITestCase(test.TestCase):
         if is_detail:
             url = ('/v3/%s/groups/detail?offset=234523423455454' %
                    fake.PROJECT_ID)
-        req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
+        req = fakes.HTTPRequest.blank(url, version=mv.GROUP_VOLUME)
         if is_detail:
             self.assertRaises(webob.exc.HTTPBadRequest, self.controller.detail,
                               req)
@@ -345,7 +354,7 @@ class GroupsAPITestCase(test.TestCase):
         if is_detail:
             url = ('/v3/%s/groups/detail?limit=2&offset=1' %
                    fake.PROJECT_ID)
-        req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
+        req = fakes.HTTPRequest.blank(url, version=mv.GROUP_VOLUME)
 
         if is_detail:
             res_dict = self.controller.detail(req)
@@ -371,7 +380,7 @@ class GroupsAPITestCase(test.TestCase):
             url = ('/v3/%s/groups/detail?'
                    'all_tenants=True&id=%s') % (fake.PROJECT_ID,
                                                 self.group3.id)
-        req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION,
+        req = fakes.HTTPRequest.blank(url, version=mv.GROUP_VOLUME,
                                       use_admin_context=True)
 
         if is_detail:
@@ -392,7 +401,7 @@ class GroupsAPITestCase(test.TestCase):
         if is_detail:
             url = ('/v3/%s/groups/detail?sort=id:asc' %
                    fake.PROJECT_ID)
-        req = fakes.HTTPRequest.blank(url, version=GROUP_MICRO_VERSION)
+        req = fakes.HTTPRequest.blank(url, version=mv.GROUP_VOLUME)
         expect_result = [self.group1.id, self.group2.id,
                          self.group3.id]
         expect_result.sort()
@@ -432,7 +441,7 @@ class GroupsAPITestCase(test.TestCase):
         # self.group3.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/detail' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         res_dict = self.controller.detail(req)
 
         self.assertEqual(1, len(res_dict))
@@ -470,7 +479,7 @@ class GroupsAPITestCase(test.TestCase):
                           "description":
                           "Group 1", }}
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         res_dict = self.controller.create(req, body)
 
         self.assertEqual(1, len(res_dict))
@@ -483,7 +492,7 @@ class GroupsAPITestCase(test.TestCase):
     def test_create_group_with_no_body(self):
         # omit body from the request
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
                           req, None)
 
@@ -492,7 +501,7 @@ class GroupsAPITestCase(test.TestCase):
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": False}}
         res_dict = self.controller.delete_group(
             req, self.group1.id, body)
@@ -500,14 +509,14 @@ class GroupsAPITestCase(test.TestCase):
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
         self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
-        self.assertEqual('deleting', group.status)
+        self.assertEqual(fields.GroupStatus.DELETING, group.status)
 
     def test_delete_group_available_no_delete_volumes(self):
         self.group1.status = fields.GroupStatus.AVAILABLE
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": False}}
         res_dict = self.controller.delete_group(
             req, self.group1.id, body)
@@ -522,7 +531,7 @@ class GroupsAPITestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID,
                                        fake.WILL_NOT_BE_FOUND_ID),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": False}}
         self.assertRaises(exception.GroupNotFound,
                           self.controller.delete_group,
@@ -532,7 +541,7 @@ class GroupsAPITestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID,
                                        self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": False}}
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.delete_group,
@@ -542,7 +551,7 @@ class GroupsAPITestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID,
                                        self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": True}}
         res_dict = self.controller.delete_group(
             req, self.group1.id, body)
@@ -550,7 +559,7 @@ class GroupsAPITestCase(test.TestCase):
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
         self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
-        self.assertEqual('deleting', group.status)
+        self.assertEqual(fields.GroupStatus.DELETING, group.status)
 
     def test_delete_group_no_host(self):
         self.group1.host = None
@@ -559,7 +568,7 @@ class GroupsAPITestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID,
                                        self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": True}}
         res_dict = self.controller.delete_group(
             req, self.group1.id, body)
@@ -571,7 +580,10 @@ class GroupsAPITestCase(test.TestCase):
         self.assertEqual(fields.GroupStatus.DELETED, group.status)
         self.assertIsNone(group.host)
 
-    def test_create_delete_group_update_quota(self):
+    @mock.patch('cinder.quota.GROUP_QUOTAS.reserve',
+                return_value='reservations')
+    @mock.patch('cinder.quota.GROUP_QUOTAS.commit')
+    def test_create_delete_group_update_quota(self, mock_commit, mock_reserve):
         name = 'mygroup'
         description = 'group 1'
         grp_type = {'id': fake.GROUP_TYPE_ID, 'name': 'group_type'}
@@ -583,12 +595,14 @@ class GroupsAPITestCase(test.TestCase):
         self.mock_object(self.group_api, 'update_quota')
         group = self.group_api.create(self.ctxt, name, description,
                                       grp_type['id'], [fake_type['id']])
-        self.group_api.update_quota.assert_called_once_with(
-            self.ctxt, group, 1)
+        # Verify that quota reservation and commit was called
+        mock_reserve.assert_called_once_with(self.ctxt,
+                                             project_id=self.ctxt.project_id,
+                                             groups=1)
+        mock_commit.assert_called_once_with(self.ctxt, 'reservations')
 
         self.assertEqual(fields.GroupStatus.CREATING, group.status)
         self.assertIsNone(group.host)
-        self.group_api.update_quota.reset_mock()
         group.status = fields.GroupStatus.ERROR
         self.group_api.delete(self.ctxt, group)
 
@@ -609,7 +623,7 @@ class GroupsAPITestCase(test.TestCase):
                           "description":
                           "Group 1", }}
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         ex = self.assertRaises(exception.GroupLimitExceeded,
                                self.controller.create,
                                req, body)
@@ -620,7 +634,7 @@ class GroupsAPITestCase(test.TestCase):
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"invalid_request_element": {"delete-volumes": False}}
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.delete_group,
@@ -631,7 +645,7 @@ class GroupsAPITestCase(test.TestCase):
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": "abcd"}}
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.delete_group,
@@ -642,11 +656,34 @@ class GroupsAPITestCase(test.TestCase):
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": ""}}
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.delete_group,
                           req, self.group1.id, body)
+
+    def test_delete_group_with_group_snapshot(self):
+        self.group1.status = fields.GroupStatus.AVAILABLE
+        self.group1.save()
+        g_snapshot = utils.create_group_snapshot(self.ctxt, self.group1.id)
+
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, self.group1.id),
+                                      version=mv.GROUP_VOLUME)
+        body = {"delete": {"delete-volumes": True}}
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller.delete_group,
+                          req, self.group1.id, body)
+
+        g_snapshot.destroy()
+
+        res_dict = self.controller.delete_group(
+            req, self.group1.id, body)
+
+        group = objects.Group.get_by_id(
+            self.ctxt, self.group1.id)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
+        self.assertEqual(fields.GroupStatus.DELETING, group.status)
 
     def test_delete_group_delete_volumes(self):
         self.group1.status = fields.GroupStatus.AVAILABLE
@@ -654,7 +691,7 @@ class GroupsAPITestCase(test.TestCase):
         vol = utils.create_volume(self.ctxt, group_id=self.group1.id)
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": True}}
         res_dict = self.controller.delete_group(
             req, self.group1.id, body)
@@ -662,7 +699,7 @@ class GroupsAPITestCase(test.TestCase):
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
         self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
-        self.assertEqual('deleting', group.status)
+        self.assertEqual(fields.GroupStatus.DELETING, group.status)
 
         vol.destroy()
 
@@ -673,7 +710,7 @@ class GroupsAPITestCase(test.TestCase):
                                   attach_status='attached')
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": True}}
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.delete_group,
@@ -688,7 +725,7 @@ class GroupsAPITestCase(test.TestCase):
         utils.create_snapshot(self.ctxt, vol.id)
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": True}}
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.delete_group,
@@ -700,11 +737,12 @@ class GroupsAPITestCase(test.TestCase):
         self.group1.status = fields.GroupStatus.AVAILABLE
         self.group1.save()
         vol = utils.create_volume(self.ctxt, group_id=self.group1.id)
-        utils.create_snapshot(self.ctxt, vol.id, status='deleted',
+        utils.create_snapshot(self.ctxt, vol.id,
+                              status=fields.SnapshotStatus.DELETED,
                               deleted=True)
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"delete": {"delete-volumes": True}}
         res_dict = self.controller.delete_group(
             req, self.group1.id, body)
@@ -712,7 +750,7 @@ class GroupsAPITestCase(test.TestCase):
         group = objects.Group.get_by_id(
             self.ctxt, self.group1.id)
         self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
-        self.assertEqual('deleting', group.status)
+        self.assertEqual(fields.GroupStatus.DELETING, group.status)
 
         vol.destroy()
 
@@ -723,7 +761,7 @@ class GroupsAPITestCase(test.TestCase):
                           "description":
                           "Group 1", }}
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.create,
                           req, body)
@@ -735,7 +773,7 @@ class GroupsAPITestCase(test.TestCase):
                           "description":
                           "Group 1", }}
         req = fakes.HTTPRequest.blank('/v3/%s/groups' % fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.create,
                           req, body)
@@ -785,7 +823,7 @@ class GroupsAPITestCase(test.TestCase):
             volume_type_id=volume_type_id)
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         name = 'newgroup'
         description = 'New Group Description'
         add_volumes = add_volume.id + "," + add_volume2.id
@@ -811,12 +849,31 @@ class GroupsAPITestCase(test.TestCase):
         add_volume.destroy()
         add_volume2.destroy()
 
+    @ddt.data(fields.GroupStatus.CREATING, fields.GroupStatus.UPDATING)
+    def test_update_group_any_state(self, status):
+        self.group1.status = status
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
+                                      (fake.PROJECT_ID, self.group1.id),
+                                      version=mv.GROUP_VOLUME)
+        body = {"group": {"name": "new name",
+                          "description": "new description",
+                          "add_volumes": None,
+                          "remove_volumes": None, }}
+
+        res_dict = self.controller.update(
+            req, self.group1.id, body)
+        self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
+
+        group = objects.Group.get_by_id(self.ctxt, self.group1.id)
+        self.assertEqual("new name", group.name)
+        self.assertEqual("new description", group.description)
+
     def test_update_group_add_volume_not_found(self):
         self.group1.status = fields.GroupStatus.AVAILABLE
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"group": {"name": None,
                           "description": None,
                           "add_volumes": "fake-volume-uuid",
@@ -831,7 +888,7 @@ class GroupsAPITestCase(test.TestCase):
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"group": {"name": None,
                           "description": "new description",
                           "add_volumes": None,
@@ -846,7 +903,7 @@ class GroupsAPITestCase(test.TestCase):
         self.group1.save()
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         body = {"group": {"name": None,
                           "description": None,
                           "add_volumes": None,
@@ -865,7 +922,7 @@ class GroupsAPITestCase(test.TestCase):
             status='wrong_status')
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         add_volumes = add_volume.id
         body = {"group": {"name": "group1",
                           "description": "",
@@ -887,7 +944,7 @@ class GroupsAPITestCase(test.TestCase):
             volume_type_id=wrong_type)
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         add_volumes = add_volume.id
         body = {"group": {"name": "group1",
                           "description": "",
@@ -908,7 +965,7 @@ class GroupsAPITestCase(test.TestCase):
             group_id=fake.GROUP2_ID)
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
         add_volumes = add_volume.id
         body = {"group": {"name": "group1",
                           "description": "",
@@ -921,29 +978,40 @@ class GroupsAPITestCase(test.TestCase):
 
         add_volume.destroy()
 
-    def test_update_group_invalid_state(self):
+    @ddt.data(fields.GroupStatus.CREATING, fields.GroupStatus.UPDATING)
+    def test_update_group_invalid_state(self, status):
+        self.group1.status = status
+        add_volume = utils.create_volume(
+            self.ctxt,
+            volume_type_id=self.volume_type1.id,
+            host=self.group1.host)
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/update' %
                                       (fake.PROJECT_ID, self.group1.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_VOLUME)
+
         body = {"group": {"name": "new name",
                           "description": None,
-                          "add_volumes": None,
+                          "add_volumes": add_volume.id,
                           "remove_volumes": None, }}
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.update,
                           req, self.group1.id, body)
 
-    @ddt.data(('3.11', 'fake_group_001',
+        vol = objects.Volume.get_by_id(self.ctxt, add_volume.id)
+        self.assertEqual(add_volume.status, vol.status)
+        add_volume.destroy()
+
+    @ddt.data((mv.GROUP_TYPE, 'fake_group_001',
                fields.GroupStatus.AVAILABLE,
                exception.VersionNotFoundForAPIMethod),
-              ('3.19', 'fake_group_001',
+              (mv.GROUP_SNAPSHOT_RESET_STATUS, 'fake_group_001',
                fields.GroupStatus.AVAILABLE,
                exception.VersionNotFoundForAPIMethod),
-              ('3.20', 'fake_group_001',
+              (mv.GROUP_VOLUME_RESET_STATUS, 'fake_group_001',
                fields.GroupStatus.AVAILABLE,
                exception.GroupNotFound),
-              ('3.20', None,
+              (mv.GROUP_VOLUME_RESET_STATUS, None,
                'invalid_test_status',
                webob.exc.HTTPBadRequest),
               )
@@ -964,7 +1032,7 @@ class GroupsAPITestCase(test.TestCase):
     def test_reset_group_status(self):
         req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
                                       (fake.PROJECT_ID, self.group2.id),
-                                      version='3.20')
+                                      version=mv.GROUP_VOLUME_RESET_STATUS)
         body = {"reset_status": {
             "status": fields.GroupStatus.AVAILABLE
         }}
@@ -975,9 +1043,12 @@ class GroupsAPITestCase(test.TestCase):
         self.assertEqual(http_client.ACCEPTED, response.status_int)
         self.assertEqual(fields.GroupStatus.AVAILABLE, group.status)
 
+    @ddt.data(True, False)
     @mock.patch(
         'cinder.api.openstack.wsgi.Controller.validate_name_and_description')
-    def test_create_group_from_src_snap(self, mock_validate):
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.validate_host_capacity')
+    def test_create_group_from_src_snap(self, valid_host, mock_validate_host,
+                                        mock_validate):
         self.mock_object(volume_api.API, "create", v3_fakes.fake_volume_create)
 
         group = utils.create_group(self.ctxt,
@@ -996,6 +1067,7 @@ class GroupsAPITestCase(test.TestCase):
             group_snapshot_id=group_snapshot.id,
             status=fields.SnapshotStatus.AVAILABLE,
             volume_type_id=volume.volume_type_id)
+        mock_validate_host.return_value = valid_host
 
         test_grp_name = 'test grp'
         body = {"create-from-src": {"name": test_grp_name,
@@ -1003,23 +1075,31 @@ class GroupsAPITestCase(test.TestCase):
                                     "group_snapshot_id": group_snapshot.id}}
         req = fakes.HTTPRequest.blank('/v3/%s/groups/action' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_FROM_SRC_MICRO_VERSION)
-        res_dict = self.controller.create_from_src(req, body)
+                                      version=mv.GROUP_SNAPSHOTS)
+        if valid_host:
+            res_dict = self.controller.create_from_src(req, body)
 
-        self.assertIn('id', res_dict['group'])
-        self.assertEqual(test_grp_name, res_dict['group']['name'])
-        self.assertTrue(mock_validate.called)
-
-        grp_ref = objects.Group.get_by_id(
-            self.ctxt.elevated(), res_dict['group']['id'])
-
+            self.assertIn('id', res_dict['group'])
+            self.assertEqual(test_grp_name, res_dict['group']['name'])
+            self.assertTrue(mock_validate.called)
+            grp_ref = objects.Group.get_by_id(
+                self.ctxt.elevated(), res_dict['group']['id'])
+        else:
+            self.assertRaises(webob.exc.HTTPBadRequest,
+                              self.controller.create_from_src, req, body)
+            groups = objects.GroupList.get_all_by_project(self.ctxt,
+                                                          fake.PROJECT_ID)
+            grp_ref = objects.Group.get_by_id(
+                self.ctxt.elevated(), groups[0]['id'])
         grp_ref.destroy()
         snapshot.destroy()
         volume.destroy()
         group.destroy()
         group_snapshot.destroy()
 
-    def test_create_group_from_src_grp(self):
+    @ddt.data(True, False)
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.validate_host_capacity')
+    def test_create_group_from_src_grp(self, host_valid, mock_validate_host):
         self.mock_object(volume_api.API, "create", v3_fakes.fake_volume_create)
 
         source_grp = utils.create_group(self.ctxt,
@@ -1029,6 +1109,7 @@ class GroupsAPITestCase(test.TestCase):
             self.ctxt,
             group_id=source_grp.id,
             volume_type_id=fake.VOLUME_TYPE_ID)
+        mock_validate_host.return_value = host_valid
 
         test_grp_name = 'test cg'
         body = {"create-from-src": {"name": test_grp_name,
@@ -1036,14 +1117,264 @@ class GroupsAPITestCase(test.TestCase):
                                     "source_group_id": source_grp.id}}
         req = fakes.HTTPRequest.blank('/v3/%s/groups/action' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_FROM_SRC_MICRO_VERSION)
-        res_dict = self.controller.create_from_src(req, body)
-
-        self.assertIn('id', res_dict['group'])
-        self.assertEqual(test_grp_name, res_dict['group']['name'])
-
-        grp = objects.Group.get_by_id(
-            self.ctxt, res_dict['group']['id'])
+                                      version=mv.GROUP_SNAPSHOTS)
+        if host_valid:
+            res_dict = self.controller.create_from_src(req, body)
+            self.assertIn('id', res_dict['group'])
+            self.assertEqual(test_grp_name, res_dict['group']['name'])
+            grp = objects.Group.get_by_id(
+                self.ctxt, res_dict['group']['id'])
+            grp.destroy()
+            volume.destroy()
+            source_grp.destroy()
+        else:
+            self.assertRaises(webob.exc.HTTPBadRequest,
+                              self.controller.create_from_src, req, body)
+            groups = objects.GroupList.get_all_by_project(self.ctxt,
+                                                          fake.PROJECT_ID)
+            grp = objects.Group.get_by_id(
+                self.ctxt.elevated(), groups[0]['id'])
         grp.destroy()
         volume.destroy()
         source_grp.destroy()
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=True)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    def test_enable_replication(self, mock_rep_grp_type, mock_rep_vol_type):
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, self.group3.id),
+                                      version=mv.GROUP_REPLICATION)
+        self.group3.status = fields.GroupStatus.AVAILABLE
+        self.group3.save()
+        body = {"enable_replication": {}}
+        response = self.controller.enable_replication(req,
+                                                      self.group3.id, body)
+
+        group = objects.Group.get_by_id(self.ctxt, self.group3.id)
+        self.assertEqual(202, response.status_int)
+        self.assertEqual(fields.GroupStatus.AVAILABLE, group.status)
+        self.assertEqual(fields.ReplicationStatus.ENABLING,
+                         group.replication_status)
+
+    @ddt.data((True, False), (False, True), (False, False))
+    @ddt.unpack
+    @mock.patch('cinder.volume.utils.is_replicated_spec')
+    @mock.patch('cinder.volume.utils.is_group_a_type')
+    def test_enable_replication_wrong_type(self, is_grp_rep_type,
+                                           is_vol_rep_type,
+                                           mock_rep_grp_type,
+                                           mock_rep_vol_type):
+        mock_rep_grp_type.return_value = is_grp_rep_type
+        mock_rep_vol_type.return_value = is_vol_rep_type
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, self.group3.id),
+                                      version=mv.GROUP_REPLICATION)
+        self.group3.status = fields.GroupStatus.AVAILABLE
+        self.group3.save()
+        body = {"enable_replication": {}}
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller.enable_replication,
+                          req, self.group3.id, body)
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=False)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    def test_enable_replication_wrong_group_type(self, mock_rep_grp_type,
+                                                 mock_rep_vol_type):
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, self.group3.id),
+                                      version=mv.GROUP_REPLICATION)
+        self.group3.status = fields.GroupStatus.AVAILABLE
+        self.group3.save()
+        body = {"enable_replication": {}}
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller.enable_replication,
+                          req, self.group3.id, body)
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=True)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    @ddt.data((mv.GROUP_REPLICATION, True,
+               fields.GroupStatus.CREATING,
+               webob.exc.HTTPBadRequest),
+              (mv.GROUP_REPLICATION, False,
+               fields.GroupStatus.AVAILABLE,
+               exception.GroupNotFound),
+              (INVALID_GROUP_REPLICATION, True,
+               fields.GroupStatus.AVAILABLE,
+               exception.VersionNotFoundForAPIMethod),
+              )
+    @ddt.unpack
+    def test_enable_replication_negative(self, version, not_fake,
+                                         status, exceptions,
+                                         mock_rep_grp_type, mock_rep_vol_type):
+        if not_fake:
+            group_id = self.group3.id
+        else:
+            group_id = fake.GROUP_ID
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, group_id),
+                                      version=version)
+        if not_fake:
+            self.group3.status = status
+            self.group3.save()
+        body = {"enable_replication": {}}
+        self.assertRaises(exceptions,
+                          self.controller.enable_replication,
+                          req, group_id, body)
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=True)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    def test_disable_replication(self, mock_rep_grp_type, mock_rep_vol_type):
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, self.group3.id),
+                                      version=mv.GROUP_REPLICATION)
+        self.group3.status = fields.GroupStatus.AVAILABLE
+        self.group3.replication_status = fields.ReplicationStatus.ENABLED
+        self.group3.save()
+        body = {"disable_replication": {}}
+        response = self.controller.disable_replication(req,
+                                                       self.group3.id, body)
+
+        group = objects.Group.get_by_id(self.ctxt, self.group3.id)
+        self.assertEqual(202, response.status_int)
+        self.assertEqual(fields.GroupStatus.AVAILABLE, group.status)
+        self.assertEqual(fields.ReplicationStatus.DISABLING,
+                         group.replication_status)
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=True)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    @ddt.data((mv.GROUP_REPLICATION, True,
+               fields.GroupStatus.CREATING,
+               fields.ReplicationStatus.ENABLED,
+               webob.exc.HTTPBadRequest),
+              (mv.GROUP_REPLICATION, True,
+               fields.GroupStatus.AVAILABLE,
+               fields.ReplicationStatus.DISABLED,
+               webob.exc.HTTPBadRequest),
+              (mv.GROUP_REPLICATION, False,
+               fields.GroupStatus.AVAILABLE,
+               fields.ReplicationStatus.DISABLED,
+               exception.GroupNotFound),
+              (INVALID_GROUP_REPLICATION, True,
+               fields.GroupStatus.AVAILABLE,
+               fields.ReplicationStatus.ENABLED,
+               exception.VersionNotFoundForAPIMethod),
+              )
+    @ddt.unpack
+    def test_disable_replication_negative(self, version, not_fake,
+                                          status, rep_status, exceptions,
+                                          mock_rep_grp_type,
+                                          mock_rep_vol_type):
+        if not_fake:
+            group_id = self.group3.id
+        else:
+            group_id = fake.GROUP_ID
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, group_id),
+                                      version=version)
+        if not_fake:
+            self.group3.status = status
+            self.group3.replication_status = rep_status
+            self.group3.save()
+        body = {"disable_replication": {}}
+        self.assertRaises(exceptions,
+                          self.controller.disable_replication,
+                          req, group_id, body)
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=True)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    def test_failover_replication(self, mock_rep_grp_type, mock_rep_vol_type):
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, self.group3.id),
+                                      version=mv.GROUP_REPLICATION)
+        self.group3.status = fields.GroupStatus.AVAILABLE
+        self.group3.replication_status = fields.ReplicationStatus.ENABLED
+        self.group3.save()
+        body = {"failover_replication": {}}
+        response = self.controller.failover_replication(req,
+                                                        self.group3.id, body)
+
+        group = objects.Group.get_by_id(self.ctxt, self.group3.id)
+        self.assertEqual(202, response.status_int)
+        self.assertEqual(fields.GroupStatus.AVAILABLE, group.status)
+        self.assertEqual(fields.ReplicationStatus.FAILING_OVER,
+                         group.replication_status)
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=True)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    @ddt.data((mv.GROUP_REPLICATION, True,
+               fields.GroupStatus.CREATING,
+               fields.ReplicationStatus.ENABLED,
+               webob.exc.HTTPBadRequest),
+              (mv.GROUP_REPLICATION, True,
+               fields.GroupStatus.AVAILABLE,
+               fields.ReplicationStatus.DISABLED,
+               webob.exc.HTTPBadRequest),
+              (mv.GROUP_REPLICATION, False,
+               fields.GroupStatus.AVAILABLE,
+               fields.ReplicationStatus.DISABLED,
+               exception.GroupNotFound),
+              (INVALID_GROUP_REPLICATION, True,
+               fields.GroupStatus.AVAILABLE,
+               fields.ReplicationStatus.ENABLED,
+               exception.VersionNotFoundForAPIMethod),
+              )
+    @ddt.unpack
+    def test_failover_replication_negative(self, version, not_fake,
+                                           status, rep_status, exceptions,
+                                           mock_rep_grp_type,
+                                           mock_rep_vol_type):
+        if not_fake:
+            group_id = self.group3.id
+        else:
+            group_id = fake.GROUP_ID
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, group_id),
+                                      version=version)
+        if not_fake:
+            self.group3.status = status
+            self.group3.replication_status = rep_status
+            self.group3.save()
+        body = {"failover_replication": {}}
+        self.assertRaises(exceptions,
+                          self.controller.failover_replication,
+                          req, group_id, body)
+
+    @mock.patch('cinder.volume.utils.is_replicated_spec',
+                return_value=True)
+    @mock.patch('cinder.volume.utils.is_group_a_type',
+                return_value=True)
+    @mock.patch('cinder.volume.rpcapi.VolumeAPI.list_replication_targets')
+    def test_list_replication_targets(self, mock_list_rep_targets,
+                                      mock_rep_grp_type, mock_rep_vol_type):
+        req = fakes.HTTPRequest.blank('/v3/%s/groups/%s/action' %
+                                      (fake.PROJECT_ID, self.group3.id),
+                                      version=mv.GROUP_REPLICATION)
+        targets = {
+            'replication_targets': [
+                {'backend_id': 'lvm_backend_1'}
+            ]
+        }
+        mock_list_rep_targets.return_value = targets
+        self.group3.status = fields.GroupStatus.AVAILABLE
+        self.group3.save()
+        body = {"list_replication_targets": {}}
+        response = self.controller.list_replication_targets(
+            req, self.group3.id, body)
+
+        self.assertIn('replication_targets', response)
+        self.assertEqual('lvm_backend_1',
+                         response['replication_targets'][0]['backend_id'])

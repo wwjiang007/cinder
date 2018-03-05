@@ -52,9 +52,9 @@ def create_fake_volume(id, **kwargs):
         'display_name': DEFAULT_VOL_NAME,
         'display_description': DEFAULT_VOL_DESCRIPTION,
         'updated_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
-                                        tzinfo=iso8601.iso8601.Utc()),
+                                        tzinfo=iso8601.UTC),
         'created_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
-                                        tzinfo=iso8601.iso8601.Utc()),
+                                        tzinfo=iso8601.UTC),
         'snapshot_id': None,
         'source_volid': None,
         'volume_type_id': '3e196c20-3c06-11e2-81c1-0800200c9a66',
@@ -63,7 +63,7 @@ def create_fake_volume(id, **kwargs):
                                   {'key': 'readonly', 'value': 'False'}],
         'bootable': False,
         'launched_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
-                                         tzinfo=iso8601.iso8601.Utc()),
+                                         tzinfo=iso8601.UTC),
         'volume_type': fake_volume.fake_db_volume_type(name=DEFAULT_VOL_TYPE),
         'replication_status': 'disabled',
         'replication_extended_status': None,
@@ -205,6 +205,26 @@ def fake_snapshot(id, **kwargs):
     return snapshot
 
 
+def fake_backup(id, **kwargs):
+    backup = {'id': fake.BACKUP_ID,
+              'volume_id': fake.VOLUME_ID,
+              'status': fields.BackupStatus.CREATING,
+              'size': 1,
+              'display_name': 'fake_name',
+              'display_description': 'fake_description',
+              'user_id': fake.USER_ID,
+              'project_id': fake.PROJECT_ID,
+              'temp_volume_id': None,
+              'temp_snapshot_id': None,
+              'snapshot_id': None,
+              'data_timestamp': None,
+              'restore_volume_id': None,
+              'backup_metadata': {}}
+
+    backup.update(kwargs)
+    return backup
+
+
 def fake_snapshot_get_all(context, filters=None, marker=None, limit=None,
                           sort_keys=None, sort_dirs=None, offset=None):
     return [fake_snapshot(fake.VOLUME_ID, project_id=fake.PROJECT_ID),
@@ -223,11 +243,13 @@ def fake_snapshot_update(self, context, *args, **param):
 
 
 def fake_service_get_all(*args, **kwargs):
-    return [{'availability_zone': "zone1:host1", "disabled": 0}]
+    return [{'availability_zone': "zone1:host1", "disabled": 0,
+             'uuid': 'a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'}]
 
 
 def fake_service_get_all_by_topic(context, topic, disabled=None):
-    return [{'availability_zone': "zone1:host1", "disabled": 0}]
+    return [{'availability_zone': "zone1:host1", "disabled": 0,
+             'uuid': '4200b32b-0bf9-436c-86b2-0675f6ac218e'}]
 
 
 def fake_snapshot_get(self, context, snapshot_id):
@@ -235,6 +257,13 @@ def fake_snapshot_get(self, context, snapshot_id):
         raise exc.SnapshotNotFound(snapshot_id=snapshot_id)
 
     return fake_snapshot(snapshot_id)
+
+
+def fake_backup_get(self, context, backup_id):
+    if backup_id == fake.WILL_NOT_BE_FOUND_ID:
+        raise exc.BackupNotFound(backup_id=backup_id)
+
+    return fake_backup(backup_id)
 
 
 def fake_consistencygroup_get_notfound(self, context, cg_id):

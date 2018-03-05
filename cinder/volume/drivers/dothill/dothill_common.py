@@ -32,34 +32,7 @@ from cinder.volume.drivers.dothill import dothill_client as dothill
 
 LOG = logging.getLogger(__name__)
 
-common_opts = [
-    cfg.StrOpt('dothill_backend_name',
-               default='A',
-               help="Pool or Vdisk name to use for volume creation."),
-    cfg.StrOpt('dothill_backend_type',
-               choices=['linear', 'virtual'],
-               default='virtual',
-               help="linear (for Vdisk) or virtual (for Pool)."),
-    cfg.StrOpt('dothill_api_protocol',
-               choices=['http', 'https'],
-               default='https',
-               help="DotHill API interface protocol."),
-    cfg.BoolOpt('dothill_verify_certificate',
-                default=False,
-                help="Whether to verify DotHill array SSL certificate."),
-    cfg.StrOpt('dothill_verify_certificate_path',
-               help="DotHill array SSL certificate path."),
-]
-
-iscsi_opts = [
-    cfg.ListOpt('dothill_iscsi_ips',
-                default=[],
-                help="List of comma-separated target iSCSI IP addresses."),
-]
-
 CONF = cfg.CONF
-CONF.register_opts(common_opts)
-CONF.register_opts(iscsi_opts)
 
 
 class DotHillCommon(object):
@@ -399,7 +372,7 @@ class DotHillCommon(object):
 
         self.client_login()
         try:
-            self.client.delete_snapshot(snap_name)
+            self.client.delete_snapshot(snap_name, self.backend_type)
         except exception.DotHillRequestError as ex:
             # if the volume wasn't found, ignore the error
             if 'The volume was not found on this system.' in ex.args:

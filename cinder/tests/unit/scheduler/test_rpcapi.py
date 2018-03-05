@@ -27,6 +27,7 @@ from cinder import objects
 from cinder.scheduler import rpcapi as scheduler_rpcapi
 from cinder import test
 from cinder.tests.unit import fake_constants
+from cinder.tests.unit import fake_snapshot
 from cinder.tests.unit import fake_volume
 
 
@@ -40,6 +41,8 @@ class SchedulerRPCAPITestCase(test.RPCAPITestCase):
         self.fake_volume = fake_volume.fake_volume_obj(
             self.context, expected_attrs=['metadata', 'admin_metadata',
                                           'glance_metadata'])
+        self.fake_snapshot = fake_snapshot.fake_snapshot_obj(
+            self.context)
         self.fake_rs_obj = objects.RequestSpec.from_primitives({})
         self.fake_rs_dict = {'volume_id': self.volume_id}
         self.fake_fp_dict = {'availability_zone': 'fake_az'}
@@ -59,7 +62,10 @@ class SchedulerRPCAPITestCase(test.RPCAPITestCase):
                            timestamp='123')
         can_send_version.assert_called_once_with('3.3')
 
-    def test_create_volume(self):
+    @ddt.data('3.0', '3.10')
+    @mock.patch('oslo_messaging.RPCClient.can_send_version')
+    def test_create_volume(self, version, can_send_version):
+        can_send_version.side_effect = lambda x: x == version
         create_worker_mock = self.mock_object(self.fake_volume,
                                               'create_worker')
         self._test_rpc_api('create_volume',
@@ -67,9 +73,61 @@ class SchedulerRPCAPITestCase(test.RPCAPITestCase):
                            volume=self.fake_volume,
                            snapshot_id=fake_constants.SNAPSHOT_ID,
                            image_id=fake_constants.IMAGE_ID,
+                           backup_id=fake_constants.BACKUP_ID,
                            request_spec=self.fake_rs_obj,
                            filter_properties=self.fake_fp_dict)
         create_worker_mock.assert_called_once()
+        can_send_version.assert_called_once_with('3.10')
+
+    @mock.patch('oslo_messaging.RPCClient.can_send_version',
+                return_value=True)
+    def test_create_snapshot(self, can_send_version_mock):
+        self._test_rpc_api('create_snapshot',
+                           rpc_method='cast',
+                           volume='fake_volume',
+                           snapshot='fake_snapshot',
+                           backend='fake_backend',
+                           request_spec={'snapshot_id': self.fake_snapshot.id},
+                           filter_properties=None)
+
+    @mock.patch('oslo_messaging.RPCClient.can_send_version',
+                return_value=False)
+    def test_create_snapshot_capped(self, can_send_version_mock):
+        self.assertRaises(exception.ServiceTooOld,
+                          self._test_rpc_api,
+                          'create_snapshot',
+                          rpc_method='cast',
+                          volume=self.fake_volume,
+                          snapshot=self.fake_snapshot,
+                          backend='fake_backend',
+                          request_spec=self.fake_rs_obj,
+                          version='3.5')
+
+    @mock.patch('oslo_messaging.RPCClient.can_send_version',
+                return_value=True)
+    def test_manage_existing_snapshot(self, can_send_version_mock):
+        self._test_rpc_api('manage_existing_snapshot',
+                           rpc_method='cast',
+                           volume='fake_volume',
+                           snapshot='fake_snapshot',
+                           ref='fake_ref',
+                           request_spec={'snapshot_id': self.fake_snapshot.id},
+                           filter_properties=None)
+
+    @mock.patch('oslo_messaging.RPCClient.can_send_version',
+                return_value=False)
+    def test_manage_existing_snapshot_capped(self, can_send_version_mock):
+        self.assertRaises(exception.ServiceTooOld,
+                          self._test_rpc_api,
+                          'manage_existing_snapshot',
+                          rpc_method='cast',
+                          volume=self.fake_volume,
+                          snapshot=self.fake_snapshot,
+                          ref='fake_ref',
+                          request_spec={'snapshot_id': self.fake_snapshot.id,
+                                        'ref': 'fake_ref'},
+                          filter_properties=None,
+                          version='3.10')
 
     @mock.patch('oslo_messaging.RPCClient.can_send_version', return_value=True)
     def test_notify_service_capabilities_backend(self, can_send_version_mock):

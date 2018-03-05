@@ -15,45 +15,44 @@
 #    under the License.
 #
 
-from cinder import interface
+from cinder import exception
 import cinder.volume.driver
 from cinder.volume.drivers.dothill import dothill_common
 from cinder.volume.drivers.san import san
 from cinder.zonemanager import utils as fczm_utils
 
 
-@interface.volumedriver
+# As of Pike, the DotHill driver is no longer considered supported,
+# but the code remains as it is still subclassed by other drivers.
+# The __init__() function prevents any direct instantiation.
 class DotHillFCDriver(cinder.volume.driver.FibreChannelDriver):
     """OpenStack Fibre Channel cinder drivers for DotHill Arrays.
 
-    Version history:
-        0.1    - Base version developed for HPMSA FC drivers:
-                    "https://github.com/openstack/cinder/tree/stable/juno/
-                     cinder/volume/drivers/san/hp"
-        1.0    - Version developed for DotHill arrays with the following
-                 modifications:
-                     - added support for v3 API(virtual pool feature)
-                     - added support for retype volume
-                     - added support for manage/unmanage volume
-                     - added initiator target mapping in FC zoning
-                     - added https support
-        1.6    - Add management path redundancy and reduce load placed
-                 on management controller.
+    .. code:: text
+
+      Version history:
+          0.1    - Base version developed for HPMSA FC drivers:
+                      "https://github.com/openstack/cinder/tree/stable/juno/
+                       cinder/volume/drivers/san/hp"
+          1.0    - Version developed for DotHill arrays with the following
+                   modifications:
+                       - added support for v3 API(virtual pool feature)
+                       - added support for retype volume
+                       - added support for manage/unmanage volume
+                       - added initiator target mapping in FC zoning
+                       - added https support
+          1.6    - Add management path redundancy and reduce load placed
+                   on management controller.
+          1.7    - Modified so it can't be invoked except as a superclass
+
     """
 
-    VERSION = "1.6"
-
-    # ThirdPartySystems CI wiki
-    CI_WIKI_NAME = "Vedams_DotHillDriver_CI"
-
-    # TODO(smcginnis) Either remove this if CI requirements are met, or
-    # remove this driver in the Pike release per normal deprecation
-    SUPPORTED = False
-
     def __init__(self, *args, **kwargs):
+        # Make sure we're not invoked directly
+        if type(self) == DotHillFCDriver:
+            raise exception.DotHillDriverNotSupported
         super(DotHillFCDriver, self).__init__(*args, **kwargs)
         self.common = None
-        self.configuration.append_config_values(dothill_common.common_opts)
         self.configuration.append_config_values(san.san_opts)
         self.lookup_service = fczm_utils.create_lookup_service()
 

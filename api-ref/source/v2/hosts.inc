@@ -1,7 +1,7 @@
 .. -*- rst -*-
 
 Hosts extension (os-hosts)
-====================================
+==========================
 
 Administrators only, depending on policy settings.
 
@@ -9,21 +9,22 @@ Lists, shows hosts.
 
 
 List all hosts
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{admin_tenant_id}/os-hosts
+.. rest_method::  GET /v2/{admin_project_id}/os-hosts
 
 Lists all hosts summary info that is not disabled.
 
 Normal response codes: 200
-Error response codes:
+
+Error response codes: badRequest(400), unauthorized(401), forbidden(403)
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-   - admin_tenant_id: admin_tenant_id
+   - admin_project_id: admin_project_id
 
 
 Response Parameters
@@ -35,7 +36,7 @@ Response Parameters
    - service: host_service
    - zone: availability_zone_3
    - service-state: service_state
-   - host_name: hostname
+   - host_name: host_name_1
    - last-update: updated_at
 
 Response Example
@@ -47,20 +48,24 @@ Response Example
 Show Host Details
 ~~~~~~~~~~~~~~~~~
 
-.. rest_method:: GET /v2/{admin_tenant_id}/os-hosts/{host_name}
+.. rest_method:: GET /v2/{admin_project_id}/os-hosts/{host_name}
 
-Shows details for a host.
+Shows volume and snapshot details for a cinder-volume host.
+
+*Note:* This API is meant specifically for cinder-volume hosts only.
+It is not valid against other Cinder service hosts or hosts where the
+cinder-volume service has been disabled.
 
 Normal response codes: 200
 
-Error response codes: unauthorized(401), forbidden(403), itemNotFound(404)
+Error response codes: badRequest(400), unauthorized(401), forbidden(403), itemNotFound(404)
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-  - admin_tenant_id: admin_tenant_id
+  - admin_project_id: admin_project_id
   - host_name: hostname
 
 Response
@@ -71,8 +76,8 @@ Response
   - volume_count: total_count
   - total_volume_gb: totalGigabytesUsed
   - total_snapshot_gb: totalSnapshotsUsed
-  - project: admin_tenant_id
-  - host: host
+  - project: project_id_2
+  - host: host_name_1
   - snapshot_count: totalSnapshotsUsed
 
 **Example Show Host Details**

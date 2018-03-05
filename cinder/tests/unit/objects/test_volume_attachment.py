@@ -12,9 +12,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import ddt
 import mock
 import six
 
+from cinder import db
 from cinder import objects
 from cinder.objects import fields
 from cinder.tests.unit import fake_constants as fake
@@ -22,6 +24,7 @@ from cinder.tests.unit import fake_volume
 from cinder.tests.unit import objects as test_objects
 
 
+@ddt.ddt
 class TestVolumeAttachment(test_objects.BaseObjectsTestCase):
 
     @mock.patch('cinder.db.sqlalchemy.api.volume_attachment_get')
@@ -32,6 +35,17 @@ class TestVolumeAttachment(test_objects.BaseObjectsTestCase):
         attachment = objects.VolumeAttachment.get_by_id(self.context,
                                                         fake.ATTACHMENT_ID)
         self._compare(self, attachment_obj, attachment)
+
+    @mock.patch.object(objects.Volume, 'get_by_id')
+    def test_lazy_load_volume(self, volume_get_mock):
+        volume = objects.Volume(self.context, id=fake.VOLUME_ID)
+        volume_get_mock.return_value = volume
+        attach = objects.VolumeAttachment(self.context, id=fake.ATTACHMENT_ID,
+                                          volume_id=volume.id)
+
+        r = attach.volume
+        self.assertEqual(volume, r)
+        volume_get_mock.assert_called_once_with(self.context, volume.id)
 
     @mock.patch('cinder.db.volume_attachment_update')
     def test_save(self, volume_attachment_update):
@@ -90,11 +104,64 @@ class TestVolumeAttachment(test_objects.BaseObjectsTestCase):
                                                 fake.INSTANCE_ID,
                                                 'fake_host',
                                                 '/dev/sda',
-                                                'rw')
+                                                'rw',
+                                                True)
         self.assertEqual('/dev/sda', attachment.mountpoint)
         self.assertEqual(fake.INSTANCE_ID, attachment.instance_uuid)
         self.assertEqual(fields.VolumeAttachStatus.ATTACHED,
                          attachment.attach_status)
+
+    @ddt.data('1.0', '1.1', '1.2', '1.3')
+    def test_obj_make_compatible(self, version):
+        connection_info = {'field': 'value'}
+        connector = {'host': '127.0.0.1'}
+        vol_attach = objects.VolumeAttachment(self.context,
+                                              connection_info=connection_info,
+                                              connector=connector)
+        primitive = vol_attach.obj_to_primitive(version)
+        converted_vol_attach = objects.VolumeAttachment.obj_from_primitive(
+            primitive)
+        if version == '1.3':
+            self.assertEqual(connector, converted_vol_attach.connector)
+        elif version == '1.2':
+            self.assertEqual(connection_info,
+                             converted_vol_attach.connection_info)
+        else:
+            self.assertNotIn('connector', converted_vol_attach)
+            self.assertFalse(converted_vol_attach.obj_attr_is_set(
+                'connection_info'))
+
+    def test_migrate_attachment_specs(self):
+        # Create an attachment.
+        attachment = objects.VolumeAttachment(
+            self.context, attach_status='attaching', volume_id=fake.VOLUME_ID)
+        attachment.create()
+        # Create some attachment_specs. Note that the key and value have to
+        # be strings, the table doesn't handle things like a wwpns list
+        # for a fibrechannel connector.
+        connector = {'host': '127.0.0.1'}
+        db.attachment_specs_update_or_create(
+            self.context, attachment.id, connector)
+        # Now get the volume attachment object from the database and make
+        # sure the connector was migrated from the attachment_specs table
+        # to the volume_attachment table and the specs were deleted.
+        attachment = objects.VolumeAttachment.get_by_id(
+            self.context, attachment.id)
+        self.assertIn('connector', attachment)
+        self.assertDictEqual(connector, attachment.connector)
+        self.assertEqual(0, len(db.attachment_specs_get(
+            self.context, attachment.id)))
+        # Make sure we can store a fibrechannel type connector that has a wwpns
+        # list value.
+        connector['wwpns'] = ['21000024ff34c92d', '21000024ff34c92c']
+        attachment.connector = connector
+        attachment.save()
+        # Get the object from the DB again and make sure the connector is
+        # there.
+        attachment = objects.VolumeAttachment.get_by_id(
+            self.context, attachment.id)
+        self.assertIn('connector', attachment)
+        self.assertDictEqual(connector, attachment.connector)
 
 
 class TestVolumeAttachmentList(test_objects.BaseObjectsTestCase):

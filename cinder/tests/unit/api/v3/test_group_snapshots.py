@@ -22,6 +22,7 @@ import mock
 from six.moves import http_client
 import webob
 
+from cinder.api import microversions as mv
 from cinder.api.v3 import group_snapshots as v3_group_snapshots
 from cinder import context
 from cinder import db
@@ -34,9 +35,6 @@ from cinder.tests.unit.api import fakes
 from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import utils
 import cinder.volume
-
-GROUP_MICRO_VERSION = '3.14'
-SUPPORT_FILTER_VERSION = '3.29'
 
 
 @ddt.ddt
@@ -76,7 +74,7 @@ class GroupSnapshotsAPITestCase(test.TestCase):
             self.context, group_id=self.group.id)
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s' %
                                       (fake.PROJECT_ID, group_snapshot.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         res_dict = self.controller.show(req, group_snapshot.id)
 
         self.assertEqual(1, len(res_dict))
@@ -84,7 +82,8 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                          res_dict['group_snapshot']['description'])
         self.assertEqual('test_group_snapshot',
                          res_dict['group_snapshot']['name'])
-        self.assertEqual('creating', res_dict['group_snapshot']['status'])
+        self.assertEqual(fields.GroupSnapshotStatus.CREATING,
+                         res_dict['group_snapshot']['status'])
 
         group_snapshot.destroy()
 
@@ -94,7 +93,8 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         url = '/v3/%s/group_snapshots?limit=1' % fake.PROJECT_ID
         if is_detail:
             url = '/v3/%s/group_snapshots/detail?limit=1' % fake.PROJECT_ID
-        req = fakes.HTTPRequest.blank(url, version=SUPPORT_FILTER_VERSION)
+        req = fakes.HTTPRequest.blank(url,
+                                      version=mv.GROUP_SNAPSHOT_PAGINATION)
         if is_detail:
             res_dict = self.controller.detail(req)
         else:
@@ -121,7 +121,8 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         url = '/v3/%s/group_snapshots?offset=1' % fake.PROJECT_ID
         if is_detail:
             url = '/v3/%s/group_snapshots/detail?offset=1' % fake.PROJECT_ID
-        req = fakes.HTTPRequest.blank(url, version=SUPPORT_FILTER_VERSION)
+        req = fakes.HTTPRequest.blank(url,
+                                      version=mv.GROUP_SNAPSHOT_PAGINATION)
         if is_detail:
             res_dict = self.controller.detail(req)
         else:
@@ -145,7 +146,8 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         if is_detail:
             url = ('/v3/%s/group_snapshots/detail?offset=234523423455454' %
                    fake.PROJECT_ID)
-        req = fakes.HTTPRequest.blank(url, version=SUPPORT_FILTER_VERSION)
+        req = fakes.HTTPRequest.blank(url,
+                                      version=mv.GROUP_SNAPSHOT_PAGINATION)
         if is_detail:
             self.assertRaises(webob.exc.HTTPBadRequest, self.controller.detail,
                               req)
@@ -163,7 +165,8 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         if is_detail:
             url = ('/v3/%s/group_snapshots/detail?limit=2&offset=1' %
                    fake.PROJECT_ID)
-        req = fakes.HTTPRequest.blank(url, version=SUPPORT_FILTER_VERSION)
+        req = fakes.HTTPRequest.blank(url,
+                                      version=mv.GROUP_SNAPSHOT_PAGINATION)
         if is_detail:
             res_dict = self.controller.detail(req)
         else:
@@ -183,7 +186,9 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                              res_dict['group_snapshots'][0].keys())
         group_snapshot.destroy()
 
-    @ddt.data('3.30', '3.31')
+    @ddt.data(mv.get_prior_version(mv.RESOURCE_FILTER),
+              mv.RESOURCE_FILTER,
+              mv.LIKE_FILTER)
     @mock.patch('cinder.api.common.reject_invalid_filters')
     def test_group_snapshot_list_with_general_filter(self,
                                                      version, mock_update):
@@ -193,9 +198,11 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                                       use_admin_context=False)
         self.controller.index(req)
 
-        if version != '3.30':
+        if version != mv.get_prior_version(mv.RESOURCE_FILTER):
+            support_like = True if version == mv.LIKE_FILTER else False
             mock_update.assert_called_once_with(req.environ['cinder.context'],
-                                                mock.ANY, 'group_snapshot')
+                                                mock.ANY, 'group_snapshot',
+                                                support_like)
 
     @ddt.data(False, True)
     def test_list_group_snapshot_with_filter(self, is_detail):
@@ -206,7 +213,8 @@ class GroupSnapshotsAPITestCase(test.TestCase):
             url = ('/v3/%s/group_snapshots/detail?'
                    'all_tenants=True&id=%s') % (fake.PROJECT_ID,
                                                 self.g_snapshots_array[0].id)
-        req = fakes.HTTPRequest.blank(url, version=SUPPORT_FILTER_VERSION,
+        req = fakes.HTTPRequest.blank(url,
+                                      version=mv.GROUP_SNAPSHOT_PAGINATION,
                                       use_admin_context=True)
         if is_detail:
             res_dict = self.controller.detail(req)
@@ -223,10 +231,10 @@ class GroupSnapshotsAPITestCase(test.TestCase):
             self.assertNotIn('description',
                              res_dict['group_snapshots'][0].keys())
 
-    @ddt.data({'is_detail': True, 'version': GROUP_MICRO_VERSION},
-              {'is_detail': False, 'version': GROUP_MICRO_VERSION},
-              {'is_detail': True, 'version': '3.28'},
-              {'is_detail': False, 'version': '3.28'},)
+    @ddt.data({'is_detail': True, 'version': mv.GROUP_SNAPSHOTS},
+              {'is_detail': False, 'version': mv.GROUP_SNAPSHOTS},
+              {'is_detail': True, 'version': mv.POOL_FILTER},
+              {'is_detail': False, 'version': mv.POOL_FILTER},)
     @ddt.unpack
     def test_list_group_snapshot_with_filter_previous_version(self, is_detail,
                                                               version):
@@ -254,7 +262,8 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         if is_detail:
             url = ('/v3/%s/group_snapshots/detail?sort=id:asc' %
                    fake.PROJECT_ID)
-        req = fakes.HTTPRequest.blank(url, version=SUPPORT_FILTER_VERSION)
+        req = fakes.HTTPRequest.blank(url,
+                                      version=mv.GROUP_SNAPSHOT_PAGINATION)
         expect_result = [snapshot.id for snapshot in self.g_snapshots_array]
         expect_result.sort()
         if is_detail:
@@ -279,7 +288,7 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s' %
                                       (fake.PROJECT_ID,
                                        fake.WILL_NOT_BE_FOUND_ID),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         self.assertRaises(exception.GroupSnapshotNotFound,
                           self.controller.show,
                           req, fake.WILL_NOT_BE_FOUND_ID)
@@ -291,7 +300,7 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         else:
             request_url = '/v3/%s/group_snapshots'
         req = fakes.HTTPRequest.blank(request_url % fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         if is_detail:
             res_dict = self.controller.detail(req)
         else:
@@ -311,33 +320,27 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                 self.assertNotIn('description',
                                  res_dict['group_snapshots'][2 - index].keys())
 
-    @mock.patch(
-        'cinder.api.openstack.wsgi.Controller.validate_name_and_description')
     @mock.patch('cinder.db.volume_type_get')
     @mock.patch('cinder.quota.VolumeTypeQuotaEngine.reserve')
-    def test_create_group_snapshot_json(self, mock_quota, mock_vol_type,
-                                        mock_validate):
+    def test_create_group_snapshot_json(self, mock_quota, mock_vol_type):
         body = {"group_snapshot": {"name": "group_snapshot1",
                                    "description":
                                    "Group Snapshot 1",
                                    "group_id": self.group.id}}
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
-        res_dict = self.controller.create(req, body)
+                                      version=mv.GROUP_SNAPSHOTS)
+        res_dict = self.controller.create(req, body=body)
 
         self.assertEqual(1, len(res_dict))
         self.assertIn('id', res_dict['group_snapshot'])
-        self.assertTrue(mock_validate.called)
         group_snapshot = objects.GroupSnapshot.get_by_id(
             context.get_admin_context(), res_dict['group_snapshot']['id'])
         group_snapshot.destroy()
 
-    @mock.patch(
-        'cinder.api.openstack.wsgi.Controller.validate_name_and_description')
     @mock.patch('cinder.db.volume_type_get')
     def test_create_group_snapshot_when_volume_in_error_status(
-            self, mock_vol_type, mock_validate):
+            self, mock_vol_type):
         group = utils.create_group(
             self.context,
             group_type_id=fake.GROUP_TYPE_ID,
@@ -353,10 +356,9 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                                    "group_id": group.id}}
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
-                          req, body)
-        self.assertTrue(mock_validate.called)
+                          req, body=body)
 
         group.destroy()
         db.volume_destroy(context.get_admin_context(),
@@ -366,9 +368,18 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         # omit body from the request
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
-                          req, None)
+                                      version=mv.GROUP_SNAPSHOTS)
+        self.assertRaises(exception.ValidationError, self.controller.create,
+                          req, body=None)
+
+    def test_create_group_snapshot_with_empty_body(self):
+        # empty body in the request
+        req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
+                                      fake.PROJECT_ID,
+                                      version=mv.GROUP_SNAPSHOTS)
+        body = {"group_snapshot": {}}
+        self.assertRaises(exception.ValidationError, self.controller.create,
+                          req, body=body)
 
     @mock.patch.object(group_api.API, 'create_group_snapshot',
                        side_effect=exception.InvalidGroupSnapshot(
@@ -380,9 +391,9 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                                    "group_id": self.group.id}}
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
-                          req, body)
+                          req, body=body)
 
     @mock.patch.object(group_api.API, 'create_group_snapshot',
                        side_effect=exception.GroupSnapshotNotFound(
@@ -394,10 +405,10 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                                    "group_id": self.group.id}}
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         self.assertRaises(exception.GroupSnapshotNotFound,
                           self.controller.create,
-                          req, body)
+                          req, body=body)
 
     def test_create_group_snapshot_from_empty_group(self):
         empty_group = utils.create_group(
@@ -410,26 +421,27 @@ class GroupSnapshotsAPITestCase(test.TestCase):
                                    "group_id": empty_group.id}}
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
 
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
-                          req, body)
+                          req, body=body)
         empty_group.destroy()
 
     def test_delete_group_snapshot_available(self):
         group_snapshot = utils.create_group_snapshot(
             self.context,
             group_id=self.group.id,
-            status='available')
+            status=fields.GroupSnapshotStatus.AVAILABLE)
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s' %
                                       (fake.PROJECT_ID, group_snapshot.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         res_dict = self.controller.delete(req, group_snapshot.id)
 
         group_snapshot = objects.GroupSnapshot.get_by_id(self.context,
                                                          group_snapshot.id)
         self.assertEqual(http_client.ACCEPTED, res_dict.status_int)
-        self.assertEqual('deleting', group_snapshot.status)
+        self.assertEqual(fields.GroupSnapshotStatus.DELETING,
+                         group_snapshot.status)
 
         group_snapshot.destroy()
 
@@ -437,7 +449,7 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         group_snapshot = utils.create_group_snapshot(
             self.context,
             group_id=self.group.id,
-            status='available')
+            status=fields.GroupSnapshotStatus.AVAILABLE)
 
         group2 = utils.create_group(
             self.context, status='creating',
@@ -446,7 +458,7 @@ class GroupSnapshotsAPITestCase(test.TestCase):
             volume_type_ids=[fake.VOLUME_TYPE_ID],)
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s' %
                                       (fake.PROJECT_ID, group_snapshot.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.delete,
                           req, group_snapshot.id)
 
@@ -457,7 +469,7 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s' %
                                       (fake.PROJECT_ID,
                                        fake.WILL_NOT_BE_FOUND_ID),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         self.assertRaises(exception.GroupSnapshotNotFound,
                           self.controller.delete,
                           req, fake.WILL_NOT_BE_FOUND_ID)
@@ -469,19 +481,20 @@ class GroupSnapshotsAPITestCase(test.TestCase):
             status='invalid')
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s' %
                                       (fake.PROJECT_ID, group_snapshot.id),
-                                      version=GROUP_MICRO_VERSION)
+                                      version=mv.GROUP_SNAPSHOTS)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.delete,
                           req, group_snapshot.id)
 
         group_snapshot.destroy()
 
-    @ddt.data(('3.11', 'fake_snapshot_001',
+    @ddt.data((mv.GROUP_TYPE, 'fake_snapshot_001',
                fields.GroupSnapshotStatus.AVAILABLE,
                exception.VersionNotFoundForAPIMethod),
-              ('3.18', 'fake_snapshot_001',
+              (mv.get_prior_version(mv.GROUP_SNAPSHOT_RESET_STATUS),
+               'fake_snapshot_001',
                fields.GroupSnapshotStatus.AVAILABLE,
                exception.VersionNotFoundForAPIMethod),
-              ('3.19', 'fake_snapshot_001',
+              (mv.GROUP_SNAPSHOT_RESET_STATUS, 'fake_snapshot_001',
                fields.GroupSnapshotStatus.AVAILABLE,
                exception.GroupSnapshotNotFound))
     @ddt.unpack
@@ -496,7 +509,7 @@ class GroupSnapshotsAPITestCase(test.TestCase):
         }}
         self.assertRaises(exceptions,
                           self.controller.reset_status,
-                          req, group_snapshot_id, body)
+                          req, group_snapshot_id, body=body)
 
     def test_reset_group_snapshot_status_invalid_status(self):
         group_snapshot = utils.create_group_snapshot(
@@ -505,13 +518,13 @@ class GroupSnapshotsAPITestCase(test.TestCase):
             status=fields.GroupSnapshotStatus.CREATING)
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s/action' %
                                       (fake.PROJECT_ID, group_snapshot.id),
-                                      version='3.19')
+                                      version=mv.GROUP_SNAPSHOT_RESET_STATUS)
         body = {"reset_status": {
             "status": "invalid_test_status"
         }}
-        self.assertRaises(webob.exc.HTTPBadRequest,
+        self.assertRaises(exception.InvalidGroupSnapshotStatus,
                           self.controller.reset_status,
-                          req, group_snapshot.id, body)
+                          req, group_snapshot.id, body=body)
         group_snapshot.destroy()
 
     def test_reset_group_snapshot_status(self):
@@ -521,16 +534,34 @@ class GroupSnapshotsAPITestCase(test.TestCase):
             status=fields.GroupSnapshotStatus.CREATING)
         req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots/%s/action' %
                                       (fake.PROJECT_ID, group_snapshot.id),
-                                      version='3.19')
+                                      version=mv.GROUP_SNAPSHOT_RESET_STATUS)
         body = {"reset_status": {
             "status": fields.GroupSnapshotStatus.AVAILABLE
         }}
         response = self.controller.reset_status(req, group_snapshot.id,
-                                                body)
+                                                body=body)
 
         g_snapshot = objects.GroupSnapshot.get_by_id(self.context,
                                                      group_snapshot.id)
         self.assertEqual(http_client.ACCEPTED, response.status_int)
         self.assertEqual(fields.GroupSnapshotStatus.AVAILABLE,
                          g_snapshot.status)
+        group_snapshot.destroy()
+
+    @mock.patch('cinder.db.volume_type_get')
+    @mock.patch('cinder.quota.VolumeTypeQuotaEngine.reserve')
+    def test_create_group_snapshot_with_null_validate(
+            self, mock_quota, mock_vol_type):
+        body = {"group_snapshot": {"name": None,
+                                   "description": None,
+                                   "group_id": self.group.id}}
+        req = fakes.HTTPRequest.blank('/v3/%s/group_snapshots' %
+                                      self.context.project_id,
+                                      version=mv.GROUP_SNAPSHOTS)
+        res_dict = self.controller.create(req, body=body)
+
+        self.assertIn('group_snapshot', res_dict)
+        self.assertIsNone(res_dict['group_snapshot']['name'])
+        group_snapshot = objects.GroupSnapshot.get_by_id(
+            context.get_admin_context(), res_dict['group_snapshot']['id'])
         group_snapshot.destroy()

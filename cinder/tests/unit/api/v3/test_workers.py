@@ -19,8 +19,10 @@ from oslo_serialization import jsonutils
 from six.moves import http_client
 import webob
 
+from cinder.api import microversions as mv
 from cinder.api.v3 import router as router_v3
 from cinder.api.v3 import workers
+from cinder.common import constants
 from cinder import context
 from cinder import objects
 from cinder import test
@@ -29,13 +31,13 @@ from cinder.tests.unit import fake_constants as fake
 
 
 SERVICES = (
-    [objects.Service(id=1, host='host1', binary='cinder-volume',
+    [objects.Service(id=1, host='host1', binary=constants.VOLUME_BINARY,
                      cluster_name='mycluster'),
-     objects.Service(id=2, host='host2', binary='cinder-volume',
+     objects.Service(id=2, host='host2', binary=constants.VOLUME_BINARY,
                      cluster_name='mycluster')],
-    [objects.Service(id=3, host='host3', binary='cinder-volume',
+    [objects.Service(id=3, host='host3', binary=constants.VOLUME_BINARY,
                      cluster_name='mycluster'),
-     objects.Service(id=4, host='host4', binary='cinder-volume',
+     objects.Service(id=4, host='host4', binary=constants.VOLUME_BINARY,
                      cluster_name='mycluster')],
 )
 
@@ -61,7 +63,7 @@ class WorkersTestCase(test.TestCase):
                                               overwrite=False)
         self.controller = workers.create_resource()
 
-    def _get_resp_post(self, body, version='3.24', ctxt=None):
+    def _get_resp_post(self, body, version=mv.WORKERS_CLEANUP, ctxt=None):
         """Helper to execute a POST workers API call."""
         req = webob.Request.blank('/v3/%s/workers/cleanup' % fake.PROJECT_ID)
         req.method = 'POST'
@@ -74,7 +76,7 @@ class WorkersTestCase(test.TestCase):
 
     @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.work_cleanup')
     def test_cleanup_old_api_version(self, rpc_mock):
-        res = self._get_resp_post({}, '3.19')
+        res = self._get_resp_post({}, mv.get_prior_version(mv.WORKERS_CLEANUP))
         self.assertEqual(http_client.NOT_FOUND, res.status_code)
         rpc_mock.assert_not_called()
 

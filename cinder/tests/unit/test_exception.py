@@ -15,26 +15,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from cinder import exception
-from cinder import test
-
+import fixtures
 import mock
 import six
+from six.moves import http_client
 import webob.util
 
-
-class ExceptionTestCase(test.TestCase):
-    @staticmethod
-    def _raise_exc(exc):
-        raise exc()
-
-    def test_exceptions_raise(self):
-        # NOTE(dprince): disable format errors since we are not passing kwargs
-        self.flags(fatal_exception_format_errors=False)
-        for name in dir(exception):
-            exc = getattr(exception, name)
-            if isinstance(exc, type):
-                self.assertRaises(exc, self._raise_exc, exc)
+from cinder import exception
+from cinder import test
 
 
 class CinderExceptionTestCase(test.TestCase):
@@ -53,33 +41,35 @@ class CinderExceptionTestCase(test.TestCase):
         class FakeCinderException(exception.CinderException):
             message = "default message: %(code)s"
 
-        exc = FakeCinderException(code=500)
+        exc = FakeCinderException(code=int(http_client.INTERNAL_SERVER_ERROR))
         self.assertEqual('default message: 500', six.text_type(exc))
 
     def test_error_msg_exception_with_kwargs(self):
         # NOTE(dprince): disable format errors for this test
-        self.flags(fatal_exception_format_errors=False)
+        self.useFixture(fixtures.MonkeyPatch(
+            'cinder.exception.CinderException._log_exception',
+            test.CinderExceptionReraiseFormatError.real_log_exception))
 
         class FakeCinderException(exception.CinderException):
             message = "default message: %(misspelled_code)s"
 
-        exc = FakeCinderException(code=500)
+        exc = FakeCinderException(code=http_client.INTERNAL_SERVER_ERROR)
         self.assertEqual('default message: %(misspelled_code)s',
                          six.text_type(exc))
 
     def test_default_error_code(self):
         class FakeCinderException(exception.CinderException):
-            code = 404
+            code = http_client.NOT_FOUND
 
         exc = FakeCinderException()
-        self.assertEqual(404, exc.kwargs['code'])
+        self.assertEqual(http_client.NOT_FOUND, exc.kwargs['code'])
 
     def test_error_code_from_kwarg(self):
         class FakeCinderException(exception.CinderException):
-            code = 500
+            code = http_client.INTERNAL_SERVER_ERROR
 
-        exc = FakeCinderException(code=404)
-        self.assertEqual(404, exc.kwargs['code'])
+        exc = FakeCinderException(code=http_client.NOT_FOUND)
+        self.assertEqual(http_client.NOT_FOUND, exc.kwargs['code'])
 
     def test_error_msg_is_exception_to_string(self):
         msg = 'test message'
@@ -104,7 +94,8 @@ class CinderExceptionTestCase(test.TestCase):
         class FakeCinderException(exception.CinderException):
             message = 'Error %(code)d: %(message)s'
 
-        exc = FakeCinderException(message='message', code=404)
+        exc = FakeCinderException(message='message',
+                                  code=http_client.NOT_FOUND)
         self.assertEqual('Error 404: message', six.text_type(exc))
 
     def test_message_is_exception_in_format_string(self):
@@ -121,15 +112,17 @@ class CinderConvertedExceptionTestCase(test.TestCase):
     def test_default_args(self):
         exc = exception.ConvertedException()
         self.assertNotEqual('', exc.title)
-        self.assertEqual(500, exc.code)
+        self.assertEqual(http_client.INTERNAL_SERVER_ERROR, exc.code)
         self.assertEqual('', exc.explanation)
 
     def test_standard_status_code(self):
-        with mock.patch.dict(webob.util.status_reasons, {200: 'reason'}):
-            exc = exception.ConvertedException(code=200)
+        with mock.patch.dict(webob.util.status_reasons,
+                             {http_client.OK: 'reason'}):
+            exc = exception.ConvertedException(code=int(http_client.OK))
             self.assertEqual('reason', exc.title)
 
-    @mock.patch.dict(webob.util.status_reasons, {500: 'reason'})
+    @mock.patch.dict(webob.util.status_reasons, {
+        http_client.INTERNAL_SERVER_ERROR: 'reason'})
     def test_generic_status_code(self):
         with mock.patch.dict(webob.util.status_generic_reasons,
                              {5: 'generic_reason'}):

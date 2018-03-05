@@ -311,23 +311,6 @@ FAKE_CMODE_POOL_MAP = {
     },
 }
 
-FAKE_7MODE_VOLUME = {
-    'all': [
-        netapp_api.NaElement(
-            etree.XML("""<volume-info xmlns="http://www.netapp.com/filer/admin">
-            <name>open123</name>
-            </volume-info>""")),
-        netapp_api.NaElement(
-            etree.XML("""<volume-info xmlns="http://www.netapp.com/filer/admin">
-            <name>mixed3</name>
-            </volume-info>""")),
-        netapp_api.NaElement(
-            etree.XML("""<volume-info xmlns="http://www.netapp.com/filer/admin">
-            <name>open1234</name>
-            </volume-info>"""))
-    ],
-}
-
 FILE_LIST = ['file1', 'file2', 'file3']
 
 FAKE_LUN = netapp_api.NaElement.create_node_with_children(
@@ -354,36 +337,6 @@ FAKE_LUN = netapp_api.NaElement.create_node_with_children(
        'uuid': 'cec1f3d7-3d41-11e2-9cf4-123478563412',
        'volume': 'fakeLUN',
        'vserver': 'fake_vserver'})
-
-FAKE_7MODE_VOL1 = [netapp_api.NaElement(
-    etree.XML("""<volume-info xmlns="http://www.netapp.com/filer/admin">
-    <name>open123</name>
-    <state>online</state>
-    <size-total>0</size-total>
-    <size-used>0</size-used>
-    <size-available>0</size-available>
-    <is-inconsistent>false</is-inconsistent>
-    <is-invalid>false</is-invalid>
-    </volume-info>"""))]
-
-FAKE_7MODE_POOLS = [
-    {
-        'pool_name': 'open123',
-        'consistencygroup_support': True,
-        'QoS_support': False,
-        'reserved_percentage': 0,
-        'total_capacity_gb': 0.0,
-        'free_capacity_gb': 0.0,
-        'max_over_subscription_ratio': 20.0,
-        'multiattach': False,
-        'thin_provisioning_support': False,
-        'thick_provisioning_support': True,
-        'provisioned_capacity_gb': 0.0,
-        'utilization': 30.0,
-        'filter_function': 'filter',
-        'goodness_function': 'goodness',
-    }
-]
 
 CG_VOLUME_NAME = 'fake_cg_volume'
 CG_GROUP_NAME = 'fake_consistency_group'
@@ -457,8 +410,85 @@ CG_VOLUME_SNAPSHOT = {
 }
 
 
+VG_VOLUME_NAME = 'fake_vg_volume'
+VG_GROUP_NAME = 'fake_volume_group'
+VG_POOL_NAME = 'cdot'
+SOURCE_VG_VOLUME_NAME = 'fake_source_vg_volume'
+VG_VOLUME_ID = 'fake_vg_volume_id'
+VG_VOLUME_SIZE = 100
+SOURCE_VG_VOLUME_ID = 'fake_source_vg_volume_id'
+VOLUME_GROUP_NAME = 'fake_vg'
+SOURCE_VOLUME_GROUP_ID = 'fake_source_vg_id'
+VOLUME_GROUP_ID = 'fake_vg_id'
+VG_SNAPSHOT_ID = 'fake_vg_snapshot_id'
+VG_SNAPSHOT_NAME = 'snapshot-' + VG_SNAPSHOT_ID
+VG_VOLUME_SNAPSHOT_ID = 'fake_vg_volume_snapshot_id'
+
+VG_LUN_METADATA = {
+    'OsType': None,
+    'Path': '/vol/aggr1/fake_vg_volume',
+    'SpaceReserved': 'true',
+    'Qtree': None,
+    'Volume': POOL_NAME,
+}
+
+SOURCE_VG_VOLUME = {
+    'name': SOURCE_VG_VOLUME_NAME,
+    'size': VG_VOLUME_SIZE,
+    'id': SOURCE_VG_VOLUME_ID,
+    'host': 'hostname@backend#cdot',
+    'volumegroup_id': None,
+    'status': 'fake_status',
+    'provider_location': PROVIDER_LOCATION,
+}
+
+VG_VOLUME = {
+    'name': VG_VOLUME_NAME,
+    'size': 100,
+    'id': VG_VOLUME_ID,
+    'host': 'hostname@backend#' + VG_POOL_NAME,
+    'volumegroup_id': VOLUME_GROUP_ID,
+    'status': 'fake_status',
+    'provider_location': PROVIDER_LOCATION,
+}
+
+SOURCE_VOLUME_GROUP = {
+    'id': SOURCE_VOLUME_GROUP_ID,
+    'status': 'fake_status',
+}
+
+VOLUME_GROUP = {
+    'id': VOLUME_GROUP_ID,
+    'status': 'fake_status',
+    'name': VG_GROUP_NAME,
+}
+
+VG_CONTEXT = {}
+
+VG_SNAPSHOT = {
+    'id': VG_SNAPSHOT_ID,
+    'name': VG_SNAPSHOT_NAME,
+    'volume_size': VG_VOLUME_SIZE,
+    'volumegroup_id': VOLUME_GROUP_ID,
+    'status': 'fake_status',
+    'volume_id': 'fake_source_volume_id',
+    'volume': VG_VOLUME,
+}
+
+VG_VOLUME_SNAPSHOT = {
+    'name': VG_SNAPSHOT_NAME,
+    'volume_size': VG_VOLUME_SIZE,
+    'vgsnapshot_id': VG_SNAPSHOT_ID,
+    'id': VG_VOLUME_SNAPSHOT_ID,
+    'status': 'fake_status',
+    'volume_id': VG_VOLUME_ID,
+}
+
+
 class test_volume(object):
-    pass
+
+    def __getitem__(self, key):
+        return getattr(self, key)
 
 test_volume = test_volume()
 test_volume.id = {'vserver': 'openstack', 'name': 'vola'}
@@ -477,6 +507,8 @@ test_volume.state = {
     'junction_active': True,
 }
 test_volume.qos = {'qos_policy_group': None}
+test_volume.host = 'fakehost@backbackend#fakepool'
+test_volume.name = 'fakename'
 
 
 class test_snapshot(object):

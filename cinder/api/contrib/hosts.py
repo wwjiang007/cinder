@@ -17,6 +17,7 @@
 
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_log import versionutils
 from oslo_utils import timeutils
 import webob.exc
 
@@ -27,13 +28,13 @@ from cinder import db
 from cinder import exception
 from cinder.i18n import _
 from cinder import objects
+from cinder.policies import hosts as policy
 from cinder.volume import api as volume_api
 
 
 CONF = cfg.CONF
 
 LOG = logging.getLogger(__name__)
-authorize = extensions.extension_authorizer('volume', 'hosts')
 
 
 def _list_hosts(req, service=None):
@@ -89,14 +90,20 @@ class HostController(wsgi.Controller):
     def __init__(self):
         self.api = volume_api.HostAPI()
         super(HostController, self).__init__()
+        versionutils.report_deprecated_feature(
+            LOG,
+            "The Host API is deprecated and will be "
+            "be removed in a future version.")
 
     def index(self, req):
-        authorize(req.environ['cinder.context'])
+        context = req.environ['cinder.context']
+        context.authorize(policy.MANAGE_POLICY)
         return {'hosts': _list_hosts(req)}
 
     @check_host
     def update(self, req, id, body):
-        authorize(req.environ['cinder.context'])
+        context = req.environ['cinder.context']
+        context.authorize(policy.MANAGE_POLICY)
         update_values = {}
         for raw_key, raw_val in body.items():
             key = raw_key.lower().strip()
@@ -133,52 +140,50 @@ class HostController(wsgi.Controller):
     def show(self, req, id):
         """Shows the volume usage info given by hosts.
 
-        :param context: security context
-        :param host: hostname
-        :returns: expected to use HostShowTemplate.
+        :param req: security context
+        :param id: hostname
+        :returns: dict -- the host resources dictionary.
             ex.::
 
-                {'host': {'resource':D},..}
+                {'host': [{'resource': D},..]}
                 D: {'host': 'hostname','project': 'admin',
                     'volume_count': 1, 'total_volume_gb': 2048}
         """
         host = id
         context = req.environ['cinder.context']
-        if not context.is_admin:
-            msg = _("Describe-resource is admin only functionality")
-            raise webob.exc.HTTPForbidden(explanation=msg)
+        context.authorize(policy.MANAGE_POLICY)
 
         # Not found exception will be handled at the wsgi level
         host_ref = objects.Service.get_by_host_and_topic(
             context, host, constants.VOLUME_TOPIC)
 
-        # Getting total available/used resource
-        # TODO(jdg): Add summary info for Snapshots
+        # Getting total available/used resource on a host.
         volume_refs = db.volume_get_all_by_host(context, host_ref.host)
-        (count, sum) = db.volume_data_get_for_host(context,
-                                                   host_ref.host)
+        (count, vol_sum) = db.volume_data_get_for_host(context,
+                                                       host_ref.host)
 
         snap_count_total = 0
         snap_sum_total = 0
         resources = [{'resource': {'host': host, 'project': '(total)',
                                    'volume_count': str(count),
-                                   'total_volume_gb': str(sum),
+                                   'total_volume_gb': str(vol_sum),
                                    'snapshot_count': str(snap_count_total),
                                    'total_snapshot_gb': str(snap_sum_total)}}]
 
         project_ids = [v['project_id'] for v in volume_refs]
         project_ids = list(set(project_ids))
         for project_id in project_ids:
-            (count, sum) = db.volume_data_get_for_project(context, project_id)
+            (count, vol_sum) = db.volume_data_get_for_project(
+                context, project_id, host=host_ref.host)
             (snap_count, snap_sum) = (
-                objects.Snapshot.snapshot_data_get_for_project(context,
-                                                               project_id))
+                objects.Snapshot.snapshot_data_get_for_project(
+                    context, project_id, host=host_ref.host))
             resources.append(
                 {'resource':
                     {'host': host,
                      'project': project_id,
                      'volume_count': str(count),
-                     'total_volume_gb': str(sum),
+                     'total_volume_gb': str(vol_sum),
                      'snapshot_count': str(snap_count),
                      'total_snapshot_gb': str(snap_sum)}})
             snap_count_total += int(snap_count)

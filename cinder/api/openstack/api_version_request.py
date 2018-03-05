@@ -83,16 +83,47 @@ REST_API_VERSION_HISTORY = """
     * 3.30 - Support sort snapshots with "name".
     * 3.31 - Add support for configure resource query filters.
     * 3.32 - Add set-log and get-log service actions.
+    * 3.33 - Add ``resource_filters`` API to retrieve configured
+             resource filters.
+    * 3.34 - Add like filter support in ``volume``, ``backup``, ``snapshot``,
+             ``message``, ``attachment``, ``group`` and ``group-snapshot``
+             list APIs.
+    * 3.35 - Add ``volume-type`` filter to Get-Pools API.
+    * 3.36 - Add metadata to volumes/summary response body.
+    * 3.37 - Support sort backup by "name".
+    * 3.38 - Add replication group API (Tiramisu).
+    * 3.39 - Add ``project_id`` admin filters support to limits.
+    * 3.40 - Add volume revert to its latest snapshot support.
+    * 3.41 - Add ``user_id`` field to snapshot list/detail and snapshot show.
+    * 3.42 - Add ability to extend 'in-use' volume. User should be aware of the
+             whole environment before using this feature because it's dependent
+             on several external factors below:
+             1. nova-compute version - needs to be the latest for Pike.
+             2. only the libvirt compute driver supports this currently.
+             3. only iscsi and fibre channel volume types are supported
+                on the nova side currently.
+             Administrator can disable this ability by updating the
+             'volume:extend_attached_volume' policy rule. Extend in reserved
+             state is intentionally NOT allowed.
+    * 3.43 - Support backup CRUD with metadata.
+    * 3.44 - Add attachment-complete.
+    * 3.45 - Add ``count`` field to volume, backup and snapshot list and
+             detail APIs.
+    * 3.46 - Support create volume by Nova specific image (0 size image).
+    * 3.47 - Support create volume from backup.
+    * 3.48 - Add ``shared_targets`` and ``service_uuid`` fields to volume.
+    * 3.49 - Support report backend storage state in service list.
+    * 3.50 - Add multiattach capability
 """
 
 # The minimum and maximum versions of the API supported
 # The default api version request is defined to be the
 # minimum version of the API supported.
-# Explicitly using /v1 or /v2 endpoints will still work
+# Explicitly using /v2 endpoints will still work
 _MIN_API_VERSION = "3.0"
-_MAX_API_VERSION = "3.32"
-_LEGACY_API_VERSION1 = "1.0"
+_MAX_API_VERSION = "3.50"
 _LEGACY_API_VERSION2 = "2.0"
+UPDATED = "2017-09-19T20:18:14Z"
 
 
 # NOTE(cyeoh): min and max versions declared as functions so we can
@@ -104,10 +135,6 @@ def min_api_version():
 
 def max_api_version():
     return APIVersionRequest(_MAX_API_VERSION)
-
-
-def legacy_api_version1():
-    return APIVersionRequest(_LEGACY_API_VERSION1)
 
 
 def legacy_api_version2():

@@ -16,6 +16,7 @@
 """The QoS specs extension"""
 
 from oslo_log import log as logging
+from oslo_utils import timeutils
 import six
 from six.moves import http_client
 import webob
@@ -26,14 +27,13 @@ from cinder.api.openstack import wsgi
 from cinder.api.views import qos_specs as view_qos_specs
 from cinder import exception
 from cinder.i18n import _
+from cinder.policies import qos_specs as policy
 from cinder import rpc
 from cinder import utils
 from cinder.volume import qos_specs
 
 
 LOG = logging.getLogger(__name__)
-
-authorize = extensions.extension_authorizer('volume', 'qos_specs_manage')
 
 
 def _check_specs(context, specs_id):
@@ -56,7 +56,7 @@ class QoSSpecsController(wsgi.Controller):
     def index(self, req):
         """Returns the list of qos_specs."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.GET_ALL_POLICY)
 
         params = req.params.copy()
 
@@ -75,7 +75,7 @@ class QoSSpecsController(wsgi.Controller):
 
     def create(self, req, body=None):
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.CREATE_POLICY)
 
         self.assert_valid_body(body, 'qos_specs')
 
@@ -89,12 +89,11 @@ class QoSSpecsController(wsgi.Controller):
                                     max_length=255, remove_whitespaces=True)
         name = name.strip()
 
-        # Validate the key-value pairs in the qos spec.
-        utils.validate_dictionary_string_length(specs)
-
         try:
             spec = qos_specs.create(context, name, specs)
-            notifier_info = dict(name=name, specs=specs)
+            notifier_info = dict(name=name,
+                                 created_at=spec.created_at,
+                                 specs=specs)
             rpc.get_notifier('QoSSpecs').info(context,
                                               'qos_specs.create',
                                               notifier_info)
@@ -122,13 +121,17 @@ class QoSSpecsController(wsgi.Controller):
 
     def update(self, req, id, body=None):
         context = req.environ['cinder.context']
-        authorize(context)
-
+        context.authorize(policy.UPDATE_POLICY)
         self.assert_valid_body(body, 'qos_specs')
         specs = body['qos_specs']
         try:
+            spec = qos_specs.get_qos_specs(context, id)
+
             qos_specs.update(context, id, specs)
-            notifier_info = dict(id=id, specs=specs)
+            notifier_info = dict(id=id,
+                                 created_at=spec.created_at,
+                                 updated_at=timeutils.utcnow(),
+                                 specs=specs)
             rpc.get_notifier('QoSSpecs').info(context,
                                               'qos_specs.update',
                                               notifier_info)
@@ -152,7 +155,7 @@ class QoSSpecsController(wsgi.Controller):
     def show(self, req, id):
         """Return a single qos spec item."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.GET_POLICY)
 
         # Not found exception will be handled at the wsgi level
         spec = qos_specs.get_qos_specs(context, id)
@@ -162,16 +165,19 @@ class QoSSpecsController(wsgi.Controller):
     def delete(self, req, id):
         """Deletes an existing qos specs."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.DELETE_POLICY)
 
         # Convert string to bool type in strict manner
         force = utils.get_bool_param('force', req.params)
         LOG.debug("Delete qos_spec: %(id)s, force: %(force)s",
                   {'id': id, 'force': force})
-
         try:
+            spec = qos_specs.get_qos_specs(context, id)
+
             qos_specs.delete(context, id, force)
-            notifier_info = dict(id=id)
+            notifier_info = dict(id=id,
+                                 created_at=spec.created_at,
+                                 deleted_at=timeutils.utcnow())
             rpc.get_notifier('QoSSpecs').info(context,
                                               'qos_specs.delete',
                                               notifier_info)
@@ -198,7 +204,7 @@ class QoSSpecsController(wsgi.Controller):
     def delete_keys(self, req, id, body):
         """Deletes specified keys in qos specs."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.DELETE_POLICY)
 
         if not (body and 'keys' in body
                 and isinstance(body.get('keys'), list)):
@@ -210,7 +216,10 @@ class QoSSpecsController(wsgi.Controller):
 
         try:
             qos_specs.delete_keys(context, id, keys)
-            notifier_info = dict(id=id)
+            spec = qos_specs.get_qos_specs(context, id)
+            notifier_info = dict(id=id,
+                                 created_at=spec.created_at,
+                                 updated_at=spec.updated_at)
             rpc.get_notifier('QoSSpecs').info(context, 'qos_specs.delete_keys',
                                               notifier_info)
         except exception.NotFound as err:
@@ -226,13 +235,16 @@ class QoSSpecsController(wsgi.Controller):
     def associations(self, req, id):
         """List all associations of given qos specs."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.GET_ALL_POLICY)
 
         LOG.debug("Get associations for qos_spec id: %s", id)
 
         try:
+            spec = qos_specs.get_qos_specs(context, id)
+
             associates = qos_specs.get_associations(context, id)
-            notifier_info = dict(id=id)
+            notifier_info = dict(id=id,
+                                 created_at=spec.created_at)
             rpc.get_notifier('QoSSpecs').info(context,
                                               'qos_specs.associations',
                                               notifier_info)
@@ -256,7 +268,7 @@ class QoSSpecsController(wsgi.Controller):
     def associate(self, req, id):
         """Associate a qos specs with a volume type."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.UPDATE_POLICY)
 
         type_id = req.params.get('vol_type_id', None)
 
@@ -271,8 +283,11 @@ class QoSSpecsController(wsgi.Controller):
                   {'id': id, 'type_id': type_id})
 
         try:
+            spec = qos_specs.get_qos_specs(context, id)
+
             qos_specs.associate_qos_with_type(context, id, type_id)
-            notifier_info = dict(id=id, type_id=type_id)
+            notifier_info = dict(id=id, type_id=type_id,
+                                 created_at=spec.created_at)
             rpc.get_notifier('QoSSpecs').info(context,
                                               'qos_specs.associate',
                                               notifier_info)
@@ -305,7 +320,7 @@ class QoSSpecsController(wsgi.Controller):
     def disassociate(self, req, id):
         """Disassociate a qos specs from a volume type."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.UPDATE_POLICY)
 
         type_id = req.params.get('vol_type_id', None)
 
@@ -320,8 +335,11 @@ class QoSSpecsController(wsgi.Controller):
                   {'id': id, 'type_id': type_id})
 
         try:
+            spec = qos_specs.get_qos_specs(context, id)
+
             qos_specs.disassociate_qos_specs(context, id, type_id)
-            notifier_info = dict(id=id, type_id=type_id)
+            notifier_info = dict(id=id, type_id=type_id,
+                                 created_at=spec.created_at)
             rpc.get_notifier('QoSSpecs').info(context,
                                               'qos_specs.disassociate',
                                               notifier_info)
@@ -345,13 +363,16 @@ class QoSSpecsController(wsgi.Controller):
     def disassociate_all(self, req, id):
         """Disassociate a qos specs from all volume types."""
         context = req.environ['cinder.context']
-        authorize(context)
+        context.authorize(policy.UPDATE_POLICY)
 
         LOG.debug("Disassociate qos_spec: %s from all.", id)
 
         try:
+            spec = qos_specs.get_qos_specs(context, id)
+
             qos_specs.disassociate_all(context, id)
-            notifier_info = dict(id=id)
+            notifier_info = dict(id=id,
+                                 created_at=spec.created_at)
             rpc.get_notifier('QoSSpecs').info(context,
                                               'qos_specs.disassociate_all',
                                               notifier_info)

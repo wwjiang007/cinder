@@ -35,6 +35,7 @@ from cinder import exception
 from cinder.i18n import _
 from cinder import interface
 from cinder import utils
+from cinder.volume import configuration as conf
 from cinder.volume.drivers.ibm import flashsystem_common as fscommon
 from cinder.volume.drivers.san import san
 
@@ -48,7 +49,7 @@ flashsystem_iscsi_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(flashsystem_iscsi_opts)
+CONF.register_opts(flashsystem_iscsi_opts, group=conf.SHARED_CONF_GROUP)
 
 
 @interface.volumedriver
@@ -105,7 +106,7 @@ class FlashSystemISCSIDriver(fscommon.FlashSystemDriver):
 
         # Check if iscsi_ip is set when protocol is iSCSI
         if params['protocol'] == 'iSCSI' and params['iscsi_ip'] == 'None':
-            msg = _("iscsi_ip_address must be set in config file when "
+            msg = _("target_ip_address must be set in config file when "
                     "using protocol 'iSCSI'.")
             raise exception.InvalidInput(reason=msg)
 
@@ -221,7 +222,7 @@ class FlashSystemISCSIDriver(fscommon.FlashSystemDriver):
             ipaddr = preferred_node_entry['ipv4'][0]
         else:
             ipaddr = preferred_node_entry['ipv6'][0]
-        iscsi_port = self.configuration.iscsi_port
+        iscsi_port = self.configuration.target_port
         properties['target_portal'] = '%s:%s' % (ipaddr, iscsi_port)
         properties['target_iqn'] = preferred_node_entry['iscsi_name']
 
@@ -341,7 +342,7 @@ class FlashSystemISCSIDriver(fscommon.FlashSystemDriver):
                 speed = port_data['speed']
             except KeyError:
                 self._handle_keyerror('lsportip', header)
-            if port_ipv4 == self.configuration.iscsi_ip_address and (
+            if port_ipv4 == self.configuration.target_ip_address and (
                     port_data['id'] == (
                         six.text_type(
                             self.configuration.flashsystem_iscsi_portid))):
@@ -397,8 +398,8 @@ class FlashSystemISCSIDriver(fscommon.FlashSystemDriver):
             protocol = 'iSCSI'
         return {
             'protocol': protocol,
-            'iscsi_ip': self.configuration.iscsi_ip_address,
-            'iscsi_port': self.configuration.iscsi_port,
+            'iscsi_ip': self.configuration.target_ip_address,
+            'iscsi_port': self.configuration.target_port,
             'iscsi_ported': self.configuration.flashsystem_iscsi_portid,
         }
 

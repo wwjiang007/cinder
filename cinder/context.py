@@ -19,13 +19,18 @@
 
 import copy
 
+from keystoneauth1.access import service_catalog as ksa_service_catalog
+from keystoneauth1 import plugin
 from oslo_config import cfg
 from oslo_context import context
+from oslo_db.sqlalchemy import enginefacade
 from oslo_log import log as logging
 from oslo_utils import timeutils
 import six
 
+from cinder import exception
 from cinder.i18n import _
+from cinder.objects import base as objects_base
 from cinder import policy
 
 context_opts = [
@@ -43,6 +48,32 @@ CONF.register_opts(context_opts)
 LOG = logging.getLogger(__name__)
 
 
+class _ContextAuthPlugin(plugin.BaseAuthPlugin):
+    """A keystoneauth auth plugin that uses the values from the Context.
+
+    Ideally we would use the plugin provided by auth_token middleware however
+    this plugin isn't serialized yet so we construct one from the serialized
+    auth data.
+    """
+
+    def __init__(self, auth_token, sc):
+        super(_ContextAuthPlugin, self).__init__()
+
+        self.auth_token = auth_token
+        self.service_catalog = ksa_service_catalog.ServiceCatalogV2(sc)
+
+    def get_token(self, *args, **kwargs):
+        return self.auth_token
+
+    def get_endpoint(self, session, service_type=None, interface=None,
+                     region_name=None, service_name=None, **kwargs):
+        return self.service_catalog.url_for(service_type=service_type,
+                                            service_name=service_name,
+                                            interface=interface,
+                                            region_name=region_name)
+
+
+@enginefacade.transaction_context_provider
 class RequestContext(context.RequestContext):
     """Security context and request information.
 
@@ -52,7 +83,7 @@ class RequestContext(context.RequestContext):
     def __init__(self, user_id=None, project_id=None, is_admin=None,
                  read_deleted="no", project_name=None, remote_address=None,
                  timestamp=None, quota_class=None, service_catalog=None,
-                 **kwargs):
+                 user_auth_plugin=None, **kwargs):
         """Initialize RequestContext.
 
         :param read_deleted: 'no' indicates deleted records are hidden, 'yes'
@@ -62,11 +93,10 @@ class RequestContext(context.RequestContext):
         :param overwrite: Set to False to ensure that the greenthread local
             copy of the index is not overwritten.
         """
-        # NOTE(jamielennox): oslo.context still uses some old variables names.
-        # These arguments are maintained instead of passed as kwargs to
-        # maintain the interface for tests.
-        kwargs.setdefault('user', user_id)
-        kwargs.setdefault('tenant', project_id)
+        # NOTE(smcginnis): To keep it compatible for code using positional
+        # args, explicityly set user_id and project_id in kwargs.
+        kwargs.setdefault('user_id', user_id)
+        kwargs.setdefault('project_id', project_id)
 
         super(RequestContext, self).__init__(is_admin=is_admin, **kwargs)
 
@@ -94,9 +124,16 @@ class RequestContext(context.RequestContext):
         # when policy.check_is_admin invokes request logging
         # to make it loggable.
         if self.is_admin is None:
-            self.is_admin = policy.check_is_admin(self.roles, self)
+            self.is_admin = policy.check_is_admin(self)
         elif self.is_admin and 'admin' not in self.roles:
             self.roles.append('admin')
+        self.user_auth_plugin = user_auth_plugin
+
+    def get_auth_plugin(self):
+        if self.user_auth_plugin:
+            return self.user_auth_plugin
+        else:
+            return _ContextAuthPlugin(self.auth_token, self.service_catalog)
 
     def _get_read_deleted(self):
         return self._read_deleted
@@ -118,7 +155,7 @@ class RequestContext(context.RequestContext):
         result['user_id'] = self.user_id
         result['project_id'] = self.project_id
         result['project_name'] = self.project_name
-        result['domain'] = self.domain
+        result['domain_id'] = self.domain_id
         result['read_deleted'] = self.read_deleted
         result['remote_address'] = self.remote_address
         result['timestamp'] = self.timestamp.isoformat()
@@ -132,18 +169,52 @@ class RequestContext(context.RequestContext):
         return cls(user_id=values.get('user_id'),
                    project_id=values.get('project_id'),
                    project_name=values.get('project_name'),
-                   domain=values.get('domain'),
+                   domain_id=values.get('domain_id'),
                    read_deleted=values.get('read_deleted'),
                    remote_address=values.get('remote_address'),
                    timestamp=values.get('timestamp'),
                    quota_class=values.get('quota_class'),
                    service_catalog=values.get('service_catalog'),
                    request_id=values.get('request_id'),
+                   global_request_id=values.get('global_request_id'),
                    is_admin=values.get('is_admin'),
                    roles=values.get('roles'),
                    auth_token=values.get('auth_token'),
-                   user_domain=values.get('user_domain'),
-                   project_domain=values.get('project_domain'))
+                   user_domain_id=values.get('user_domain_id'),
+                   project_domain_id=values.get('project_domain_id'))
+
+    def authorize(self, action, target=None, target_obj=None, fatal=True):
+        """Verifies that the given action is valid on the target in this context.
+
+        :param action: string representing the action to be checked.
+        :param target: dictionary representing the object of the action
+            for object creation this should be a dictionary representing the
+            location of the object e.g. ``{'project_id': context.project_id}``.
+            If None, then this default target will be considered:
+            {'project_id': self.project_id, 'user_id': self.user_id}
+        :param: target_obj: dictionary representing the object which will be
+            used to update target.
+        :param fatal: if False, will return False when an
+            exception.PolicyNotAuthorized occurs.
+
+        :raises cinder.exception.NotAuthorized: if verification fails and fatal
+            is True.
+
+        :return: returns a non-False value (not necessarily "True") if
+            authorized and False if not authorized and fatal is False.
+        """
+        if target is None:
+            target = {'project_id': self.project_id,
+                      'user_id': self.user_id}
+        if isinstance(target_obj, objects_base.CinderObject):
+            # Turn object into dict so target.update can work
+            target.update(
+                target_obj.obj_to_primitive()['versioned_object.data'] or {})
+        else:
+            target.update(target_obj or {})
+
+        return policy.authorize(self, action, target, do_raise=fatal,
+                                exc=exception.PolicyNotAuthorized)
 
     def to_policy_values(self):
         policy = super(RequestContext, self).to_policy_values()
@@ -167,28 +238,6 @@ class RequestContext(context.RequestContext):
 
     def deepcopy(self):
         return copy.deepcopy(self)
-
-    # NOTE(sirp): the openstack/common version of RequestContext uses
-    # tenant/user whereas the Cinder version uses project_id/user_id.
-    # NOTE(adrienverge): The Cinder version of RequestContext now uses
-    # tenant/user internally, so it is compatible with context-aware code from
-    # openstack/common. We still need this shim for the rest of Cinder's
-    # code.
-    @property
-    def project_id(self):
-        return self.tenant
-
-    @project_id.setter
-    def project_id(self, value):
-        self.tenant = value
-
-    @property
-    def user_id(self):
-        return self.user
-
-    @user_id.setter
-    def user_id(self, value):
-        self.user = value
 
 
 def get_admin_context(read_deleted="no"):

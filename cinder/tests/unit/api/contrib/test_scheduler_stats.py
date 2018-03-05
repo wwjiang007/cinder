@@ -14,9 +14,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import ddt
 import mock
+import webob
 
 from cinder.api.contrib import scheduler_stats
+from cinder.api import microversions as mv
 from cinder.api.openstack import api_version_request as api_version
 from cinder import context
 from cinder import exception
@@ -45,6 +48,7 @@ def schedule_rpcapi_get_pools(self, context, filters=None):
     return all_pools
 
 
+@ddt.ddt
 class SchedulerStatsAPITest(test.TestCase):
     def setUp(self):
         super(SchedulerStatsAPITest, self).setUp()
@@ -81,7 +85,7 @@ class SchedulerStatsAPITest(test.TestCase):
                                       fake.PROJECT_ID)
         mock_rpcapi.return_value = [dict(name='pool1',
                                          capabilities=dict(foo='bar'))]
-        req.api_version_request = api_version.APIVersionRequest('3.28')
+        req.api_version_request = mv.get_api_version(mv.POOL_FILTER)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.get_pools(req)
 
@@ -103,7 +107,7 @@ class SchedulerStatsAPITest(test.TestCase):
                                       '&foo=bar' % fake.PROJECT_ID)
         mock_rpcapi.return_value = [dict(name='pool1',
                                          capabilities=dict(foo='bar'))]
-        req.api_version_request = api_version.APIVersionRequest('3.28')
+        req.api_version_request = mv.get_api_version(mv.POOL_FILTER)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.get_pools(req)
 
@@ -171,3 +175,35 @@ class SchedulerStatsAPITest(test.TestCase):
         self.assertRaises(exception.InvalidParameterValue,
                           self.controller.get_pools,
                           req)
+
+    @ddt.data((mv.get_prior_version(mv.POOL_TYPE_FILTER), False),
+              (mv.POOL_TYPE_FILTER, True))
+    @ddt.unpack
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.get_pools')
+    @mock.patch('cinder.api.common.reject_invalid_filters')
+    def test_get_pools_by_volume_type(self,
+                                      version,
+                                      support_volume_type,
+                                      mock_reject_invalid_filters,
+                                      mock_get_pools
+                                      ):
+        req = fakes.HTTPRequest.blank('/v3/%s/scheduler-stats/get_pools?'
+                                      'volume_type=lvm' % fake.PROJECT_ID)
+        mock_get_pools.return_value = [{'name': 'pool1',
+                                        'capabilities': {'foo': 'bar'}}]
+        req.api_version_request = api_version.APIVersionRequest(version)
+        req.environ['cinder.context'] = self.ctxt
+        res = self.controller.get_pools(req)
+
+        expected = {
+            'pools': [{'name': 'pool1'}]
+        }
+
+        filters = dict()
+        if support_volume_type:
+            filters = {'volume_type': 'lvm'}
+        filters = webob.multidict.MultiDict(filters)
+        mock_reject_invalid_filters.assert_called_once_with(self.ctxt, filters,
+                                                            'pool', True)
+        self.assertDictEqual(expected, res)
+        mock_get_pools.assert_called_with(mock.ANY, filters=filters)

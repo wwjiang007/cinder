@@ -19,12 +19,14 @@
 
 
 import abc
+from collections import OrderedDict
 import contextlib
 import datetime
 import functools
 import inspect
 import logging as py_logging
 import math
+import operator
 import os
 import pyclbr
 import random
@@ -37,6 +39,7 @@ import tempfile
 import time
 import types
 
+from castellan import key_manager
 from os_brick import encryptors
 from os_brick.initiator import connector
 from oslo_concurrency import lockutils
@@ -54,7 +57,6 @@ import webob.exc
 
 from cinder import exception
 from cinder.i18n import _
-from cinder import keymgr
 
 
 CONF = cfg.CONF
@@ -64,6 +66,9 @@ PERFECT_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
 VALID_TRACE_FLAGS = {'method', 'api'}
 TRACE_METHOD = False
 TRACE_API = False
+INITIAL_AUTO_MOSR = 20
+INFINITE_UNKNOWN_VALUES = ('infinite', 'unknown')
+
 
 synchronized = lockutils.synchronized_with_prefix('cinder-')
 
@@ -163,24 +168,24 @@ def check_metadata_properties(metadata=None):
 
     if not metadata:
         metadata = {}
+    if not isinstance(metadata, dict):
+        msg = _("Metadata should be a dict.")
+        raise exception.InvalidInput(msg)
 
     for k, v in metadata.items():
-        if len(k) == 0:
-            msg = _("Metadata property key blank.")
-            LOG.debug(msg)
-            raise exception.InvalidVolumeMetadata(reason=msg)
+        try:
+            check_string_length(k, "Metadata key: %s" % k, min_length=1)
+            check_string_length(v, "Value for metadata key: %s" % k)
+        except exception.InvalidInput as exc:
+            raise exception.InvalidVolumeMetadata(reason=exc)
+        # for backward compatibility
         if len(k) > 255:
             msg = _("Metadata property key %s greater than 255 "
                     "characters.") % k
-            LOG.debug(msg)
             raise exception.InvalidVolumeMetadataSize(reason=msg)
-        if v is None:
-            msg = _("Metadata property key '%s' value is None.") % k
-            raise exception.InvalidVolumeMetadata(reason=msg)
         if len(v) > 255:
             msg = _("Metadata property key %s value greater than "
                     "255 characters.") % k
-            LOG.debug(msg)
             raise exception.InvalidVolumeMetadataSize(reason=msg)
 
 
@@ -271,6 +276,22 @@ def last_completed_audit_period(unit=None):
     return (begin, end)
 
 
+def time_format(at=None):
+    """Format datetime string to date.
+
+    :param at: Type is datetime.datetime (example
+        'datetime.datetime(2017, 12, 24, 22, 11, 32, 6086)')
+    :returns: Format date (example '2017-12-24T22:11:32Z').
+    """
+    if not at:
+        at = timeutils.utcnow()
+    date_string = at.strftime("%Y-%m-%dT%H:%M:%S")
+    tz = at.tzname(None) if at.tzinfo else 'UTC'
+    # Need to handle either iso8601 or python UTC format
+    date_string += ('Z' if tz in ['UTC', 'UTC+00:00'] else tz)
+    return date_string
+
+
 def is_none_string(val):
     """Check if a string represents a None value."""
     if not isinstance(val, six.string_types):
@@ -350,21 +371,12 @@ def sanitize_hostname(hostname):
         if isinstance(hostname, six.text_type):
             hostname = hostname.encode('latin-1', 'ignore')
 
-    hostname = re.sub('[ _]', '-', hostname)
-    hostname = re.sub('[^\w.-]+', '', hostname)
+    hostname = re.sub(r'[ _]', '-', hostname)
+    hostname = re.sub(r'[^\w.-]+', '', hostname)
     hostname = hostname.lower()
     hostname = hostname.strip('.-')
 
     return hostname
-
-
-def read_file_as_root(file_path):
-    """Secure helper to read file as root."""
-    try:
-        out, _err = execute('cat', file_path, run_as_root=True)
-        return out
-    except processutils.ProcessExecutionError:
-        raise exception.FileNotFound(file_path=file_path)
 
 
 def robust_file_write(directory, filename, data):
@@ -416,6 +428,13 @@ def temporary_chown(path, owner_uid=None):
 
     :params owner_uid: UID of temporary owner (defaults to current user)
     """
+
+    if os.name == 'nt':
+        LOG.debug("Skipping chown for %s as this operation is "
+                  "not available on Windows.", path)
+        yield
+        return
+
     if owner_uid is None:
         owner_uid = os.getuid()
 
@@ -501,10 +520,10 @@ def brick_get_encryptor(connection_info, *args, **kwargs):
     """Wrapper to get a brick encryptor object."""
 
     root_helper = get_root_helper()
-    key_manager = keymgr.API(CONF)
+    km = key_manager.API(CONF)
     return encryptors.get_volume_encryptor(root_helper=root_helper,
                                            connection_info=connection_info,
-                                           keymgr=key_manager,
+                                           keymgr=km,
                                            *args, **kwargs)
 
 
@@ -581,7 +600,7 @@ def _get_disk_of_partition(devpath, st=None):
     for '/dev/disk1p1' ('p' is prepended to the partition number if the disk
     name ends with numbers).
     """
-    diskpath = re.sub('(?:(?<=\d)p)?\d+$', '', devpath)
+    diskpath = re.sub(r'(?:(?<=\d)p)?\d+$', '', devpath)
     if diskpath != devpath:
         try:
             st_disk = os.stat(diskpath)
@@ -1029,6 +1048,65 @@ def calculate_virtual_free_capacity(total_capacity,
     return free
 
 
+def calculate_max_over_subscription_ratio(capability,
+                                          global_max_over_subscription_ratio):
+    # provisioned_capacity_gb is the apparent total capacity of
+    # all the volumes created on a backend, which is greater than
+    # or equal to allocated_capacity_gb, which is the apparent
+    # total capacity of all the volumes created on a backend
+    # in Cinder. Using allocated_capacity_gb as the default of
+    # provisioned_capacity_gb if it is not set.
+    allocated_capacity_gb = capability.get('allocated_capacity_gb', 0)
+    provisioned_capacity_gb = capability.get('provisioned_capacity_gb',
+                                             allocated_capacity_gb)
+    thin_provisioning_support = capability.get('thin_provisioning_support',
+                                               False)
+    total_capacity_gb = capability.get('total_capacity_gb', 0)
+    free_capacity_gb = capability.get('free_capacity_gb', 0)
+    pool_name = capability.get('pool_name',
+                               capability.get('volume_backend_name'))
+
+    # If thin provisioning is not supported the capacity filter will not use
+    # the value we return, no matter what it is.
+    if not thin_provisioning_support:
+        LOG.debug("Trying to retrieve max_over_subscription_ratio from a "
+                  "service that does not support thin provisioning")
+        return 1.0
+
+    # Again, if total or free capacity is infinite or unknown, the capacity
+    # filter will not use the max_over_subscription_ratio at all. So, does
+    # not matter what we return here.
+    if ((total_capacity_gb in INFINITE_UNKNOWN_VALUES) or
+            (free_capacity_gb in INFINITE_UNKNOWN_VALUES)):
+        return 1.0
+
+    max_over_subscription_ratio = (capability.get(
+        'max_over_subscription_ratio') or global_max_over_subscription_ratio)
+
+    # We only calculate the automatic max_over_subscription_ratio (mosr)
+    # when the global or driver conf is set auto and while
+    # provisioned_capacity_gb is not 0. When auto is set and
+    # provisioned_capacity_gb is 0, we use the default value 20.0.
+    if max_over_subscription_ratio == 'auto':
+        if provisioned_capacity_gb != 0:
+            used_capacity = total_capacity_gb - free_capacity_gb
+            LOG.debug("Calculating max_over_subscription_ratio for "
+                      "pool %s: provisioned_capacity_gb=%s, "
+                      "used_capacity=%s",
+                      pool_name, provisioned_capacity_gb, used_capacity)
+            max_over_subscription_ratio = 1 + (
+                float(provisioned_capacity_gb) / (used_capacity + 1))
+        else:
+            max_over_subscription_ratio = INITIAL_AUTO_MOSR
+
+        LOG.info("Auto max_over_subscription_ratio for pool %s is "
+                 "%s", pool_name, max_over_subscription_ratio)
+    else:
+        max_over_subscription_ratio = float(max_over_subscription_ratio)
+
+    return max_over_subscription_ratio
+
+
 def validate_integer(value, name, min_value=None, max_value=None):
     """Make sure that value is a valid integer, potentially within range.
 
@@ -1038,21 +1116,11 @@ def validate_integer(value, name, min_value=None, max_value=None):
     :param max_length: the max_length of the integer
     :returns: integer
     """
-    if not strutils.is_int_like(value):
-        raise webob.exc.HTTPBadRequest(explanation=(
-            _('%s must be an integer.') % name))
-    value = int(value)
-
-    if min_value is not None and value < min_value:
-        raise webob.exc.HTTPBadRequest(
-            explanation=(_('%(value_name)s must be >= %(min_value)d') %
-                         {'value_name': name, 'min_value': min_value}))
-    if max_value is not None and value > max_value:
-        raise webob.exc.HTTPBadRequest(
-            explanation=(_('%(value_name)s must be <= %(max_value)d') %
-                         {'value_name': name, 'max_value': max_value}))
-
-    return value
+    try:
+        value = strutils.validate_integer(value, name, min_value, max_value)
+        return value
+    except ValueError as e:
+        raise webob.exc.HTTPBadRequest(explanation=six.text_type(e))
 
 
 def validate_dictionary_string_length(specs):
@@ -1123,7 +1191,7 @@ def set_log_levels(prefix, level_string):
     level = get_log_method(level_string)
     prefix = prefix or ''
 
-    for k, v in logging._loggers.items():
+    for k, v in logging.get_loggers().items():
         if k and k.startswith(prefix):
             v.logger.setLevel(level)
 
@@ -1131,5 +1199,15 @@ def set_log_levels(prefix, level_string):
 def get_log_levels(prefix):
     prefix = prefix or ''
     return {k: logging.logging.getLevelName(v.logger.getEffectiveLevel())
-            for k, v in logging._loggers.items()
+            for k, v in logging.get_loggers().items()
             if k and k.startswith(prefix)}
+
+
+def paths_normcase_equal(path_a, path_b):
+    return os.path.normcase(path_a) == os.path.normcase(path_b)
+
+
+def create_ordereddict(adict):
+    """Given a dict, return a sorted OrderedDict."""
+    return OrderedDict(sorted(adict.items(),
+                              key=operator.itemgetter(0)))

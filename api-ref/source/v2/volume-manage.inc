@@ -10,7 +10,7 @@ storage.
 Manage existing volume
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/os-volume-manage
+.. rest_method::  POST /v2/{project_id}/os-volume-manage
 
 Creates a Block Storage volume by using existing storage rather than allocating new storage.
 
@@ -23,7 +23,7 @@ or source-name element, if possible.
 The API chooses the size of the volume by rounding up the size of
 the existing storage volume to the next gibibyte (GiB).
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -40,7 +40,7 @@ Request
    - host: host
    - ref: ref
    - metadata: metadata
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------

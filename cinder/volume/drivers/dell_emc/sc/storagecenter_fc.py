@@ -67,7 +67,7 @@ class SCFCDriver(storagecenter_common.SCCommonDriver,
 
     VERSION = '4.0.0'
 
-    CI_WIKI_NAME = "Dell_Storage_CI"
+    CI_WIKI_NAME = "Dell_EMC_SC_Series_CI"
 
     def __init__(self, *args, **kwargs):
         super(SCFCDriver, self).__init__(*args, **kwargs)
@@ -155,7 +155,8 @@ class SCFCDriver(storagecenter_common.SCCommonDriver,
                     LOG.error('Failed to initialize connection.')
 
         # We get here because our mapping is none so blow up.
-        raise exception.VolumeBackendAPIException(_('Unable to map volume.'))
+        raise exception.VolumeBackendAPIException(
+            data=_('Unable to map volume.'))
 
     def _find_server(self, api, wwns, ssn=-1):
         for wwn in wwns:
@@ -194,22 +195,63 @@ class SCFCDriver(storagecenter_common.SCCommonDriver,
                      'wwns': wwns})
         return None, [], {}
 
+    def force_detach(self, volume):
+        """Breaks all volume server connections including to the live volume.
+
+        :param volume: volume to be detached
+        :raises VolumeBackendAPIException: On failure to sever connections.
+        """
+        with self._client.open_connection() as api:
+            volume_name = volume.get('id')
+            provider_id = volume.get('provider_id')
+            try:
+                islivevol = self._is_live_vol(volume)
+                scvolume = api.find_volume(volume_name, provider_id, islivevol)
+                if scvolume:
+                    rtn = api.unmap_all(scvolume)
+                    # If this fails we blow up.
+                    if not rtn:
+                        raise exception.VolumeBackendAPIException(
+                            _('Terminate connection failed'))
+                    # If there is a livevol we just take a shot at
+                    # disconnecting.
+                    if islivevol:
+                        sclivevolume = api.get_live_volume(provider_id)
+                        if sclivevolume:
+                            self.terminate_secondary(api, sclivevolume, None)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    LOG.error('Failed to terminates %(vol)s connections.',
+                              {'vol': volume_name})
+
+        # We don't know the servers that were involved so we just return
+        # the most basic of data.
+        info = {'driver_volume_type': 'fibre_channel',
+                'data': {}}
+        return info
+
     @fczm_utils.remove_fc_zone
     def terminate_connection(self, volume, connector, force=False, **kwargs):
-        # Get our volume name
+        # Special case
+        if connector is None:
+            return self.force_detach(volume)
+
+        # Grab some quick info.
         volume_name = volume.get('id')
         provider_id = volume.get('provider_id')
-        islivevol = self._is_live_vol(volume)
         LOG.debug('Terminate connection: %s', volume_name)
+
         with self._client.open_connection() as api:
             try:
-                wwpns = connector.get('wwpns')
+                wwpns = [] if not connector else connector.get('wwpns', [])
                 # Find the volume on the storage center.
+                islivevol = self._is_live_vol(volume)
                 scvolume = api.find_volume(volume_name, provider_id, islivevol)
                 if scvolume:
                     # Get the SSN it is on.
                     ssn = scvolume['instanceId'].split('.')[0]
 
+                    # Will be None if we have no wwpns.
                     scserver = self._find_server(api, wwpns, ssn)
 
                     # Get our target map so we can return it to free up a zone.
@@ -232,14 +274,14 @@ class SCFCDriver(storagecenter_common.SCCommonDriver,
                                 targets += lvtargets
                                 init_targ_map.update(lvinit_targ_map)
 
-                    # If we have a server and a volume lets unmap them.
-                    if (scserver is not None and
-                            scvolume is not None and
+                    if (wwpns and scserver and
                             api.unmap_volume(scvolume, scserver) is True):
                         LOG.debug('Connection terminated')
+                    elif not wwpns and api.unmap_all(scvolume):
+                        LOG.debug('All connections terminated')
                     else:
                         raise exception.VolumeBackendAPIException(
-                            _('Terminate connection failed'))
+                            data=_('Terminate connection failed'))
 
                     # basic return info...
                     info = {'driver_volume_type': 'fibre_channel',
@@ -247,7 +289,7 @@ class SCFCDriver(storagecenter_common.SCCommonDriver,
 
                     # if not then we return the target map so that
                     # the zone can be freed up.
-                    if api.get_volume_count(scserver) == 0:
+                    if scserver and api.get_volume_count(scserver) == 0:
                         info['data'] = {'target_wwn': targets,
                                         'initiator_target_map': init_targ_map}
                     return info
@@ -256,25 +298,39 @@ class SCFCDriver(storagecenter_common.SCCommonDriver,
                 with excutils.save_and_reraise_exception():
                     LOG.error('Failed to terminate connection')
         raise exception.VolumeBackendAPIException(
-            _('Terminate connection unable to connect to backend.'))
+            data=_('Terminate connection unable to connect to backend.'))
 
     def terminate_secondary(self, api, sclivevolume, wwns):
-        # Find our server.
-        secondary = self._find_server(
-            api, wwns, sclivevolume['secondaryScSerialNumber'])
+        lun = None
+        targets = []
+        init_targ_map = {}
+        # Get our volume.
         secondaryvol = api.get_volume(
             sclivevolume['secondaryVolume']['instanceId'])
-        if secondary and secondaryvol:
-            # Get our map.
-            lun, targets, init_targ_map = api.find_wwns(secondaryvol,
-                                                        secondary)
-            # If we have a server and a volume lets unmap them.
-            ret = api.unmap_volume(secondaryvol, secondary)
-            LOG.debug('terminate_secondary: secondary volume %(name)s unmap '
-                      'to secondary server %(server)s result: %(result)r',
-                      {'name': secondaryvol['name'],
-                       'server': secondary['name'],
-                       'result': ret})
-            # return info for
-            return lun, targets, init_targ_map
-        return None, [], {}
+        # We have one so let's get to work.
+        if secondaryvol:
+            # Are we unmapping a specific server?
+            if wwns:
+                # Find our server.
+                secondary = self._find_server(
+                    api, wwns, sclivevolume['secondaryScSerialNumber'])
+                # Get our map.
+                lun, targets, init_targ_map = api.find_wwns(secondaryvol,
+                                                            secondary)
+                # If we have a server and a volume lets unmap them.
+                ret = api.unmap_volume(secondaryvol, secondary)
+                LOG.debug('terminate_secondary: '
+                          'secondary volume %(name)s unmap '
+                          'to secondary server %(server)s result: %(result)r',
+                          {'name': secondaryvol['name'],
+                           'server': secondary['name'], 'result': ret})
+            else:
+                # Just unmap all.
+                ret = api.unmap_all(secondaryvol)
+                LOG.debug('terminate_secondary:  secondary volume %(name)s '
+                          'unmap all result: %(result)r',
+                          {'name': secondaryvol['name'], 'result': ret})
+        else:
+            LOG.debug('terminate_secondary: secondary volume not found.')
+        # return info if any
+        return lun, targets, init_targ_map

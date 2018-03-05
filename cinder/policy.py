@@ -15,52 +15,62 @@
 
 """Policy Engine For Cinder"""
 
+import sys
 
 from oslo_config import cfg
+from oslo_log import log as logging
 from oslo_policy import opts as policy_opts
 from oslo_policy import policy
+from oslo_utils import excutils
 
 from cinder import exception
+from cinder import policies
 
 CONF = cfg.CONF
+LOG = logging.getLogger(__name__)
 policy_opts.set_defaults(cfg.CONF, 'policy.json')
 
 _ENFORCER = None
 
 
-def init():
+def reset():
     global _ENFORCER
-    if not _ENFORCER:
-        _ENFORCER = policy.Enforcer(CONF)
+    if _ENFORCER:
+        _ENFORCER.clear()
+        _ENFORCER = None
 
 
-def enforce_action(context, action):
-    """Checks that the action can be done by the given context.
+def init(use_conf=True):
+    """Init an Enforcer class.
 
-    Applies a check to ensure the context's project_id and user_id can be
-    applied to the given action using the policy enforcement api.
+    :param use_conf: Whether to load rules from config file.
     """
 
-    return enforce(context, action, {'project_id': context.project_id,
-                                     'user_id': context.user_id})
+    global _ENFORCER
+    if not _ENFORCER:
+        _ENFORCER = policy.Enforcer(
+            CONF,
+            use_conf=use_conf)
+        register_rules(_ENFORCER)
+        _ENFORCER.load_rules()
 
 
 def enforce(context, action, target):
     """Verifies that the action is valid on the target in this context.
 
-       :param context: cinder context
-       :param action: string representing the action to be checked
-           this should be colon separated for clarity.
-           i.e. ``compute:create_instance``,
-           ``compute:attach_volume``,
-           ``volume:attach_volume``
+    :param context: cinder context
+    :param action: string representing the action to be checked
+                   this should be colon separated for clarity.
+                   i.e. ``compute:create_instance``,
+                   ``compute:attach_volume``,
+                   ``volume:attach_volume``
 
-       :param object: dictionary representing the object of the action
-           for object creation this should be a dictionary representing the
-           location of the object e.g. ``{'project_id': context.project_id}``
+    :param target: dictionary representing the object of the action for object
+                   creation this should be a dictionary representing the
+                   location of the object e.g.
+                   ``{'project_id': context.project_id}``
 
-       :raises PolicyNotAuthorized: if verification fails.
-
+    :raises PolicyNotAuthorized: if verification fails.
     """
     init()
 
@@ -72,19 +82,99 @@ def enforce(context, action, target):
                              action=action)
 
 
-def check_is_admin(roles, context=None):
-    """Whether or not user is admin according to policy setting.
+def set_rules(rules, overwrite=True, use_conf=False):
+    """Set rules based on the provided dict of rules.
 
+    :param rules: New rules to use. It should be an instance of dict.
+    :param overwrite: Whether to overwrite current rules or update them
+                      with the new rules.
+    :param use_conf: Whether to reload rules from config file.
+    """
+
+    init(use_conf=False)
+    _ENFORCER.set_rules(rules, overwrite, use_conf)
+
+
+def get_rules():
+    if _ENFORCER:
+        return _ENFORCER.rules
+
+
+def register_rules(enforcer):
+    enforcer.register_defaults(policies.list_rules())
+
+
+def get_enforcer():
+    # This method is for use by oslopolicy CLI scripts. Those scripts need the
+    # 'output-file' and 'namespace' options, but having those in sys.argv means
+    # loading the Cinder config options will fail as those are not expected to
+    # be present. So we pass in an arg list with those stripped out.
+    conf_args = []
+    # Start at 1 because cfg.CONF expects the equivalent of sys.argv[1:]
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i].strip('-') in ['namespace', 'output-file']:
+            i += 2
+            continue
+        conf_args.append(sys.argv[i])
+        i += 1
+
+    cfg.CONF(conf_args, project='cinder')
+    init()
+    return _ENFORCER
+
+
+def authorize(context, action, target, do_raise=True, exc=None):
+    """Verifies that the action is valid on the target in this context.
+
+    :param context: cinder context
+    :param action: string representing the action to be checked
+                   this should be colon separated for clarity.
+                   i.e. ``compute:create_instance``,
+                   ``compute:attach_volume``,
+                   ``volume:attach_volume``
+    :param target: dictionary representing the object of the action for object
+                   creation this should be a dictionary representing the
+                   location of the object e.g.
+                   ``{'project_id': context.project_id}``
+    :param do_raise: if True (the default), raises PolicyNotAuthorized;
+                     if False, returns False
+    :param exc: Class of the exception to raise if the check fails.
+                Any remaining arguments passed to :meth:`authorize` (both
+                positional and keyword arguments) will be passed to
+                the exception class. If not specified,
+                :class:`PolicyNotAuthorized` will be used.
+
+    :raises cinder.exception.PolicyNotAuthorized: if verification fails
+           and do_raise is True. Or if 'exc' is specified it will raise an
+           exception of that type.
+
+    :return: returns a non-False value (not necessarily "True") if
+             authorized, and the exact value False if not authorized and
+             do_raise is False.
     """
     init()
+    credentials = context.to_policy_values()
+    if not exc:
+        exc = exception.PolicyNotAuthorized
+    try:
+        result = _ENFORCER.authorize(action, target, credentials,
+                                     do_raise=do_raise, exc=exc, action=action)
+    except policy.PolicyNotRegistered:
+        with excutils.save_and_reraise_exception():
+            LOG.exception('Policy not registered')
+    except Exception:
+        with excutils.save_and_reraise_exception():
+            LOG.error('Policy check for %(action)s failed with credentials '
+                      '%(credentials)s',
+                      {'action': action, 'credentials': credentials})
+    return result
 
-    # include project_id on target to avoid KeyError if context_is_admin
-    # policy definition is missing, and default admin_or_owner rule
-    # attempts to apply.
-    target = {'project_id': ''}
-    if context is None:
-        credentials = {'roles': roles}
-    else:
-        credentials = context.to_dict()
 
-    return _ENFORCER.enforce('context_is_admin', target, credentials)
+def check_is_admin(context):
+    """Whether or not user is admin according to policy setting."""
+    init()
+    # the target is user-self
+    credentials = context.to_policy_values()
+    target = credentials
+    return _ENFORCER.authorize('context_is_admin', target, credentials)

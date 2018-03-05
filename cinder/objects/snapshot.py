@@ -37,7 +37,8 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
     # Version 1.2: This object is now cleanable (adds rows to workers table)
     # Version 1.3: SnapshotStatusField now includes "unmanaging"
     # Version 1.4: SnapshotStatusField now includes "backing-up"
-    VERSION = '1.4'
+    # Version 1.5: SnapshotStatusField now includes "restoring"
+    VERSION = '1.5'
 
     # NOTE(thangp): OPTIONAL_FIELDS are fields that would be lazy-loaded. They
     # are typically the relationship in the sqlalchemy object.
@@ -119,12 +120,19 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
         super(Snapshot, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
 
-        if target_version < (1, 3):
-            if primitive.get('status') == c_fields.SnapshotStatus.UNMANAGING:
-                primitive['status'] = c_fields.SnapshotStatus.DELETING
-        if target_version < (1, 4):
-            if primitive.get('status') == c_fields.SnapshotStatus.BACKING_UP:
-                primitive['status'] = c_fields.SnapshotStatus.AVAILABLE
+        backport_statuses = (((1, 3),
+                              (c_fields.SnapshotStatus.UNMANAGING,
+                               c_fields.SnapshotStatus.DELETING)),
+                             ((1, 4),
+                             (c_fields.SnapshotStatus.BACKING_UP,
+                              c_fields.SnapshotStatus.AVAILABLE)),
+                             ((1, 5),
+                              (c_fields.SnapshotStatus.RESTORING,
+                               c_fields.SnapshotStatus.AVAILABLE)))
+        for version, status in backport_statuses:
+            if target_version < version:
+                if primitive.get('status') == status[0]:
+                    primitive['status'] = status[1]
 
     @classmethod
     def _from_db_object(cls, context, snapshot, db_snapshot,
@@ -220,7 +228,8 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
         self.obj_reset_changes()
 
     def destroy(self):
-        updated_values = db.snapshot_destroy(self._context, self.id)
+        with self.obj_as_admin():
+            updated_values = db.snapshot_destroy(self._context, self.id)
         self.update(updated_values)
         self.obj_reset_changes(updated_values.keys())
 
@@ -265,9 +274,10 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
 
     @classmethod
     def snapshot_data_get_for_project(cls, context, project_id,
-                                      volume_type_id=None):
+                                      volume_type_id=None, host=None):
         return db.snapshot_data_get_for_project(context, project_id,
-                                                volume_type_id)
+                                                volume_type_id,
+                                                host=host)
 
     @staticmethod
     def _is_cleanable(status, obj_version):

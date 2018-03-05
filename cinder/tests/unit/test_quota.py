@@ -34,9 +34,11 @@ from cinder import objects
 from cinder.objects import fields
 from cinder import quota
 from cinder import quota_utils
+from cinder.scheduler import rpcapi as scheduler_rpcapi
 from cinder import test
 from cinder.tests.unit import fake_constants as fake
 import cinder.tests.unit.image.fake
+from cinder.tests.unit import utils as tests_utils
 from cinder import volume
 
 
@@ -158,6 +160,25 @@ class QuotaIntegrationTestCase(test.TestCase):
         self.assertEqual(msg, six.text_type(ex))
         vol_ref.destroy()
 
+    def test__snapshots_quota_value(self):
+        test_volume1 = tests_utils.create_volume(
+            self.context,
+            status='available',
+            host=CONF.host)
+        test_volume2 = tests_utils.create_volume(
+            self.context,
+            status='available',
+            host=CONF.host)
+        volume_api = cinder.volume.api.API()
+        volume_api.create_snapshots_in_db(self.context,
+                                          [test_volume1, test_volume2],
+                                          'fake_name',
+                                          'fake_description',
+                                          fake.CONSISTENCY_GROUP_ID)
+        usages = db.quota_usage_get_all_by_project(self.context,
+                                                   self.project_id)
+        self.assertEqual(2, usages['snapshots']['in_use'])
+
     def test_too_many_snapshots_of_type(self):
         resource = 'snapshots_%s' % self.volume_type_name
         db.quota_class_create(self.context, 'default', resource, 1)
@@ -245,6 +266,7 @@ class QuotaIntegrationTestCase(test.TestCase):
             vol_ref.destroy()
 
     def test_no_snapshot_gb_quota_flag(self):
+        self.mock_object(scheduler_rpcapi.SchedulerAPI, 'create_snapshot')
         self.flags(quota_volumes=2,
                    quota_snapshots=2,
                    quota_gigabytes=20,
@@ -1519,7 +1541,7 @@ class NestedDbQuotaDriverTestCase(NestedDbQuotaDriverBaseTestCase):
 class NestedQuotaValidation(NestedDbQuotaDriverBaseTestCase):
     def setUp(self):
         super(NestedQuotaValidation, self).setUp()
-        """
+        r"""
         Quota hierarchy setup like so
         +-----------+
         |           |
@@ -1712,7 +1734,8 @@ class QuotaReserveSqlAlchemyTestCase(test.TestCase):
         def fake_get_session():
             return FakeSession()
 
-        def fake_get_quota_usages(context, session, project_id):
+        def fake_get_quota_usages(context, session, project_id,
+                                  resources=None):
             return self.usages.copy()
 
         def fake_quota_usage_create(context, project_id, resource, in_use,
@@ -1827,7 +1850,7 @@ class QuotaReserveSqlAlchemyTestCase(test.TestCase):
     def _mock_allocated_get_all_by_project(self, allocated_quota=False):
         def fake_qagabp(context, project_id, session=None):
             self.assertEqual('test_project', project_id)
-            self.assertNotEqual(session, None)
+            self.assertIsNotNone(session)
             if allocated_quota:
                 return dict(project_id=project_id, volumes=3,
                             gigabytes = 2 * 1024)

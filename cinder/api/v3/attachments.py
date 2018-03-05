@@ -10,23 +10,26 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""The volumes attachments api."""
+"""The volumes attachments API."""
 
 from oslo_log import log as logging
 import webob
 
 from cinder.api import common
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
+from cinder.api.schemas import attachments as attachment
 from cinder.api.v3.views import attachments as attachment_views
+from cinder.api import validation
 from cinder import exception
 from cinder.i18n import _
 from cinder import objects
+from cinder.policies import attachments as attachment_policy
 from cinder import utils
 from cinder.volume import api as volume_api
 
 
 LOG = logging.getLogger(__name__)
-API_VERSION = '3.27'
 
 
 class AttachmentsController(wsgi.Controller):
@@ -42,20 +45,20 @@ class AttachmentsController(wsgi.Controller):
         self.ext_mgr = ext_mgr
         super(AttachmentsController, self).__init__()
 
-    @wsgi.Controller.api_version(API_VERSION)
+    @wsgi.Controller.api_version(mv.NEW_ATTACH)
     def show(self, req, id):
         """Return data about the given attachment."""
         context = req.environ['cinder.context']
         attachment = objects.VolumeAttachment.get_by_id(context, id)
         return attachment_views.ViewBuilder.detail(attachment)
 
-    @wsgi.Controller.api_version(API_VERSION)
+    @wsgi.Controller.api_version(mv.NEW_ATTACH)
     def index(self, req):
         """Return a summary list of attachments."""
         attachments = self._items(req)
         return attachment_views.ViewBuilder.list(attachments)
 
-    @wsgi.Controller.api_version(API_VERSION)
+    @wsgi.Controller.api_version(mv.NEW_ATTACH)
     def detail(self, req):
         """Return a detailed list of attachments."""
         attachments = self._items(req)
@@ -93,8 +96,9 @@ class AttachmentsController(wsgi.Controller):
                 marker=marker, limit=limit, offset=offset, sort_keys=sort_keys,
                 sort_direction=sort_dirs)
 
-    @wsgi.Controller.api_version(API_VERSION)
+    @wsgi.Controller.api_version(mv.NEW_ATTACH)
     @wsgi.response(202)
+    @validation.schema(attachment.create)
     def create(self, req, body):
         """Create an attachment.
 
@@ -114,8 +118,8 @@ class AttachmentsController(wsgi.Controller):
         information (connector data) at the time of the call.
 
         NOTE: In Nova terms server == instance, the server_id parameter
-        referenced below is the uuid of the Instance, for non-nova consumers
-        this can be a server uuid or some other arbitrary unique identifier.
+        referenced below is the UUID of the Instance, for non-nova consumers
+        this can be a server UUID or some other arbitrary unique identifier.
 
         Expected format of the input parameter 'body':
 
@@ -126,7 +130,7 @@ class AttachmentsController(wsgi.Controller):
                 {
                     "volume_uuid": "volume-uuid",
                     "instance_uuid": "nova-server-uuid",
-                    "connector": None|<connector-object>,
+                    "connector": "null|<connector-object>"
                 }
             }
 
@@ -142,30 +146,20 @@ class AttachmentsController(wsgi.Controller):
                     "platform": "x86_64",
                     "host": "tempest-1",
                     "os_type": "linux2",
-                    "multipath": False,
+                    "multipath": false,
                     "mountpoint": "/dev/vdb",
-                    "mode": None|"rw"|"ro",
+                    "mode": "null|rw|ro"
                 }
             }
 
         NOTE all that's required for a reserve is volume_uuid
-        and a instance_uuid.
+        and an instance_uuid.
 
         returns: A summary view of the attachment object
         """
         context = req.environ['cinder.context']
-        instance_uuid = body['attachment'].get('instance_uuid', None)
-        if not instance_uuid:
-            raise webob.exc.HTTPBadRequest(
-                explanation=_("Must specify 'instance_uuid' "
-                              "to create attachment."))
-
-        volume_uuid = body['attachment'].get('volume_uuid', None)
-        if not volume_uuid:
-            raise webob.exc.HTTPBadRequest(
-                explanation=_("Must specify 'volume_uuid' "
-                              "to create attachment."))
-
+        instance_uuid = body['attachment']['instance_uuid']
+        volume_uuid = body['attachment']['volume_uuid']
         volume_ref = objects.Volume.get_by_id(
             context,
             volume_uuid)
@@ -177,7 +171,8 @@ class AttachmentsController(wsgi.Controller):
                                                   volume_ref,
                                                   instance_uuid,
                                                   connector=connector))
-        except exception.NotAuthorized:
+        except (exception.NotAuthorized,
+                exception.InvalidVolume):
             raise
         except exception.CinderException as ex:
             err_msg = _(
@@ -191,7 +186,8 @@ class AttachmentsController(wsgi.Controller):
                 raise webob.exc.HTTPInternalServerError(explanation=err_msg)
         return attachment_views.ViewBuilder.detail(attachment_ref)
 
-    @wsgi.Controller.api_version(API_VERSION)
+    @wsgi.Controller.api_version(mv.NEW_ATTACH)
+    @validation.schema(attachment.update)
     def update(self, req, id, body):
         """Update an attachment record.
 
@@ -200,20 +196,22 @@ class AttachmentsController(wsgi.Controller):
 
         Expected format of the input parameter 'body':
 
-        .. code-block:: json
-        {
-            "attachment":
+        .. code:: json
+
             {
-                "connector":
+                "attachment":
                 {
-                    "initiator": "iqn.1993-08.org.debian:01:cad181614cec",
-                    "ip":"192.168.1.20",
-                    "platform": "x86_64",
-                    "host": "tempest-1",
-                    "os_type": "linux2",
-                    "multipath": False,
-                    "mountpoint": "/dev/vdb",
-                    "mode": None|"rw"|"ro",
+                    "connector":
+                    {
+                        "initiator": "iqn.1993-08.org.debian:01:cad181614cec",
+                        "ip":"192.168.1.20",
+                        "platform": "x86_64",
+                        "host": "tempest-1",
+                        "os_type": "linux2",
+                        "multipath": False,
+                        "mountpoint": "/dev/vdb",
+                        "mode": None|"rw"|"ro",
+                    }
                 }
             }
 
@@ -221,11 +219,7 @@ class AttachmentsController(wsgi.Controller):
         context = req.environ['cinder.context']
         attachment_ref = (
             objects.VolumeAttachment.get_by_id(context, id))
-        connector = body['attachment'].get('connector', None)
-        if not connector:
-            raise webob.exc.HTTPBadRequest(
-                explanation=_("Must specify 'connector' "
-                              "to update attachment."))
+        connector = body['attachment']['connector']
         err_msg = None
         try:
             attachment_ref = (
@@ -249,7 +243,7 @@ class AttachmentsController(wsgi.Controller):
         # or a dict?
         return attachment_views.ViewBuilder.detail(attachment_ref)
 
-    @wsgi.Controller.api_version(API_VERSION)
+    @wsgi.Controller.api_version(mv.NEW_ATTACH)
     def delete(self, req, id):
         """Delete an attachment.
 
@@ -263,6 +257,24 @@ class AttachmentsController(wsgi.Controller):
         attachment = objects.VolumeAttachment.get_by_id(context, id)
         attachments = self.volume_api.attachment_delete(context, attachment)
         return attachment_views.ViewBuilder.list(attachments)
+
+    @wsgi.response(202)
+    @wsgi.Controller.api_version(mv.NEW_ATTACH_COMPLETION)
+    @wsgi.action('os-complete')
+    def complete(self, req, id, body):
+        """Mark a volume attachment process as completed (in-use)."""
+        context = req.environ['cinder.context']
+        attachment_ref = (
+            objects.VolumeAttachment.get_by_id(context, id))
+        volume_ref = objects.Volume.get_by_id(
+            context,
+            attachment_ref.volume_id)
+        context.authorize(attachment_policy.COMPLETE_POLICY,
+                          target_obj=attachment_ref)
+        attachment_ref.update({'attach_status': 'attached'})
+        attachment_ref.save()
+        volume_ref.update({'status': 'in-use', 'attach_status': 'attached'})
+        volume_ref.save()
 
 
 def create_resource(ext_mgr):

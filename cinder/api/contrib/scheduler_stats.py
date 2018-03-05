@@ -16,17 +16,12 @@
 
 from cinder.api import common
 from cinder.api import extensions
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
 from cinder.api.views import scheduler_stats as scheduler_stats_view
+from cinder.policies import scheduler_stats as policy
 from cinder.scheduler import rpcapi
 from cinder import utils
-
-GET_POOL_NAME_FILTER_MICRO_VERSION = '3.28'
-
-
-def authorize(context, action_name):
-    action = 'scheduler_stats:%s' % action_name
-    extensions.extension_authorizer('scheduler', action)(context)
 
 
 class SchedulerStatsController(wsgi.Controller):
@@ -41,13 +36,13 @@ class SchedulerStatsController(wsgi.Controller):
     @common.process_general_filtering('pool')
     def _process_pool_filtering(self, context=None, filters=None,
                                 req_version=None):
-        if not req_version.matches(GET_POOL_NAME_FILTER_MICRO_VERSION):
+        if not req_version.matches(mv.POOL_FILTER):
             filters.clear()
 
     def get_pools(self, req):
         """List all active pools in scheduler."""
         context = req.environ['cinder.context']
-        authorize(context, 'get_pools')
+        context.authorize(policy.GET_POOL_POLICY)
 
         detail = utils.get_bool_param('detail', req.params)
 
@@ -58,6 +53,9 @@ class SchedulerStatsController(wsgi.Controller):
         self._process_pool_filtering(context=context,
                                      filters=filters,
                                      req_version=req_version)
+
+        if not req_version.matches(mv.POOL_TYPE_FILTER):
+            filters.pop('volume_type', None)
 
         pools = self.scheduler_api.get_pools(context, filters=filters)
 

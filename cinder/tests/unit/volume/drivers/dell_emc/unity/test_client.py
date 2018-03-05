@@ -12,16 +12,15 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-
 import unittest
 
 from mock import mock
 from oslo_utils import units
 
+from cinder import coordination
 from cinder.tests.unit.volume.drivers.dell_emc.unity \
     import fake_exception as ex
 from cinder.volume.drivers.dell_emc.unity import client
-
 
 ########################
 #
@@ -47,6 +46,8 @@ class MockResource(object):
         self.max_iops = None
         self.max_kbps = None
         self.pool_name = 'Pool0'
+        self._storage_resource = None
+        self.host_cache = []
 
     @property
     def id(self):
@@ -98,6 +99,11 @@ class MockResource(object):
     def detach(lun_or_snap):
         if lun_or_snap.name == 'detach_failure':
             raise ex.DetachIsCalled()
+
+    @staticmethod
+    def detach_from(host):
+        if host is None:
+            raise ex.DetachFromIsCalled()
 
     def get_hlu(self, lun):
         return self.alu_hlu_map.get(lun.get_id(), None)
@@ -159,11 +165,28 @@ class MockResource(object):
 
     @property
     def storage_resource(self):
-        return MockResource(_id='sr_%s' % self._id,
-                            name='sr_%s' % self.name)
+        if self._storage_resource is None:
+            self._storage_resource = MockResource(_id='sr_%s' % self._id,
+                                                  name='sr_%s' % self.name)
+        return self._storage_resource
+
+    @storage_resource.setter
+    def storage_resource(self, value):
+        self._storage_resource = value
 
     def modify(self, name=None):
         self.name = name
+
+    def thin_clone(self, name, io_limit_policy=None, description=None):
+        if name == 'thin_clone_name_in_use':
+            raise ex.UnityLunNameInUseError
+        return MockResource(_id=name, name=name)
+
+    def get_snap(self, name):
+        return MockResource(_id=name, name=name)
+
+    def restore(self, delete_backup):
+        return MockResource(_id='snap_1', name="internal_snap")
 
 
 class MockResourceList(object):
@@ -204,10 +227,20 @@ class MockSystem(object):
         self.serial_number = 'SYSTEM_SERIAL'
         self.system_version = '4.1.0'
 
+    @property
+    def info(self):
+        mocked_info = mock.Mock()
+        mocked_info.name = self.serial_number
+        return mocked_info
+
     @staticmethod
     def get_lun(_id=None, name=None):
         if _id == 'not_found':
             raise ex.UnityResourceNotFoundError()
+        if _id == 'tc_80':  # for thin clone with extending size
+            lun = MockResource(name=_id, _id=_id)
+            lun.total_size_gb = 7
+            return lun
         return MockResource(name, _id)
 
     @staticmethod
@@ -228,6 +261,10 @@ class MockSystem(object):
     def get_host(name):
         if name == 'not_found':
             raise ex.UnityResourceNotFoundError()
+        if name == 'host1':
+            ret = MockResource(name)
+            ret.initiator_id = ['old-iqn']
+            return ret
         return MockResource(name)
 
     @staticmethod
@@ -299,6 +336,26 @@ class ClientTest(unittest.TestCase):
         lun = self.client.create_lun('LUN 4', 6, pool, io_limit_policy=limit)
         self.assertEqual(100, lun.max_kbps)
 
+    def test_thin_clone_success(self):
+        name = 'tc_77'
+        src_lun = MockResource(_id='id_77')
+        lun = self.client.thin_clone(src_lun, name)
+        self.assertEqual(name, lun.name)
+
+    def test_thin_clone_name_in_used(self):
+        name = 'thin_clone_name_in_use'
+        src_lun = MockResource(_id='id_79')
+        lun = self.client.thin_clone(src_lun, name)
+        self.assertEqual(name, lun.name)
+
+    def test_thin_clone_extend_size(self):
+        name = 'tc_80'
+        src_lun = MockResource(_id='id_80')
+        lun = self.client.thin_clone(src_lun, name, io_limit_policy=None,
+                                     new_size_gb=7)
+        self.assertEqual(name, lun.name)
+        self.assertEqual(7, lun.total_size_gb)
+
     def test_delete_lun_normal(self):
         self.assertIsNone(self.client.delete_lun('lun3'))
 
@@ -368,16 +425,18 @@ class ClientTest(unittest.TestCase):
         ret = self.client.get_snap('not_found')
         self.assertIsNone(ret)
 
-    def test_create_host_found(self):
-        iqns = ['iqn.1-1.com.e:c.a.a0']
-        host = self.client.create_host('host1', iqns)
+    @mock.patch.object(coordination.Coordinator, 'get_lock')
+    def test_create_host_found(self, fake_coordination):
+        host = self.client.create_host('host1')
 
         self.assertEqual('host1', host.name)
         self.assertLessEqual(['iqn.1-1.com.e:c.a.a0'], host.initiator_id)
 
-    def test_create_host_not_found(self):
-        host = self.client.create_host('not_found', [])
+    @mock.patch.object(coordination.Coordinator, 'get_lock')
+    def test_create_host_not_found(self, fake):
+        host = self.client.create_host('not_found')
         self.assertEqual('not_found', host.name)
+        self.assertIn('not_found', self.client.host_cache)
 
     def test_attach_lun(self):
         lun = MockResource(_id='lun1', name='l1')
@@ -398,8 +457,27 @@ class ClientTest(unittest.TestCase):
 
         self.assertRaises(ex.DetachIsCalled, f)
 
-    def test_get_host(self):
-        self.assertEqual('host2', self.client.get_host('host2').name)
+    def test_detach_all(self):
+        def f():
+            lun = MockResource('lun_44')
+            self.client.detach_all(lun)
+
+        self.assertRaises(ex.DetachFromIsCalled, f)
+
+    @mock.patch.object(coordination.Coordinator, 'get_lock')
+    def test_create_host(self, fake):
+        self.assertEqual('host2', self.client.create_host('host2').name)
+
+    @mock.patch.object(coordination.Coordinator, 'get_lock')
+    def test_create_host_in_cache(self, fake):
+        self.client.host_cache['already_in'] = MockResource(name='already_in')
+        host = self.client.create_host('already_in')
+        self.assertIn('already_in', self.client.host_cache)
+        self.assertEqual('already_in', host.name)
+
+    def test_update_host_initiators(self):
+        host = MockResource(name='host_init')
+        host = self.client.update_host_initiators(host, 'fake-iqn-1')
 
     def test_get_iscsi_target_info(self):
         ret = self.client.get_iscsi_target_info()
@@ -461,3 +539,7 @@ class ClientTest(unittest.TestCase):
 
     def test_get_pool_name(self):
         self.assertEqual('Pool0', self.client.get_pool_name('lun_0'))
+
+    def test_restore_snapshot(self):
+        back_snap = self.client.restore_snapshot('snap1')
+        self.assertEqual("internal_snap", back_snap.name)

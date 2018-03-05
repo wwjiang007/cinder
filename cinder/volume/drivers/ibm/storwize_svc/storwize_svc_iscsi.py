@@ -33,15 +33,18 @@ localized format.
 are of different sizes, is not supported.
 
 """
+import collections
 
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import strutils
 
+from cinder import coordination
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
-from cinder import utils
+from cinder.volume import configuration as conf
 
 from cinder.volume.drivers.ibm.storwize_svc import (
     storwize_svc_common as storwize_common)
@@ -56,7 +59,7 @@ storwize_svc_iscsi_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(storwize_svc_iscsi_opts)
+CONF.register_opts(storwize_svc_iscsi_opts, group=conf.SHARED_CONF_GROUP)
 
 
 @interface.volumedriver
@@ -89,9 +92,13 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
               mode
         2.1.1 - Update replication to version 2.1
         2.2 - Add CG capability to generic volume groups
+        2.2.1 - Add vdisk mirror/stretch cluster support
+        2.2.2 - Add replication group support
+        2.2.3 - Add backup snapshots support
+        2.2.4 - Add hyperswap support
     """
 
-    VERSION = "2.2"
+    VERSION = "2.2.4"
 
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "IBM_STORAGE_CI"
@@ -110,13 +117,29 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
             raise exception.InvalidConnectorException(
                 missing='initiator')
 
+    def initialize_connection_snapshot(self, snapshot, connector):
+        """Perform attach snapshot for backup snapshots."""
+        # If the snapshot's source volume is a replication volume and the
+        # replication volume has failed over to aux_backend,
+        # attach the snapshot will be failed.
+        self._check_snapshot_replica_volume_status(snapshot)
+
+        vol_attrs = ['id', 'name', 'volume_type_id', 'display_name']
+        Volume = collections.namedtuple('Volume', vol_attrs)
+        volume = Volume(id=snapshot.id,
+                        name=snapshot.name,
+                        volume_type_id=snapshot.volume_type_id,
+                        display_name='backup-snapshot')
+
+        return self.initialize_connection(volume, connector)
+
     def initialize_connection(self, volume, connector):
         """Perform necessary work to make an iSCSI connection."""
-        @utils.synchronized('storwize-host' + self._state['system_id'] +
-                            connector['host'], external=True)
-        def _do_initialize_connection_locked():
+        @coordination.synchronized('storwize-host-{system_id}-{host}')
+        def _do_initialize_connection_locked(system_id, host):
             return self._do_initialize_connection(volume, connector)
-        return _do_initialize_connection_locked()
+        return _do_initialize_connection_locked(self._state['system_id'],
+                                                connector['host'])
 
     def _do_initialize_connection(self, volume, connector):
         """Perform necessary work to make an iSCSI connection.
@@ -130,25 +153,59 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         proper I/O group)
         """
         LOG.debug('enter: initialize_connection: volume %(vol)s with connector'
-                  ' %(conn)s', {'vol': volume['id'], 'conn': connector})
-        volume_name = self._get_target_vol(volume)
+                  ' %(conn)s', {'vol': volume.id, 'conn': connector})
+        if volume.display_name == 'backup-snapshot':
+            LOG.debug('It is a virtual volume %(vol)s for attach snapshot.',
+                      {'vol': volume.id})
+            volume_name = volume.name
+            backend_helper = self._helpers
+            node_state = self._state
+        else:
+            volume_name, backend_helper, node_state = self._get_vol_sys_info(
+                volume)
+        opts = self._get_vdisk_params(volume.volume_type_id)
+        host_site = opts['host_site']
 
         # Check if a host object is defined for this host name
-        host_name = self._helpers.get_host_from_connector(connector)
+        host_name = backend_helper.get_host_from_connector(connector,
+                                                           iscsi=True)
         if host_name is None:
             # Host does not exist - add a new host to Storwize/SVC
-            host_name = self._helpers.create_host(connector)
+            # The host_site is necessary for hyperswap volume
+            if backend_helper.is_volume_hyperswap(
+                    volume_name) and host_site is None:
+                msg = (_('There is no host_site configured for a hyperswap'
+                         ' volume %s.') % volume_name)
+                LOG.error(msg)
+                raise exception.VolumeDriverException(message=msg)
 
-        chap_secret = self._helpers.get_chap_secret_for_host(host_name)
+            host_name = backend_helper.create_host(connector, iscsi=True,
+                                                   site = host_site)
+        else:
+            host_info = backend_helper.ssh.lshost(host=host_name)
+            if 'site_name' in host_info[0]:
+                if not host_info[0]['site_name'] and host_site:
+                    backend_helper.update_host(host_name, host_site)
+                elif host_info[0]['site_name']:
+                    ref_host_site = host_info[0]['site_name']
+                    if host_site and host_site != ref_host_site:
+                        msg = (_('The existing host site is %(ref_host_site)s,'
+                                 ' but the new host site is %(host_site)s.') %
+                               {'ref_host_site': ref_host_site,
+                                'host_site': host_site})
+                        LOG.error(msg)
+                        raise exception.VolumeDriverException(message=msg)
+
+        chap_secret = backend_helper.get_chap_secret_for_host(host_name)
         chap_enabled = self.configuration.storwize_svc_iscsi_chap_enabled
         if chap_enabled and chap_secret is None:
-            chap_secret = self._helpers.add_chap_secret_to_host(host_name)
+            chap_secret = backend_helper.add_chap_secret_to_host(host_name)
         elif not chap_enabled and chap_secret:
             LOG.warning('CHAP secret exists for host but CHAP is disabled.')
 
         multihostmap = self.configuration.storwize_svc_multihostmap_enabled
-        lun_id = self._helpers.map_vol_to_host(volume_name, host_name,
-                                               multihostmap)
+        lun_id = backend_helper.map_vol_to_host(volume_name, host_name,
+                                                multihostmap)
 
         try:
             properties = self._get_single_iscsi_data(volume, connector,
@@ -156,9 +213,14 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
             multipath = connector.get('multipath', False)
             if multipath:
                 properties = self._get_multi_iscsi_data(volume, connector,
-                                                        lun_id, properties)
-        except Exception:
+                                                        lun_id, properties,
+                                                        backend_helper,
+                                                        node_state)
+        except Exception as ex:
             with excutils.save_and_reraise_exception():
+                LOG.error('initialize_connection: Failed to export volume '
+                          '%(vol)s due to %(ex)s.', {'vol': volume.name,
+                                                     'ex': ex})
                 self._do_terminate_connection(volume, connector)
                 LOG.error('initialize_connection: Failed '
                           'to collect return '
@@ -166,21 +228,31 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
                           '%(conn)s.\n', {'vol': volume,
                                           'conn': connector})
 
+        # properties may contain chap secret so must be masked
         LOG.debug('leave: initialize_connection:\n volume: %(vol)s\n '
                   'connector: %(conn)s\n properties: %(prop)s',
-                  {'vol': volume['id'], 'conn': connector,
-                   'prop': properties})
+                  {'vol': volume.id, 'conn': connector,
+                   'prop': strutils.mask_password(properties)})
 
         return {'driver_volume_type': 'iscsi', 'data': properties, }
 
     def _get_single_iscsi_data(self, volume, connector, lun_id, chap_secret):
         LOG.debug('enter: _get_single_iscsi_data: volume %(vol)s with '
                   'connector %(conn)s lun_id %(lun_id)s',
-                  {'vol': volume['id'], 'conn': connector,
+                  {'vol': volume.id, 'conn': connector,
                    'lun_id': lun_id})
 
-        volume_name = self._get_target_vol(volume)
-        volume_attributes = self._helpers.get_vdisk_attributes(volume_name)
+        if volume.display_name == 'backup-snapshot':
+            LOG.debug('It is a virtual volume %(vol)s for attach snapshot',
+                      {'vol': volume.name})
+            volume_name = volume.name
+            backend_helper = self._helpers
+            node_state = self._state
+        else:
+            volume_name, backend_helper, node_state = self._get_vol_sys_info(
+                volume)
+
+        volume_attributes = backend_helper.get_vdisk_attributes(volume_name)
         if volume_attributes is None:
             msg = (_('_get_single_iscsi_data: Failed to get attributes'
                      ' for volume %s.') % volume_name)
@@ -201,7 +273,7 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         # Get preferred node and other nodes in I/O group
         preferred_node_entry = None
         io_group_nodes = []
-        for node in self._state['storage_nodes'].values():
+        for node in node_state['storage_nodes'].values():
             if self.protocol not in node['enabled_protocols']:
                 continue
 
@@ -241,22 +313,24 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
                               auth_password=chap_secret,
                               discovery_auth_method='CHAP',
                               discovery_auth_username=connector['initiator'],
-                              discovery_auth_password= chap_secret)
+                              discovery_auth_password=chap_secret)
+        # properties may contain chap secret so must be masked
         LOG.debug('leave: _get_single_iscsi_data:\n volume: %(vol)s\n '
                   'connector: %(conn)s\n lun_id: %(lun_id)s\n '
                   'properties: %(prop)s',
                   {'vol': volume.id, 'conn': connector, 'lun_id': lun_id,
-                   'prop': properties})
+                   'prop': strutils.mask_password(properties)})
         return properties
 
-    def _get_multi_iscsi_data(self, volume, connector, lun_id, properties):
+    def _get_multi_iscsi_data(self, volume, connector, lun_id, properties,
+                              backend_helper, node_state):
         LOG.debug('enter: _get_multi_iscsi_data: volume %(vol)s with '
                   'connector %(conn)s lun_id %(lun_id)s',
                   {'vol': volume.id, 'conn': connector,
                    'lun_id': lun_id})
 
         try:
-            resp = self._helpers.ssh.lsportip()
+            resp = backend_helper.ssh.lsportip()
         except Exception as ex:
             msg = (_('_get_multi_iscsi_data: Failed to '
                      'get port ip because of exception: '
@@ -267,7 +341,7 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         properties['target_iqns'] = []
         properties['target_portals'] = []
         properties['target_luns'] = []
-        for node in self._state['storage_nodes'].values():
+        for node in node_state['storage_nodes'].values():
             for ip_data in resp:
                 if ip_data['node_id'] != node['id']:
                     continue
@@ -291,13 +365,24 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
+        # properties may contain chap secret so must be masked
         LOG.debug('leave: _get_multi_iscsi_data:\n volume: %(vol)s\n '
                   'connector: %(conn)s\n lun_id: %(lun_id)s\n '
                   'properties: %(prop)s',
                   {'vol': volume.id, 'conn': connector, 'lun_id': lun_id,
-                   'prop': properties})
+                   'prop': strutils.mask_password(properties)})
 
         return properties
+
+    def terminate_connection_snapshot(self, snapshot, connector, **kwargs):
+        """Perform detach snapshot for backup snapshots."""
+        vol_attrs = ['id', 'name', 'display_name']
+        Volume = collections.namedtuple('Volume', vol_attrs)
+        volume = Volume(id=snapshot.id,
+                        name=snapshot.name,
+                        display_name='backup-snapshot')
+
+        return self.terminate_connection(volume, connector, **kwargs)
 
     def terminate_connection(self, volume, connector, **kwargs):
         """Cleanup after an iSCSI connection has been terminated."""
@@ -307,12 +392,11 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         # so that all the fake connectors to an SVC are serialized
         host = connector['host'] if 'host' in connector else ""
 
-        @utils.synchronized('storwize-host' + self._state['system_id'] + host,
-                            external=True)
-        def _do_terminate_connection_locked():
+        @coordination.synchronized('storwize-host-{system_id}-{host}')
+        def _do_terminate_connection_locked(system_id, host):
             return self._do_terminate_connection(volume, connector,
                                                  **kwargs)
-        return _do_terminate_connection_locked()
+        return _do_terminate_connection_locked(self._state['system_id'], host)
 
     def _do_terminate_connection(self, volume, connector, **kwargs):
         """Cleanup after an iSCSI connection has been terminated.
@@ -325,35 +409,23 @@ class StorwizeSVCISCSIDriver(storwize_common.StorwizeSVCCommonDriver):
         automatically by this driver when mappings are created)
         """
         LOG.debug('enter: terminate_connection: volume %(vol)s with connector'
-                  ' %(conn)s', {'vol': volume['id'], 'conn': connector})
-        vol_name = self._get_target_vol(volume)
-
-        info = {}
-        if 'host' in connector:
-            # get host according to iSCSI protocol
-            info = {'driver_volume_type': 'iscsi',
-                    'data': {}}
-
-            host_name = self._helpers.get_host_from_connector(connector)
-            if host_name is None:
-                msg = (_('terminate_connection: Failed to get host name from'
-                         ' connector.'))
-                LOG.error(msg)
-                raise exception.VolumeDriverException(message=msg)
-        else:
-            # See bug #1244257
-            host_name = None
+                  ' %(conn)s', {'vol': volume.id, 'conn': connector})
+        (info, host_name, vol_name, backend_helper,
+         node_state) = self._get_map_info_from_connector(volume, connector,
+                                                         iscsi=True)
+        if not backend_helper:
+            return info
 
         # Unmap volumes, if hostname is None, need to get value from vdiskmap
-        host_name = self._helpers.unmap_vol_from_host(vol_name, host_name)
+        host_name = backend_helper.unmap_vol_from_host(vol_name, host_name)
 
         # Host_name could be none
         if host_name:
-            resp = self._helpers.check_host_mapped_vols(host_name)
+            resp = backend_helper.check_host_mapped_vols(host_name)
             if not len(resp):
-                self._helpers.delete_host(host_name)
+                backend_helper.delete_host(host_name)
 
         LOG.debug('leave: terminate_connection: volume %(vol)s with '
-                  'connector %(conn)s', {'vol': volume['id'],
+                  'connector %(conn)s', {'vol': volume.id,
                                          'conn': connector})
         return info

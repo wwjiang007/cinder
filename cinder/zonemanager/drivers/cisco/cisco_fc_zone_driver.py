@@ -149,6 +149,11 @@ class CiscoFCZoneDriver(fc_zone_driver.FCZoneDriver):
             'cisco_zoning_policy')
         if zoning_policy_fab:
             zoning_policy = zoning_policy_fab
+        zone_name_prefix = self.fabric_configs[fabric].safe_get(
+            'cisco_zone_name_prefix')
+
+        if not zone_name_prefix:
+            zone_name_prefix = self.configuration.cisco_zone_name_prefix
 
         zoning_vsan = self.fabric_configs[fabric].safe_get('cisco_zoning_vsan')
 
@@ -184,7 +189,7 @@ class CiscoFCZoneDriver(fc_zone_driver.FCZoneDriver):
                                 target,
                                 host_name,
                                 storage_system,
-                                self.configuration.cisco_zone_name_prefix,
+                                zone_name_prefix,
                                 SUPPORTED_CHARS))
                         if (len(cfgmap_from_fabric) == 0 or (
                                 zone_name not in zone_names)):
@@ -208,10 +213,10 @@ class CiscoFCZoneDriver(fc_zone_driver.FCZoneDriver):
                             target,
                             host_name,
                             storage_system,
-                            self.configuration.cisco_zone_name_prefix,
+                            zone_name_prefix,
                             SUPPORTED_CHARS))
 
-                    # If zone exists, then perform a update_zone and add
+                    # If zone exists, then perform an update_zone and add
                     # new members into existing zone.
                     if zone_name and (zone_name in zone_names):
                         zone_members = filter(
@@ -296,6 +301,11 @@ class CiscoFCZoneDriver(fc_zone_driver.FCZoneDriver):
         zoning_policy = self.configuration.zoning_policy
         zoning_policy_fab = self.fabric_configs[fabric].safe_get(
             'cisco_zoning_policy')
+        zone_name_prefix = self.fabric_configs[fabric].safe_get(
+            'cisco_zone_name_prefix')
+
+        if not zone_name_prefix:
+            zone_name_prefix = self.configuration.cisco_zone_name_prefix
 
         if zoning_policy_fab:
             zoning_policy = zoning_policy_fab
@@ -338,7 +348,7 @@ class CiscoFCZoneDriver(fc_zone_driver.FCZoneDriver):
                                 target,
                                 host_name,
                                 storage_system,
-                                self.configuration.cisco_zone_name_prefix,
+                                zone_name_prefix,
                                 SUPPORTED_CHARS))
                         LOG.debug("Zone name to del: %s", zone_name)
                         if (len(zone_names) > 0 and (zone_name in zone_names)):
@@ -360,7 +370,7 @@ class CiscoFCZoneDriver(fc_zone_driver.FCZoneDriver):
                         target,
                         host_name,
                         storage_system,
-                        self.configuration.cisco_zone_name_prefix,
+                        zone_name_prefix,
                         SUPPORTED_CHARS)
                     # Check if there are zone members leftover after removal
                     if (zone_names and (zone_name in zone_names)):

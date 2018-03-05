@@ -1,7 +1,7 @@
 .. -*- rst -*-
 
-Consistency groups
-==================
+Consistency groups (DEPRECATED)
+===============================
 
 Consistency groups enable you to create snapshots at the exact same
 point in time from multiple volumes. For example, a database might
@@ -23,7 +23,6 @@ Lists consistency groups.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -32,8 +31,8 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
-   - sort_key: sort_key
-   - sort_dir: sort_dir
+   - all_tenants: all-tenants
+   - sort: sort
    - limit: limit
    - marker: marker
 
@@ -43,6 +42,7 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
+   - consistencygroups: consistencygroups
    - id: id
    - name: name
 
@@ -69,29 +69,31 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
-   - description: description_6
+   - consistencygroup: consistencygroup
+   - description: description_11
    - availability_zone: availability_zone
    - volume_types: volume_types_2
    - name: name_15
-
-Response
---------
-
-.. rest_parameters:: parameters.yaml
-
-   - status: status_1
-   - description: description_11
-   - availability_zone: availability_zone
-   - created_at: created_at
-   - volume_types: volume_types
-   - name: name_15
-   - id: consistencygroup_id_1
 
 Request Example
 ---------------
 
 .. literalinclude:: ./samples/consistency-group-create-request.json
    :language: javascript
+
+Response
+--------
+
+.. rest_parameters:: parameters.yaml
+
+   - consistencygroup: consistencygroup
+   - status: status_1
+   - description: description_6
+   - availability_zone: availability_zone
+   - created_at: created_at
+   - volume_types: volume_types
+   - name: name_15
+   - id: consistencygroup_id_1
 
 Response Example
 ----------------
@@ -107,7 +109,6 @@ Show a consistency group's details
 Shows details for a consistency group.
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
@@ -115,7 +116,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
-   - consistencygroup_id: consistencygroup_id
+   - consistencygroup_id: consistencygroup_id_2
 
 Response Parameters
 -------------------
@@ -123,7 +124,7 @@ Response Parameters
 .. rest_parameters:: parameters.yaml
 
    - status: status_1
-   - description: description
+   - description: description_6
    - availability_zone: availability_zone
    - created_at: created_at
    - volume_types: volume_types
@@ -152,14 +153,15 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
+   - project_id: project_id_path
+   - consistencygroup-from-src: consistencygroup-from-src
    - status: status_1
    - user_id: user_id
-   - description: description
+   - description: description_11
    - cgsnapshot_id: cgsnapshot_id
    - source_cgid: source_cgid
    - project_id: project_id
    - name: name
-   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -183,9 +185,10 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - force: force
    - project_id: project_id_path
-   - consistencygroup_id: consistencygroup_id
+   - consistencygroup_id: consistencygroup_id_2
+   - consistencygroup: consistencygroup
+   - force: force
 
 Request Example
 ---------------
@@ -203,7 +206,6 @@ Lists consistency groups with details.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -212,8 +214,8 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
-   - sort_key: sort_key
-   - sort_dir: sort_dir
+   - all_tenants: all-tenants
+   - sort: sort
    - limit: limit
    - marker: marker
 
@@ -223,8 +225,9 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
+   - consistencygroups: consistencygroups
    - status: status_1
-   - description: description
+   - description: description_6
    - availability_zone: availability_zone
    - created_at: created_at
    - volume_types: volume_types
@@ -253,12 +256,13 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
+   - project_id: project_id_path
+   - consistencygroup_id: consistencygroup_id_2
+   - consistencygroup: consistencygroup
    - remove_volumes: remove_volumes
-   - description: description
+   - description: description_11
    - add_volumes: add_volumes
    - name: name
-   - project_id: project_id_path
-   - consistencygroup_id: consistencygroup_id
 
 Request Example
 ---------------

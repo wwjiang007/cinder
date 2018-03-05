@@ -19,12 +19,15 @@ import itertools
 
 import ddt
 import glanceclient.exc
+from keystoneauth1.loading import session as ks_session
+from keystoneauth1 import session
 import mock
 from oslo_config import cfg
 
 from cinder import context
 from cinder import exception
 from cinder.image import glance
+from cinder import service_auth
 from cinder import test
 from cinder.tests.unit.glance import stubs as glance_stubs
 
@@ -108,7 +111,7 @@ class TestGlanceImageService(test.TestCase):
         self.mock_object(glance.time, 'sleep', return_value=None)
 
     def _create_image_service(self, client):
-        def _fake_create_glance_client(context, netloc, use_ssl, version):
+        def _fake_create_glance_client(context, netloc, use_ssl):
             return client
 
         self.mock_object(glance, '_create_glance_client',
@@ -251,19 +254,8 @@ class TestGlanceImageService(test.TestCase):
         self.assertEqual('test image', image_metas[0]['name'])
         self.assertEqual('private', image_metas[0]['visibility'])
 
-    def test_detail_v1(self):
-        """Confirm we send is_public = None as default when using Glance v1."""
-        self.override_config('glance_api_version', 1)
-        with mock.patch.object(self.service, '_client') as client_mock:
-            client_mock.return_value = []
-            result = self.service.detail(self.context)
-        self.assertListEqual([], result)
-        client_mock.call.assert_called_once_with(self.context, 'list',
-                                                 filters={'is_public': 'none'})
-
     def test_detail_v2(self):
         """Check we don't send is_public key by default with Glance v2."""
-        self.override_config('glance_api_version', 2)
         with mock.patch.object(self.service, '_client') as client_mock:
             client_mock.return_value = []
             result = self.service.detail(self.context)
@@ -381,10 +373,6 @@ class TestGlanceImageService(test.TestCase):
         new_image_data = self.service.show(self.context, image_id)
         self.assertEqual('new image name', new_image_data['name'])
 
-    def test_update_v2(self):
-        self.flags(glance_api_version=2)
-        self.test_update()
-
     def test_update_with_data(self):
         fixture = self._make_fixture(name='test image')
         image = self.service.create(self.context, fixture)
@@ -397,37 +385,21 @@ class TestGlanceImageService(test.TestCase):
         self.assertEqual(256, new_image_data['size'])
         self.assertEqual('new image name', new_image_data['name'])
 
-    def test_update_with_data_v2(self):
-        self.flags(glance_api_version=2)
-        self.test_update_with_data()
-
     @mock.patch.object(glance.GlanceImageService, '_translate_from_glance')
     @mock.patch.object(glance.GlanceImageService, 'show')
-    @ddt.data(1, 2)
-    def test_update_purge_props(self, ver, show, translate_from_glance):
-        self.flags(glance_api_version=ver)
-
+    def test_update_purge_props(self, show, translate_from_glance):
         image_id = mock.sentinel.image_id
         client = mock.Mock(call=mock.Mock())
         service = glance.GlanceImageService(client=client)
 
         image_meta = {'properties': {'k1': 'v1'}}
-        client.call.return_value = {'k1': 'v1'}
-        if ver == 2:
-            show.return_value = {'properties': {'k2': 'v2'}}
+        show.return_value = {'properties': {'k2': 'v2'}}
         translate_from_glance.return_value = image_meta.copy()
 
         ret = service.update(self.context, image_id, image_meta)
         self.assertDictEqual(image_meta, ret)
-        if ver == 2:
-            client.call.assert_called_once_with(
-                self.context, 'update', image_id, k1='v1', remove_props=['k2'])
-        else:
-            client.call.assert_called_once_with(
-                self.context, 'update', image_id, properties={'k1': 'v1'},
-                purge_props=True)
-        translate_from_glance.assert_called_once_with(self.context,
-                                                      {'k1': 'v1'})
+        client.call.assert_called_once_with(
+            self.context, 'update', image_id, k1='v1', remove_props=['k2'])
 
     def test_delete(self):
         fixture1 = self._make_fixture(name='test image 1')
@@ -619,7 +591,6 @@ class TestGlanceImageService(test.TestCase):
         image_id = self.service.create(self.context, fixture)['id']
         writer = NullWriter()
         self.flags(allowed_direct_url_schemes=['file'])
-        self.flags(glance_api_version=2)
         self.service.download(self.context, image_id, writer)
         mock_copyfileobj.assert_called_once_with(mock.ANY, writer)
 
@@ -634,7 +605,6 @@ class TestGlanceImageService(test.TestCase):
         image_id = self.service.create(self.context, fixture)['id']
         writer = NullWriter()
         self.flags(allowed_direct_url_schemes=['file'])
-        self.flags(glance_api_version=2)
         self.service.download(self.context, image_id, writer)
         self.assertIsNone(mock_copyfileobj.call_args)
 
@@ -709,7 +679,6 @@ class TestGlanceImageService(test.TestCase):
     @mock.patch('cinder.image.glance.CONF')
     def test_v2_passes_visibility_param(self, config):
 
-        config.glance_api_version = 2
         config.glance_num_retries = 0
 
         metadata = {
@@ -749,7 +718,6 @@ class TestGlanceImageService(test.TestCase):
     @mock.patch('cinder.image.glance.CONF')
     def test_extracting_v2_boot_properties(self, config):
 
-        config.glance_api_version = 2
         config.glance_num_retries = 0
 
         metadata = {
@@ -791,26 +759,6 @@ class TestGlanceImageService(test.TestCase):
         self.assertEqual(expected, actual)
 
     def test_translate_to_glance(self):
-        self.flags(glance_api_version=1)
-        client = glance_stubs.StubGlanceClient()
-        service = self._create_image_service(client)
-
-        metadata = {
-            'id': 1,
-            'size': 2,
-            'min_disk': 2,
-            'min_ram': 2,
-            'properties': {'kernel_id': 'foo',
-                           'ramdisk_id': 'bar',
-                           'x_billinginfo': '123'},
-        }
-
-        actual = service._translate_to_glance(metadata)
-        expected = metadata
-        self.assertEqual(expected, actual)
-
-    def test_translate_to_glance_v2(self):
-        self.flags(glance_api_version=2)
         client = glance_stubs.StubGlanceClient()
         service = self._create_image_service(client)
 
@@ -836,38 +784,6 @@ class TestGlanceImageService(test.TestCase):
         }
         self.assertEqual(expected, actual)
 
-
-class TestGlanceClientVersion(test.TestCase):
-    """Tests the version of the glance client generated."""
-
-    @mock.patch('cinder.image.glance.glanceclient.Client')
-    def test_glance_version_by_flag(self, _mockglanceclient):
-        """Test glance version set by flag is honoured."""
-        glance.GlanceClientWrapper('fake', 'fake_host', 9292)
-        self.assertEqual('2', _mockglanceclient.call_args[0][0])
-        self.flags(glance_api_version=1)
-        glance.GlanceClientWrapper('fake', 'fake_host', 9292)
-        self.assertEqual('1', _mockglanceclient.call_args[0][0])
-        CONF.reset()
-
-    @mock.patch('cinder.image.glance.glanceclient.Client')
-    def test_glance_version_by_arg(self, _mockglanceclient):
-        """Test glance version set by arg to GlanceClientWrapper"""
-        glance.GlanceClientWrapper('fake', 'fake_host', 9292, version=1)
-        self.assertEqual('1', _mockglanceclient.call_args[0][0])
-        glance.GlanceClientWrapper('fake', 'fake_host', 9292, version=2)
-        self.assertEqual('2', _mockglanceclient.call_args[0][0])
-
-    @mock.patch('cinder.image.glance.glanceclient.Client')
-    @mock.patch('cinder.image.glance.get_api_servers',
-                return_value=itertools.cycle([(False, 'localhost:9292')]))
-    def test_call_glance_version_by_arg(self, api_servers, _mockglanceclient):
-        """Test glance version set by arg to GlanceClientWrapper"""
-        glance_wrapper = glance.GlanceClientWrapper()
-        glance_wrapper.call('fake_context', 'method', version=2)
-
-        self.assertEqual('2', _mockglanceclient.call_args[0][0])
-
     @mock.patch('cinder.image.glance.glanceclient.Client')
     @mock.patch('cinder.image.glance.get_api_servers',
                 return_value=itertools.cycle([(False, 'localhost:9292')]))
@@ -879,8 +795,7 @@ class TestGlanceClientVersion(test.TestCase):
             side_effect=glanceclient.exc.HTTPOverLimit)
         self.mock_object(glance_wrapper, 'client', fake_client)
         self.assertRaises(exception.ImageLimitExceeded,
-                          glance_wrapper.call, 'fake_context', 'method',
-                          version=2)
+                          glance_wrapper.call, 'fake_context', 'method')
 
 
 def _create_failing_glance_client(info):
@@ -901,49 +816,104 @@ class TestGlanceImageServiceClient(test.TestCase):
         super(TestGlanceImageServiceClient, self).setUp()
         self.context = context.RequestContext('fake', 'fake', auth_token=True)
         self.mock_object(glance.time, 'sleep', return_value=None)
+        service_auth.reset_globals()
 
-    def test_create_glance_client(self):
-        self.flags(auth_strategy='keystone')
-        self.flags(glance_request_timeout=60)
-
-        class MyGlanceStubClient(object):
-            def __init__(inst, version, *args, **kwargs):
-                self.assertEqual('2', version)
-                self.assertEqual("http://fake_host:9292", args[0])
-                self.assertTrue(kwargs['token'])
-                self.assertEqual(60, kwargs['timeout'])
-
-        self.mock_object(glance.glanceclient, 'Client', MyGlanceStubClient)
-        client = glance._create_glance_client(self.context, 'fake_host:9292',
-                                              False)
-        self.assertIsInstance(client, MyGlanceStubClient)
-
-    def test_create_glance_client_auth_strategy_is_not_keystone(self):
-        self.flags(auth_strategy='noauth')
-        self.flags(glance_request_timeout=60)
-
-        class MyGlanceStubClient(object):
-            def __init__(inst, version, *args, **kwargs):
-                self.assertEqual('2', version)
-                self.assertEqual('http://fake_host:9292', args[0])
-                self.assertNotIn('token', kwargs)
-                self.assertEqual(60, kwargs['timeout'])
-
-        self.mock_object(glance.glanceclient, 'Client', MyGlanceStubClient)
-        client = glance._create_glance_client(self.context, 'fake_host:9292',
-                                              False)
-        self.assertIsInstance(client, MyGlanceStubClient)
-
-    def test_create_glance_client_glance_request_default_timeout(self):
+    @mock.patch('cinder.service_auth.get_auth_plugin')
+    @mock.patch.object(ks_session.Session, 'load_from_options')
+    def test_create_glance_client_with_protocol_http(
+            self, mock_load, mock_get_auth_plugin):
+        glance._SESSION = None
         self.flags(auth_strategy='keystone')
         self.flags(glance_request_timeout=None)
 
         class MyGlanceStubClient(object):
             def __init__(inst, version, *args, **kwargs):
-                self.assertEqual("2", version)
+                self.assertEqual('2', version)
                 self.assertEqual("http://fake_host:9292", args[0])
-                self.assertTrue(kwargs['token'])
                 self.assertNotIn('timeout', kwargs)
+                self.assertIn("session", kwargs)
+                self.assertIn("auth", kwargs)
+
+        config_options = {'insecure': False,
+                          'cacert': None,
+                          'timeout': None}
+
+        mock_get_auth_plugin.return_value = context._ContextAuthPlugin
+        mock_load.return_value = session.Session
+        self.mock_object(glance.glanceclient, 'Client', MyGlanceStubClient)
+        client = glance._create_glance_client(self.context, 'fake_host:9292',
+                                              False)
+        self.assertIsInstance(client, MyGlanceStubClient)
+        mock_get_auth_plugin.assert_called_once_with(self.context)
+        mock_load.assert_called_once_with(**config_options)
+
+    @mock.patch('cinder.service_auth.get_auth_plugin')
+    @mock.patch.object(ks_session.Session, 'load_from_options')
+    def test_create_glance_client_with_protocol_https(
+            self, mock_load, mock_get_auth_plugin):
+        glance._SESSION = None
+        self.flags(auth_strategy='keystone')
+        self.flags(glance_request_timeout=60)
+        self.flags(
+            glance_ca_certificates_file='/opt/stack/data/ca-bundle.pem')
+
+        class MyGlanceStubClient(object):
+            def __init__(inst, version, *args, **kwargs):
+                self.assertEqual('2', version)
+                self.assertEqual("https://fake_host:9292", args[0])
+                self.assertNotIn('timeout', kwargs)
+                self.assertIn("session", kwargs)
+                self.assertIn("auth", kwargs)
+
+        config_options = {'insecure': False,
+                          'cacert': '/opt/stack/data/ca-bundle.pem',
+                          'timeout': 60}
+
+        mock_get_auth_plugin.return_value = context._ContextAuthPlugin
+        mock_load.return_value = session.Session
+        self.mock_object(glance.glanceclient, 'Client', MyGlanceStubClient)
+        client = glance._create_glance_client(self.context, 'fake_host:9292',
+                                              True)
+        self.assertIsInstance(client, MyGlanceStubClient)
+        mock_get_auth_plugin.assert_called_once_with(self.context)
+        mock_load.assert_called_once_with(**config_options)
+
+    def test_create_glance_client_auth_strategy_noauth_with_protocol_https(
+            self):
+        self.flags(auth_strategy='noauth')
+        self.flags(glance_request_timeout=60)
+        self.flags(glance_api_insecure=False)
+        self.flags(
+            glance_ca_certificates_file='/opt/stack/data/ca-bundle.pem')
+
+        class MyGlanceStubClient(object):
+            def __init__(inst, version, *args, **kwargs):
+                self.assertEqual('2', version)
+                self.assertEqual('https://fake_host:9292', args[0])
+                self.assertEqual(60, kwargs['timeout'])
+                self.assertNotIn("session", kwargs)
+                self.assertNotIn("auth", kwargs)
+                self.assertEqual(
+                    '/opt/stack/data/ca-bundle.pem', kwargs['cacert'])
+                self.assertEqual(False, kwargs['insecure'])
+
+        self.mock_object(glance.glanceclient, 'Client', MyGlanceStubClient)
+        client = glance._create_glance_client(self.context, 'fake_host:9292',
+                                              True)
+        self.assertIsInstance(client, MyGlanceStubClient)
+
+    def test_create_glance_client_auth_strategy_noauth_with_protocol_http(
+            self):
+        self.flags(auth_strategy='noauth')
+        self.flags(glance_request_timeout=None)
+
+        class MyGlanceStubClient(object):
+            def __init__(inst, version, *args, **kwargs):
+                self.assertEqual('2', version)
+                self.assertEqual("http://fake_host:9292", args[0])
+                self.assertNotIn('timeout', kwargs)
+                self.assertNotIn("session", kwargs)
+                self.assertNotIn("auth", kwargs)
 
         self.mock_object(glance.glanceclient, 'Client', MyGlanceStubClient)
         client = glance._create_glance_client(self.context, 'fake_host:9292',

@@ -136,6 +136,7 @@ class PerformanceCmodeLibraryTestCase(test.TestCase):
         mock_get_base_counter_name.assert_called_once_with(
             'system:constituent', 'avg_processor_busy')
 
+    @test.testtools.skip("launchpad bug 1715915")
     def test_update_performance_cache(self):
 
         self.perf_library.performance_counters = {
@@ -175,6 +176,7 @@ class PerformanceCmodeLibraryTestCase(test.TestCase):
         mock_get_node_utilization.assert_has_calls([
             mock.call(12, 21, 'node1'), mock.call(22, 31, 'node2')])
 
+    @test.testtools.skip("launchpad bug #1715915")
     def test_update_performance_cache_first_pass(self):
 
         mock_get_aggregates_for_pools = self.mock_object(
@@ -290,7 +292,8 @@ class PerformanceCmodeLibraryTestCase(test.TestCase):
             self.fake_volumes)
         mock_get_nodes_for_aggregates.assert_called_once_with(self.fake_aggrs)
         mock_get_node_utilization_counters.assert_has_calls([
-            mock.call('node1'), mock.call('node2')])
+            mock.call('node1'), mock.call('node2')],
+            any_order=True)
         self.assertFalse(mock_get_node_utilization.called)
 
     def test_update_performance_cache_not_supported(self):

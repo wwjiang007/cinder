@@ -32,6 +32,7 @@ from cinder import objects
 from cinder.scheduler import filters
 from cinder import utils
 from cinder.volume import utils as vol_utils
+from cinder.volume import volume_types
 
 
 # FIXME: This file should be renamed to backend_manager, we should also rename
@@ -92,6 +93,12 @@ class BackendState(object):
     """Mutable and immutable information tracked for a volume backend."""
 
     def __init__(self, host, cluster_name, capabilities=None, service=None):
+        # NOTE(geguileo): We have a circular dependency between BackendState
+        # and PoolState and we resolve it with an instance attribute instead
+        # of a class attribute that we would assign after the PoolState
+        # declaration because this way we avoid splitting the code.
+        self.pool_state_cls = PoolState
+
         self.capabilities = None
         self.service = None
         self.host = host
@@ -220,8 +227,10 @@ class BackendState(object):
                 cur_pool = self.pools.get(pool_name, None)
                 if not cur_pool:
                     # Add new pool
-                    cur_pool = PoolState(self.host, self.cluster_name,
-                                         pool_cap, pool_name)
+                    cur_pool = self.pool_state_cls(self.host,
+                                                   self.cluster_name,
+                                                   pool_cap,
+                                                   pool_name)
                     self.pools[pool_name] = cur_pool
                 cur_pool.update_from_volume_capability(pool_cap, service)
 
@@ -238,8 +247,8 @@ class BackendState(object):
 
             if len(self.pools) == 0:
                 # No pool was there
-                single_pool = PoolState(self.host, self.cluster_name,
-                                        capability, pool_name)
+                single_pool = self.pool_state_cls(self.host, self.cluster_name,
+                                                  capability, pool_name)
                 self._append_backend_info(capability)
                 self.pools[pool_name] = single_pool
             else:
@@ -247,8 +256,10 @@ class BackendState(object):
                 try:
                     single_pool = self.pools[pool_name]
                 except KeyError:
-                    single_pool = PoolState(self.host, self.cluster_name,
-                                            capability, pool_name)
+                    single_pool = self.pool_state_cls(self.host,
+                                                      self.cluster_name,
+                                                      capability,
+                                                      pool_name)
                     self._append_backend_info(capability)
                     self.pools[pool_name] = single_pool
 
@@ -287,7 +298,7 @@ class BackendState(object):
         self.storage_protocol = capability.get('storage_protocol', None)
         self.updated = capability['timestamp']
 
-    def consume_from_volume(self, volume):
+    def consume_from_volume(self, volume, update_time=True):
         """Incrementally update host state from a volume."""
         volume_gb = volume['size']
         self.allocated_capacity_gb += volume_gb
@@ -300,7 +311,9 @@ class BackendState(object):
             pass
         else:
             self.free_capacity_gb -= volume_gb
-        self.updated = timeutils.utcnow()
+        if update_time:
+            self.updated = timeutils.utcnow()
+        LOG.debug("Consumed %s GB from backend: %s", volume['size'], self)
 
     def __repr__(self):
         # FIXME(zhiteng) backend level free_capacity_gb isn't as
@@ -308,8 +321,27 @@ class BackendState(object):
         # come up with better representation of HostState.
         grouping = 'cluster' if self.cluster_name else 'host'
         grouping_name = self.backend_id
-        return ("%s '%s': free_capacity_gb: %s, pools: %s" %
-                (grouping, grouping_name, self.free_capacity_gb, self.pools))
+        return ("%(grouping)s '%(grouping_name)s':"
+                "free_capacity_gb: %(free_capacity_gb)s, "
+                "total_capacity_gb: %(total_capacity_gb)s,"
+                "allocated_capacity_gb: %(allocated_capacity_gb)s, "
+                "max_over_subscription_ratio: %(mosr)s,"
+                "reserved_percentage: %(reserved_percentage)s, "
+                "provisioned_capacity_gb: %(provisioned_capacity_gb)s,"
+                "thin_provisioning_support: %(thin_provisioning_support)s, "
+                "thick_provisioning_support: %(thick)s,"
+                "pools: %(pools)s,"
+                "updated at: %(updated)s" %
+                {'grouping': grouping, 'grouping_name': grouping_name,
+                 'free_capacity_gb': self.free_capacity_gb,
+                 'total_capacity_gb': self.total_capacity_gb,
+                 'allocated_capacity_gb': self.allocated_capacity_gb,
+                 'mosr': self.max_over_subscription_ratio,
+                 'reserved_percentage': self.reserved_percentage,
+                 'provisioned_capacity_gb': self.provisioned_capacity_gb,
+                 'thin_provisioning_support': self.thin_provisioning_support,
+                 'thick': self.thick_provisioning_support,
+                 'pools': self.pools, 'updated': self.updated})
 
 
 class PoolState(BackendState):
@@ -323,6 +355,7 @@ class PoolState(BackendState):
 
     def update_from_volume_capability(self, capability, service=None):
         """Update information about a pool from its volume_node info."""
+        LOG.debug("Updating capabilities for %s: %s", self.host, capability)
         self.update_capabilities(capability, service)
         if capability:
             if self.updated and self.updated > capability['timestamp']:
@@ -343,13 +376,15 @@ class PoolState(BackendState):
             # provisioned_capacity_gb if it is not set.
             self.provisioned_capacity_gb = capability.get(
                 'provisioned_capacity_gb', self.allocated_capacity_gb)
-            self.max_over_subscription_ratio = capability.get(
-                'max_over_subscription_ratio',
-                CONF.max_over_subscription_ratio)
             self.thin_provisioning_support = capability.get(
                 'thin_provisioning_support', False)
             self.thick_provisioning_support = capability.get(
                 'thick_provisioning_support', False)
+
+            self.max_over_subscription_ratio = (
+                utils.calculate_max_over_subscription_ratio(
+                    capability, CONF.max_over_subscription_ratio))
+
             self.multiattach = capability.get('multiattach', False)
 
     def update_pools(self, capability):
@@ -603,6 +638,14 @@ class HostManager(object):
                          "scheduler cache.", {'backend': backend_key})
             del self.backend_state_map[backend_key]
 
+    def revert_volume_consumed_capacity(self, pool_name, size):
+        for backend_key, state in self.backend_state_map.items():
+            for key in state.pools:
+                pool_state = state.pools[key]
+                if pool_name == '#'.join([backend_key, pool_state.pool_name]):
+                    pool_state.consume_from_volume({'size': -size},
+                                                   update_time=False)
+
     def get_all_backend_states(self, context):
         """Returns a dict of all the backends the HostManager knows about.
 
@@ -627,15 +670,33 @@ class HostManager(object):
 
         return all_pools.values()
 
+    def _filter_pools_by_volume_type(self, context, volume_type, pools):
+        """Return the pools filtered by volume type specs"""
+
+        # wrap filter properties only with volume_type
+        filter_properties = {
+            'context': context,
+            'volume_type': volume_type,
+            'resource_type': volume_type,
+            'qos_specs': volume_type.get('qos_specs'),
+        }
+
+        filtered = self.get_filtered_backends(pools.values(),
+                                              filter_properties)
+
+        # filter the pools by value
+        return {k: v for k, v in pools.items() if v in filtered}
+
     def get_pools(self, context, filters=None):
         """Returns a dict of all pools on all hosts HostManager knows about."""
 
         self._update_backend_state_map(context)
 
-        all_pools = []
-        name = None
+        all_pools = {}
+        name = volume_type = None
         if filters:
             name = filters.pop('name', None)
+            volume_type = filters.pop('volume_type', None)
 
         for backend_key, state in self.backend_state_map.items():
             for key in state.pools:
@@ -658,9 +719,20 @@ class HostManager(object):
                             break
 
                 if not filtered:
-                    all_pools.append(new_pool)
+                    all_pools[pool_key] = pool
 
-        return all_pools
+        # filter pools by volume type
+        if volume_type:
+            volume_type = volume_types.get_by_name_or_id(
+                context, volume_type)
+            all_pools = (
+                self._filter_pools_by_volume_type(context,
+                                                  volume_type,
+                                                  all_pools))
+
+        # encapsulate pools in format:{name: XXX, capabilities: XXX}
+        return [dict(name=key, capabilities=value.capabilities)
+                for key, value in all_pools.items()]
 
     def get_usage_and_notify(self, capa_new, updated_pools, host, timestamp):
         context = cinder_context.get_admin_context()
@@ -707,7 +779,8 @@ class HostManager(object):
         allocated = pool["allocated_capacity_gb"]
         provisioned = pool["provisioned_capacity_gb"]
         reserved = pool["reserved_percentage"]
-        ratio = pool["max_over_subscription_ratio"]
+        ratio = utils.calculate_max_over_subscription_ratio(
+            pool, CONF.max_over_subscription_ratio)
         support = pool["thin_provisioning_support"]
 
         virtual_free = utils.calculate_virtual_free_capacity(

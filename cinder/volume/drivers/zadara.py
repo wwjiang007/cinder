@@ -18,15 +18,17 @@ Volume driver for Zadara Virtual Private Storage Array (VPSA).
 This driver requires VPSA with API version 15.07 or higher.
 """
 
-from lxml import etree
+from defusedxml import lxml as etree
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_utils import strutils
 import requests
 import six
 
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
+from cinder.volume import configuration
 from cinder.volume import driver
 
 LOG = logging.getLogger(__name__)
@@ -69,7 +71,7 @@ zadara_opts = [
                 help="VPSA - Attach snapshot policy for volumes")]
 
 CONF = cfg.CONF
-CONF.register_opts(zadara_opts)
+CONF.register_opts(zadara_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 class ZadaraVPSAConnection(object):
@@ -644,7 +646,7 @@ class ZadaraVPSAISCSIDriver(driver.ISCSIDriver):
         properties['auth_password'] = ctrl['chap_passwd']
 
         LOG.debug('Attach properties: %(properties)s',
-                  {'properties': properties})
+                  {'properties': strutils.mask_password(properties)})
         return {'driver_volume_type':
                 ('iser' if (self.configuration.safe_get('zadara_use_iser'))
                  else 'iscsi'), 'data': properties}

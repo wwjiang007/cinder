@@ -73,6 +73,7 @@ class TestNexentaNfsDriver(test.TestCase):
         self.cfg.nexenta_dataset_dedup = 'off'
         self.cfg.nfs_mount_point_base = '/mnt/test'
         self.cfg.nfs_mount_attempts = 3
+        self.cfg.nfs_mount_options = None
         self.cfg.nas_mount_options = 'vers=4'
         self.cfg.reserved_percentage = 20
         self.cfg.nexenta_use_https = False
@@ -83,8 +84,8 @@ class TestNexentaNfsDriver(test.TestCase):
         self.cfg.nas_host = '1.1.1.1'
         self.cfg.nas_share_path = 'pool/share'
         self.nef_mock = mock.Mock()
-        self.stubs.Set(jsonrpc, 'NexentaJSONProxy',
-                       lambda *_, **__: self.nef_mock)
+        self.mock_object(jsonrpc, 'NexentaJSONProxy',
+                         lambda *_, **__: self.nef_mock)
         self.drv = nfs.NexentaNfsDriver(configuration=self.cfg)
         self.drv.db = db
         self.drv.do_setup(self.ctxt)

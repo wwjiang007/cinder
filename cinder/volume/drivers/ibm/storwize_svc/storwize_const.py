@@ -32,16 +32,26 @@ REP_CAP_DEVS = (DEV_MODEL_SVC, DEV_MODEL_STORWIZE, DEV_MODEL_STORWIZE_V5000,
 # constants used for replication
 GLOBAL = 'global'
 METRO = 'metro'
-VALID_REP_TYPES = (GLOBAL, METRO)
+GMCV = 'gmcv'
+GMCV_MULTI = 'multi'
+VALID_REP_TYPES = (GLOBAL, METRO, GMCV)
 FAILBACK_VALUE = 'default'
 
 DEFAULT_RC_TIMEOUT = 3600 * 24 * 7
 DEFAULT_RC_INTERVAL = 5
 
+DEFAULT_RCCG_TIMEOUT = 60 * 30
+DEFAULT_RCCG_INTERVAL = 2
+
 REPLICA_AUX_VOL_PREFIX = 'aux_'
+REPLICA_CHG_VOL_PREFIX = 'chg_'
+
+RCCG_PREFIX = 'rccg-'
+HYPERCG_PREFIX = 'hycg-'
 
 # remote mirror copy status
 REP_CONSIS_SYNC = 'consistent_synchronized'
+REP_CONSIS_COPYING = 'consistent_copying'
 REP_CONSIS_STOP = 'consistent_stopped'
 REP_SYNC = 'synchronized'
 REP_IDL = 'idling'

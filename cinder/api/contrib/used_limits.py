@@ -13,12 +13,12 @@
 #    under the License.
 
 from cinder.api import extensions
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
+from cinder.policies import limits as policy
 from cinder import quota
 
 QUOTAS = quota.QUOTAS
-
-authorize = extensions.soft_extension_authorizer('limits', 'used_limits')
 
 
 class UsedLimitsController(wsgi.Controller):
@@ -26,8 +26,20 @@ class UsedLimitsController(wsgi.Controller):
     @wsgi.extends
     def index(self, req, resp_obj):
         context = req.environ['cinder.context']
-        if authorize(context):
-            quotas = QUOTAS.get_project_quotas(context, context.project_id,
+        if context.authorize(
+                policy.EXTEND_LIMIT_ATTRIBUTE_POLICY, fatal=False):
+            params = req.params.copy()
+            req_version = req.api_version_request
+
+            # TODO(wangxiyuan): Support "tenant_id" here to keep the backwards
+            # compatibility. Remove it once we drop all support for "tenant".
+            if (req_version.matches(None, mv.GROUP_REPLICATION) or
+                    not context.is_admin):
+                params.pop('project_id', None)
+                params.pop('tenant_id', None)
+            project_id = params.get(
+                'project_id', params.get('tenant_id', context.project_id))
+            quotas = QUOTAS.get_project_quotas(context, project_id,
                                                usages=True)
 
             quota_map = {

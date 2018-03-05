@@ -22,7 +22,7 @@ from oslo_utils import timeutils
 import six
 import webob
 
-import cinder.api.common as common
+from cinder.api import microversions as mv
 from cinder.api.v3 import group_specs as v3_group_specs
 from cinder.api.v3 import group_types as v3_group_types
 from cinder.api.v3.views import group_types as views_types
@@ -33,7 +33,7 @@ from cinder.tests.unit.api import fakes
 from cinder.tests.unit import fake_constants as fake
 from cinder.volume import group_types
 
-GROUP_TYPE_MICRO_VERSION = '3.11'
+IN_USE_GROUP_TYPE = fake.GROUP_TYPE3_ID
 
 
 def stub_group_type(id):
@@ -88,6 +88,11 @@ def return_group_types_get_default_not_found():
     return {}
 
 
+def return_group_types_with_groups_destroy(context, id):
+    if id == IN_USE_GROUP_TYPE:
+        raise exception.GroupTypeInUse(group_type_id=id)
+
+
 @ddt.ddt
 class GroupTypesApiTest(test.TestCase):
 
@@ -126,15 +131,62 @@ class GroupTypesApiTest(test.TestCase):
             mock_create, mock_get):
         boolean_is_public = strutils.bool_from_string(is_public)
         req = fakes.HTTPRequest.blank('/v3/%s/types' % fake.PROJECT_ID,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
 
         body = {"group_type": {"is_public": is_public, "name": "group_type1",
                                "description": None}}
-        self.controller.create(req, body)
+        self.controller.create(req, body=body)
         mock_create.assert_called_once_with(
             self.ctxt, 'group_type1', {},
             boolean_is_public, description=None)
+
+    @mock.patch.object(group_types, "get_group_type_by_name")
+    @mock.patch.object(group_types, "create")
+    @mock.patch("cinder.api.openstack.wsgi.Request.cache_resource")
+    @mock.patch("cinder.api.views.types.ViewBuilder.show")
+    def test_create_group_type_with_group_specs_null(
+            self, mock_show, mock_cache_resource,
+            mock_create, mock_get):
+
+        req = fakes.HTTPRequest.blank('/v3/%s/types' % fake.PROJECT_ID,
+                                      version=mv.GROUP_TYPE)
+        req.environ['cinder.context'] = self.ctxt
+
+        body = {"group_type": {"name": "group_type1",
+                               "group_specs": None}}
+        self.controller.create(req, body=body)
+        mock_create.assert_called_once_with(
+            self.ctxt, 'group_type1', None, True, description=None)
+
+    @ddt.data(fake.GROUP_TYPE_ID, IN_USE_GROUP_TYPE)
+    def test_group_type_destroy(self, grp_type_id):
+        grp_type = {'id': grp_type_id, 'name': 'grp' + grp_type_id}
+        self.mock_object(group_types, 'get_group_type',
+                         return_value=grp_type)
+        self.mock_object(group_types, 'destroy',
+                         return_group_types_with_groups_destroy)
+        mock_notify_info = self.mock_object(
+            v3_group_types.GroupTypesController,
+            '_notify_group_type_info')
+        mock_notify_error = self.mock_object(
+            v3_group_types.GroupTypesController,
+            '_notify_group_type_error')
+        req = fakes.HTTPRequest.blank('/v3/%s/group_types/%s' % (
+            fake.PROJECT_ID, grp_type_id),
+            version=mv.GROUP_TYPE)
+        req.environ['cinder.context'] = self.ctxt
+        if grp_type_id == IN_USE_GROUP_TYPE:
+            self.assertRaises(webob.exc.HTTPBadRequest,
+                              self.controller.delete,
+                              req, grp_type_id)
+            mock_notify_error.assert_called_once_with(
+                self.ctxt, 'group_type.delete', mock.ANY,
+                group_type=grp_type)
+        else:
+            self.controller.delete(req, grp_type_id)
+            mock_notify_info.assert_called_once_with(
+                self.ctxt, 'group_type.delete', grp_type)
 
     def test_group_types_index(self):
         self.mock_object(group_types, 'get_all_group_types',
@@ -142,7 +194,7 @@ class GroupTypesApiTest(test.TestCase):
 
         req = fakes.HTTPRequest.blank('/v3/%s/group_types' % fake.PROJECT_ID,
                                       use_admin_context=True,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         res_dict = self.controller.index(req)
 
         self.assertEqual(3, len(res_dict['group_types']))
@@ -158,7 +210,7 @@ class GroupTypesApiTest(test.TestCase):
                          return_empty_group_types_get_all_types)
 
         req = fakes.HTTPRequest.blank('/v3/%s/group_types' % fake.PROJECT_ID,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         res_dict = self.controller.index(req)
 
         self.assertEqual(0, len(res_dict['group_types']))
@@ -166,7 +218,7 @@ class GroupTypesApiTest(test.TestCase):
     def test_group_types_index_with_limit(self):
         req = fakes.HTTPRequest.blank('/v3/%s/group_types?limit=1' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
 
@@ -181,7 +233,7 @@ class GroupTypesApiTest(test.TestCase):
     def test_group_types_index_with_offset(self):
         req = fakes.HTTPRequest.blank(
             '/v3/%s/group_types?offset=1' % fake.PROJECT_ID,
-            version=GROUP_TYPE_MICRO_VERSION)
+            version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
 
@@ -189,14 +241,14 @@ class GroupTypesApiTest(test.TestCase):
 
     def test_group_types_index_with_offset_out_of_range(self):
         url = '/v3/%s/group_types?offset=424366766556787' % fake.PROJECT_ID
-        req = fakes.HTTPRequest.blank(url, version=GROUP_TYPE_MICRO_VERSION)
+        req = fakes.HTTPRequest.blank(url, version=mv.GROUP_TYPE)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.index, req)
 
     def test_group_types_index_with_limit_and_offset(self):
         req = fakes.HTTPRequest.blank(
             '/v3/%s/group_types?limit=2&offset=1' % fake.PROJECT_ID,
-            version=GROUP_TYPE_MICRO_VERSION)
+            version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
 
@@ -209,7 +261,7 @@ class GroupTypesApiTest(test.TestCase):
                                       '&marker=%s' %
                                       (fake.PROJECT_ID,
                                        self.type_id2),
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
 
@@ -219,7 +271,7 @@ class GroupTypesApiTest(test.TestCase):
     def test_group_types_index_with_valid_filter(self):
         req = fakes.HTTPRequest.blank(
             '/v3/%s/group_types?is_public=True' % fake.PROJECT_ID,
-            version=GROUP_TYPE_MICRO_VERSION)
+            version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
 
@@ -232,7 +284,7 @@ class GroupTypesApiTest(test.TestCase):
     def test_group_types_index_with_invalid_filter(self):
         req = fakes.HTTPRequest.blank(
             '/v3/%s/group_types?id=%s' % (fake.PROJECT_ID, self.type_id1),
-            version=GROUP_TYPE_MICRO_VERSION)
+            version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
 
@@ -241,7 +293,7 @@ class GroupTypesApiTest(test.TestCase):
     def test_group_types_index_with_sort_keys(self):
         req = fakes.HTTPRequest.blank('/v3/%s/group_types?sort=id' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
         expect_result = [self.type_id0, self.type_id1, self.type_id2,
@@ -257,7 +309,7 @@ class GroupTypesApiTest(test.TestCase):
     def test_group_types_index_with_sort_and_limit(self):
         req = fakes.HTTPRequest.blank(
             '/v3/%s/group_types?sort=id&limit=2' % fake.PROJECT_ID,
-            version=GROUP_TYPE_MICRO_VERSION)
+            version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
         expect_result = [self.type_id0, self.type_id1, self.type_id2,
@@ -271,7 +323,7 @@ class GroupTypesApiTest(test.TestCase):
     def test_group_types_index_with_sort_keys_and_sort_dirs(self):
         req = fakes.HTTPRequest.blank(
             '/v3/%s/group_types?sort=id:asc' % fake.PROJECT_ID,
-            version=GROUP_TYPE_MICRO_VERSION)
+            version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
         res = self.controller.index(req)
         expect_result = [self.type_id0, self.type_id1, self.type_id2,
@@ -293,17 +345,54 @@ class GroupTypesApiTest(test.TestCase):
     def test_update_group_type_with_valid_is_public_in_string(
             self, is_public, mock_show, mock_cache_resource,
             mock_update, mock_get):
-        boolean_is_public = strutils.bool_from_string(is_public)
         type_id = six.text_type(uuid.uuid4())
         req = fakes.HTTPRequest.blank(
             '/v3/%s/types/%s' % (fake.PROJECT_ID, type_id),
-            version=GROUP_TYPE_MICRO_VERSION)
+            version=mv.GROUP_TYPE)
         req.environ['cinder.context'] = self.ctxt
+        boolean_is_public = strutils.bool_from_string(is_public)
         body = {"group_type": {"is_public": is_public, "name": "group_type1"}}
-        self.controller.update(req, type_id, body)
+        self.controller.update(req, type_id, body=body)
         mock_update.assert_called_once_with(
             self.ctxt, type_id, 'group_type1', None,
             is_public=boolean_is_public)
+
+    def test_update_group_type_with_name_null(self):
+        req = fakes.HTTPRequest.blank(
+            '/v3/%s/types/%s' % (fake.PROJECT_ID, fake.GROUP_TYPE_ID),
+            version=mv.GROUP_TYPE)
+        req.environ['cinder.context'] = self.ctxt
+        body = {"group_type": {"name": None}}
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
+                          req, fake.GROUP_TYPE_ID, body=body)
+
+    @ddt.data({"group_type": {"name": None,
+                              "description": "description"}},
+              {"group_type": {"name": "test",
+                              "is_public": True}},
+              {"group_type": {"description": None,
+                              "is_public": True}})
+    def test_update_group_type(self, body):
+        req = fakes.HTTPRequest.blank(
+            '/v3/%s/types/%s' % (fake.PROJECT_ID, fake.GROUP_TYPE_ID),
+            version=mv.GROUP_TYPE)
+
+        group_type_1 = group_types.create(self.ctxt, 'group_type')
+
+        req.environ['cinder.context'] = self.ctxt
+        res = self.controller.update(req, group_type_1.get('id'), body=body)
+
+        expected_name = body['group_type'].get('name')
+        if expected_name is not None:
+            self.assertEqual(expected_name, res['group_type']['name'])
+
+        expected_is_public = body['group_type'].get('is_public')
+        if expected_is_public is not None:
+            self.assertEqual(expected_is_public,
+                             res['group_type']['is_public'])
+
+        self.assertEqual(body['group_type'].get('description'),
+                         res['group_type']['description'])
 
     def test_group_types_show(self):
         self.mock_object(group_types, 'get_group_type',
@@ -312,7 +401,7 @@ class GroupTypesApiTest(test.TestCase):
         type_id = six.text_type(uuid.uuid4())
         req = fakes.HTTPRequest.blank('/v3/%s/group_types/' % fake.PROJECT_ID
                                       + type_id,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         res_dict = self.controller.show(req, type_id)
 
         self.assertEqual(1, len(res_dict))
@@ -324,10 +413,10 @@ class GroupTypesApiTest(test.TestCase):
         self.mock_object(group_types, 'get_group_type',
                          return_group_types_get_group_type)
 
-        type_id = six.text_type(uuid.uuid4())
-        req = fakes.HTTPRequest.blank('/v3/%s/group_types/' % fake.PROJECT_ID
-                                      + type_id,
-                                      version='3.5')
+        type_id = uuid.uuid4()
+        req = fakes.HTTPRequest.blank(
+            '/v3/%s/group_types/%s' % (fake.PROJECT_ID, type_id),
+            version=mv.get_prior_version(mv.GROUP_TYPE))
 
         self.assertRaises(exception.VersionNotFoundForAPIMethod,
                           self.controller.show, req, type_id)
@@ -339,7 +428,7 @@ class GroupTypesApiTest(test.TestCase):
         req = fakes.HTTPRequest.blank('/v3/%s/group_types/%s' %
                                       (fake.PROJECT_ID,
                                        fake.WILL_NOT_BE_FOUND_ID),
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         self.assertRaises(webob.exc.HTTPNotFound, self.controller.show,
                           req, fake.WILL_NOT_BE_FOUND_ID)
 
@@ -348,7 +437,7 @@ class GroupTypesApiTest(test.TestCase):
                          return_group_types_get_default)
         req = fakes.HTTPRequest.blank('/v3/%s/group_types/default' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         req.method = 'GET'
         res_dict = self.controller.show(req, 'default')
         self.assertEqual(1, len(res_dict))
@@ -361,7 +450,7 @@ class GroupTypesApiTest(test.TestCase):
                          return_group_types_get_default_not_found)
         req = fakes.HTTPRequest.blank('/v3/%s/group_types/default' %
                                       fake.PROJECT_ID,
-                                      version=GROUP_TYPE_MICRO_VERSION)
+                                      version=mv.GROUP_TYPE)
         req.method = 'GET'
 
         self.assertRaises(webob.exc.HTTPNotFound,
@@ -384,7 +473,7 @@ class GroupTypesApiTest(test.TestCase):
         )
 
         request = fakes.HTTPRequest.blank("/v3",
-                                          version=GROUP_TYPE_MICRO_VERSION)
+                                          version=mv.GROUP_TYPE)
         output = view_builder.show(request, raw_group_type)
 
         self.assertIn('group_type', output)
@@ -413,7 +502,7 @@ class GroupTypesApiTest(test.TestCase):
         )
 
         request = fakes.HTTPRequest.blank("/v3", use_admin_context=True,
-                                          version=GROUP_TYPE_MICRO_VERSION)
+                                          version=mv.GROUP_TYPE)
         output = view_builder.show(request, raw_group_type)
 
         self.assertIn('group_type', output)
@@ -427,8 +516,8 @@ class GroupTypesApiTest(test.TestCase):
         self.assertDictEqual(expected_group_type, output['group_type'])
 
     def __test_view_builder_show_qos_specs_id_policy(self):
-        with mock.patch.object(common,
-                               'validate_policy',
+        with mock.patch.object(context.RequestContext,
+                               'authorize',
                                side_effect=[False, True]):
             view_builder = views_types.ViewBuilder()
             now = timeutils.utcnow().isoformat()
@@ -444,7 +533,7 @@ class GroupTypesApiTest(test.TestCase):
             )
 
             request = fakes.HTTPRequest.blank("/v3",
-                                              version=GROUP_TYPE_MICRO_VERSION)
+                                              version=mv.GROUP_TYPE)
             output = view_builder.show(request, raw_group_type)
 
             self.assertIn('group_type', output)
@@ -457,8 +546,8 @@ class GroupTypesApiTest(test.TestCase):
             self.assertDictEqual(expected_group_type, output['group_type'])
 
     def test_view_builder_show_group_specs_policy(self):
-        with mock.patch.object(common,
-                               'validate_policy',
+        with mock.patch.object(context.RequestContext,
+                               'authorize',
                                side_effect=[True, False]):
             view_builder = views_types.ViewBuilder()
             now = timeutils.utcnow().isoformat()
@@ -475,7 +564,7 @@ class GroupTypesApiTest(test.TestCase):
             )
 
             request = fakes.HTTPRequest.blank("/v3",
-                                              version=GROUP_TYPE_MICRO_VERSION)
+                                              version=mv.GROUP_TYPE)
             output = view_builder.show(request, raw_group_type)
 
             self.assertIn('group_type', output)
@@ -489,9 +578,9 @@ class GroupTypesApiTest(test.TestCase):
             self.assertDictEqual(expected_group_type, output['group_type'])
 
     def test_view_builder_show_pass_all_policy(self):
-        with mock.patch.object(common,
-                               'validate_policy',
-                               side_effect=[True, True]):
+        with mock.patch.object(context.RequestContext,
+                               'authorize',
+                               side_effect=[True, False]):
             view_builder = views_types.ViewBuilder()
             now = timeutils.utcnow().isoformat()
             raw_group_type = dict(
@@ -507,7 +596,7 @@ class GroupTypesApiTest(test.TestCase):
             )
 
             request = fakes.HTTPRequest.blank("/v3",
-                                              version=GROUP_TYPE_MICRO_VERSION)
+                                              version=mv.GROUP_TYPE)
             output = view_builder.show(request, raw_group_type)
 
             self.assertIn('group_type', output)
@@ -541,7 +630,7 @@ class GroupTypesApiTest(test.TestCase):
             )
 
         request = fakes.HTTPRequest.blank("/v3",
-                                          version=GROUP_TYPE_MICRO_VERSION)
+                                          version=mv.GROUP_TYPE)
         output = view_builder.index(request, raw_group_types)
 
         self.assertIn('group_types', output)
@@ -576,7 +665,7 @@ class GroupTypesApiTest(test.TestCase):
             )
 
         request = fakes.HTTPRequest.blank("/v3", use_admin_context=True,
-                                          version=GROUP_TYPE_MICRO_VERSION)
+                                          version=mv.GROUP_TYPE)
         output = view_builder.index(request, raw_group_types)
 
         self.assertIn('group_types', output)
@@ -590,16 +679,3 @@ class GroupTypesApiTest(test.TestCase):
             )
             self.assertDictEqual(expected_group_type,
                                  output['group_types'][i])
-
-    def test_check_policy(self):
-        self.controller._check_policy(self.ctxt)
-
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller._check_policy,
-                          self.user_ctxt)
-
-        self.specs_controller._check_policy(self.ctxt)
-
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.specs_controller._check_policy,
-                          self.user_ctxt)

@@ -123,11 +123,16 @@ class FilterScheduler(driver.Scheduler):
             if backend_id == backend:
                 return weighed_backend.obj
 
-        volume_id = request_spec.get('volume_id', '??volume_id missing??')
-        raise exception.NoValidBackend(reason=_('Cannot place volume %(id)s '
-                                                'on %(backend)s') %
-                                       {'id': volume_id,
-                                        'backend': backend})
+        reason_param = {'resource': 'volume',
+                        'id': '??id missing??',
+                        'backend': backend}
+        for resource in ['volume', 'group', 'snapshot']:
+            resource_id = request_spec.get('%s_id' % resource, None)
+            if resource_id:
+                reason_param.update({'resource': resource, 'id': resource_id})
+                break
+        raise exception.NoValidBackend(_('Cannot place %(resource)s %(id)s '
+                                         'on %(backend)s.') % reason_param)
 
     def find_retype_backend(self, context, request_spec,
                             filter_properties=None, migration_policy='never'):
@@ -278,7 +283,7 @@ class FilterScheduler(driver.Scheduler):
         # takes 'resource_XX' and 'volume_XX' as input respectively, copying
         # 'volume_XX' to 'resource_XX' will make both filters happy.
         volume_type = request_spec.get("volume_type")
-        resource_type = request_spec.get("volume_type", {})
+        resource_type = volume_type if volume_type is not None else {}
 
         config_options = self._get_configuration_options()
 
@@ -311,6 +316,12 @@ class FilterScheduler(driver.Scheduler):
             resource_type['extra_specs'].update(
                 multiattach='<is> True')
 
+        # Revert volume consumed capacity if it's a rescheduled request
+        retry = filter_properties.get('retry', {})
+        if retry.get('backends', []):
+            self.host_manager.revert_volume_consumed_capacity(
+                retry['backends'][-1],
+                request_spec['volume_properties']['size'])
         # Find our local list of acceptable backends by filtering and
         # weighing our options. we virtually consume resources on
         # it so subsequent selections can adjust accordingly.
@@ -508,14 +519,20 @@ class FilterScheduler(driver.Scheduler):
         weighed_backends = self._get_weighted_candidates(context, request_spec,
                                                          filter_properties)
         # When we get the weighed_backends, we clear those backends that don't
-        # match the group's backend.
-        group_backend = request_spec.get('group_backend')
-        if weighed_backends and group_backend:
+        # match the resource's backend (it could be assigend from group,
+        # snapshot or volume).
+        resource_backend = request_spec.get('resource_backend')
+        if weighed_backends and resource_backend:
+            resource_backend_has_pool = bool(utils.extract_host(
+                resource_backend, 'pool'))
             # Get host name including host@backend#pool info from
             # weighed_backends.
             for backend in weighed_backends[::-1]:
-                backend_id = utils.extract_host(backend.obj.backend_id)
-                if backend_id != group_backend:
+                backend_id = (
+                    backend.obj.backend_id if resource_backend_has_pool
+                    else utils.extract_host(backend.obj.backend_id)
+                )
+                if backend_id != resource_backend:
                     weighed_backends.remove(backend)
         if not weighed_backends:
             LOG.warning('No weighed backend found for volume '

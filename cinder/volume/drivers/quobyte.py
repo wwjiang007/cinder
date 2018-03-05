@@ -29,23 +29,24 @@ from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume.drivers import remotefs as remotefs_drv
 
-VERSION = '1.1.4'
+VERSION = '1.1.7'
 
 LOG = logging.getLogger(__name__)
 
 volume_opts = [
     cfg.StrOpt('quobyte_volume_url',
-               help=('Quobyte URL to the Quobyte volume e.g.,'
+               help=('Quobyte URL to the Quobyte volume using e.g. a DNS SRV'
+                     ' record (preferred) or a host list (alternatively) like'
                      ' quobyte://<DIR host1>, <DIR host2>/<volume name>')),
     cfg.StrOpt('quobyte_client_cfg',
                help=('Path to a Quobyte Client configuration file.')),
     cfg.BoolOpt('quobyte_sparsed_volumes',
                 default=True,
                 help=('Create volumes as sparse files which take no space.'
-                      ' If set to False, volume is created as regular file.'
-                      'In such case volume creation takes a lot of time.')),
+                      ' If set to False, volume is created as regular file.')),
     cfg.BoolOpt('quobyte_qcow2_volumes',
                 default=True,
                 help=('Create volumes as QCOW2 files rather than raw files.')),
@@ -56,7 +57,7 @@ volume_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(volume_opts)
+CONF.register_opts(volume_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 @interface.volumedriver
@@ -84,6 +85,9 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         1.1.2 - Fixes a bug in the creation of cloned volumes
         1.1.3 - Explicitely mounts Quobyte volumes w/o xattrs
         1.1.4 - Fixes capability to configure redundancy in quobyte_volume_url
+        1.1.5 - Enables extension of volumes with snapshots
+        1.1.6 - Optimizes volume creation
+        1.1.7 - Support fuse subtype based Quobyte mount validation
 
     """
 
@@ -101,6 +105,11 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
         # Used to manage snapshots which are currently attached to a VM.
         self._nova = None
+
+    def _create_regular_file(self, path, size):
+        """Creates a regular file of given size in GiB."""
+        self._execute('fallocate', '-l', '%sG' % size,
+                      path, run_as_root=self._execute_as_root)
 
     def do_setup(self, context):
         """Any initialization the volume driver does while starting."""
@@ -180,6 +189,31 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         """Creates a clone of the specified volume."""
         return self._create_cloned_volume(volume, src_vref)
 
+    def _create_volume_from_snapshot(self, volume, snapshot):
+        """Creates a volume from a snapshot.
+
+        Snapshot must not be the active snapshot. (offline)
+        """
+
+        LOG.debug('Creating volume %(vol)s from snapshot %(snap)s',
+                  {'vol': volume.id, 'snap': snapshot.id})
+
+        if snapshot.status != 'available':
+            msg = _('Snapshot status must be "available" to clone. '
+                    'But is: %(status)s') % {'status': snapshot.status}
+
+            raise exception.InvalidSnapshot(msg)
+
+        self._ensure_shares_mounted()
+
+        volume.provider_location = self._find_share(volume)
+
+        self._copy_volume_from_snapshot(snapshot,
+                                        volume,
+                                        volume.size)
+
+        return {'provider_location': volume.provider_location}
+
     @utils.synchronized('quobyte', external=False)
     def create_volume(self, volume):
         return super(QuobyteDriver, self).create_volume(volume)
@@ -206,6 +240,7 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         forward_file = snap_info[snapshot.id]
         forward_path = os.path.join(vol_path, forward_file)
 
+        self._ensure_shares_mounted()
         # Find the file which backs this file, which represents the point
         # when this snapshot was created.
         img_info = self._qemu_img_info(forward_path,
@@ -301,14 +336,6 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
     @utils.synchronized('quobyte', external=False)
     def extend_volume(self, volume, size_gb):
         volume_path = self.local_path(volume)
-        volume_filename = os.path.basename(volume_path)
-
-        # Ensure no snapshots exist for the volume
-        active_image = self.get_active_image_from_info(volume)
-        if volume_filename != active_image:
-            msg = _('Extend volume is only supported for this'
-                    ' driver when no snapshots exist.')
-            raise exception.InvalidVolume(msg)
 
         info = self._qemu_img_info(volume_path, volume.name)
         backing_fmt = info.file_format
@@ -318,7 +345,10 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             raise exception.InvalidVolume(msg % backing_fmt)
 
         # qemu-img can resize both raw and qcow2 files
-        image_utils.resize_image(volume_path, size_gb)
+        active_path = os.path.join(
+            self._get_mount_point_for_share(volume.provider_location),
+            self.get_active_image_from_info(volume))
+        image_utils.resize_image(active_path, size_gb)
 
     def _do_create_volume(self, volume):
         """Create a volume on given Quobyte volume.
@@ -384,7 +414,7 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
         LOG.debug('Available shares %s', self._mounted_shares)
 
-    def _find_share(self, volume_size_in_gib):
+    def _find_share(self, volume):
         """Returns the mounted Quobyte volume.
 
         Multiple shares are not supported because the virtualization of
@@ -393,7 +423,7 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         For different types of volumes e.g., SSD vs. rotating disks, use
         multiple backends in Cinder.
 
-        :param volume_size_in_gib: int size in GB. Ignored by this driver.
+        :param volume: the volume to be created.
         """
 
         if not self._mounted_shares:
@@ -476,7 +506,8 @@ class QuobyteDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         partitions = psutil.disk_partitions(all=True)
         for p in partitions:
             if mount_path == p.mountpoint:
-                if p.device.startswith("quobyte@"):
+                if (p.device.startswith("quobyte@") or
+                        (p.fstype == "fuse.quobyte")):
                     try:
                         statresult = os.stat(mount_path)
                         if statresult.st_size == 0:

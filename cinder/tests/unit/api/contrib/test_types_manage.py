@@ -36,7 +36,7 @@ UPDATE_NAME_AFTER_DELETE_TYPE = fake.VOLUME_TYPE5_ID
 NOT_FOUND_VOLUME_TYPE = fake.WILL_NOT_BE_FOUND_ID
 
 
-def stub_volume_type(id):
+def fake_volume_type(id):
     specs = {"key1": "value1",
              "key2": "value2",
              "key3": "value3",
@@ -48,7 +48,7 @@ def stub_volume_type(id):
                 extra_specs=specs)
 
 
-def stub_volume_type_updated(id, is_public=True):
+def fake_volume_type_updated(id, is_public=True):
     return dict(id=id,
                 name='vol_type_%s_%s' % (six.text_type(id), six.text_type(id)),
                 is_public=is_public,
@@ -56,7 +56,7 @@ def stub_volume_type_updated(id, is_public=True):
                     six.text_type(id), six.text_type(id)))
 
 
-def stub_volume_type_updated_desc_only(id):
+def fake_volume_type_updated_desc_only(id):
     return dict(id=id,
                 name='vol_type_%s' % six.text_type(id),
                 description='vol_type_desc_%s_%s' % (
@@ -66,7 +66,7 @@ def stub_volume_type_updated_desc_only(id):
 def return_volume_types_get_volume_type(context, id):
     if id == fake.WILL_NOT_BE_FOUND_ID:
         raise exception.VolumeTypeNotFound(volume_type_id=id)
-    return stub_volume_type(id)
+    return fake_volume_type(id)
 
 
 def return_volume_types_destroy(context, name):
@@ -97,13 +97,13 @@ def return_volume_types_create_duplicate_type(context,
     raise exception.VolumeTypeExists(id=name)
 
 
-def stub_volume_type_updated_name_only(id):
+def fake_volume_type_updated_name_only(id):
     return dict(id=id,
                 name='vol_type_%s_%s' % (six.text_type(id), six.text_type(id)),
                 description='vol_type_desc_%s' % six.text_type(id))
 
 
-def stub_volume_type_updated_name_after_delete(id):
+def fake_volume_type_updated_name_after_delete(id):
     return dict(id=id,
                 name='vol_type_%s' % six.text_type(id),
                 description='vol_type_desc_%s' % six.text_type(id))
@@ -113,24 +113,24 @@ def return_volume_types_get_volume_type_updated(id, is_public=True):
     if id == NOT_FOUND_VOLUME_TYPE:
         raise exception.VolumeTypeNotFound(volume_type_id=id)
     if id == UPDATE_DESC_ONLY_TYPE:
-        return stub_volume_type_updated_desc_only(id)
+        return fake_volume_type_updated_desc_only(id)
     if id == UPDATE_NAME_ONLY_TYPE:
-        return stub_volume_type_updated_name_only(id)
+        return fake_volume_type_updated_name_only(id)
     if id == UPDATE_NAME_AFTER_DELETE_TYPE:
-        return stub_volume_type_updated_name_after_delete(id)
+        return fake_volume_type_updated_name_after_delete(id)
 
     # anything else
-    return stub_volume_type_updated(id, is_public=is_public)
+    return fake_volume_type_updated(id, is_public=is_public)
 
 
 def return_volume_types_get_by_name(context, name):
     if name == NOT_FOUND_VOLUME_TYPE:
         raise exception.VolumeTypeNotFoundByName(volume_type_name=name)
-    return stub_volume_type(name.split("_")[2])
+    return fake_volume_type(name.split("_")[2])
 
 
 def return_volume_types_get_default():
-    return stub_volume_type(DEFAULT_VOLUME_TYPE)
+    return fake_volume_type(DEFAULT_VOLUME_TYPE)
 
 
 def return_volume_types_get_default_not_found():
@@ -146,10 +146,10 @@ class VolumeTypesManageApiTest(test.TestCase):
         """to reset notifier drivers left over from other api/contrib tests"""
 
     def test_volume_types_delete(self):
-        self.stubs.Set(volume_types, 'get_volume_type',
-                       return_volume_types_get_volume_type)
-        self.stubs.Set(volume_types, 'destroy',
-                       return_volume_types_destroy)
+        self.mock_object(volume_types, 'get_volume_type',
+                         return_volume_types_get_volume_type)
+        self.mock_object(volume_types, 'destroy',
+                         return_volume_types_destroy)
 
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
             fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
@@ -158,10 +158,10 @@ class VolumeTypesManageApiTest(test.TestCase):
         self.assertEqual(1, len(self.notifier.notifications))
 
     def test_volume_types_delete_not_found(self):
-        self.stubs.Set(volume_types, 'get_volume_type',
-                       return_volume_types_get_volume_type)
-        self.stubs.Set(volume_types, 'destroy',
-                       return_volume_types_destroy)
+        self.mock_object(volume_types, 'get_volume_type',
+                         return_volume_types_get_volume_type)
+        self.mock_object(volume_types, 'destroy',
+                         return_volume_types_destroy)
 
         self.assertEqual(0, len(self.notifier.notifications))
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
@@ -171,10 +171,10 @@ class VolumeTypesManageApiTest(test.TestCase):
         self.assertEqual(1, len(self.notifier.notifications))
 
     def test_volume_types_with_volumes_destroy(self):
-        self.stubs.Set(volume_types, 'get_volume_type',
-                       return_volume_types_get_volume_type)
-        self.stubs.Set(volume_types, 'destroy',
-                       return_volume_types_with_volumes_destroy)
+        self.mock_object(volume_types, 'get_volume_type',
+                         return_volume_types_get_volume_type)
+        self.mock_object(volume_types, 'destroy',
+                         return_volume_types_with_volumes_destroy)
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
             fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
         self.assertEqual(0, len(self.notifier.notifications))
@@ -183,12 +183,12 @@ class VolumeTypesManageApiTest(test.TestCase):
 
     @mock.patch('cinder.volume.volume_types.destroy')
     @mock.patch('cinder.volume.volume_types.get_volume_type')
-    @mock.patch('cinder.policy.enforce')
-    def test_volume_types_delete_with_non_admin(self, mock_policy_enforce,
+    @mock.patch('cinder.policy.authorize')
+    def test_volume_types_delete_with_non_admin(self, mock_policy_authorize,
                                                 mock_get, mock_destroy):
 
         # allow policy authorized user to delete type
-        mock_policy_enforce.return_value = None
+        mock_policy_authorize.return_value = None
         mock_get.return_value = \
             {'extra_specs': {"key1": "value1"},
              'id': DEFAULT_VOLUME_TYPE,
@@ -203,17 +203,17 @@ class VolumeTypesManageApiTest(test.TestCase):
         self.controller._delete(req, DEFAULT_VOLUME_TYPE)
         self.assertEqual(1, len(self.notifier.notifications))
         # non policy authorized user fails to delete type
-        mock_policy_enforce.side_effect = (
+        mock_policy_authorize.side_effect = (
             exception.PolicyNotAuthorized(action='type_delete'))
         self.assertRaises(exception.PolicyNotAuthorized,
                           self.controller._delete,
                           req, DEFAULT_VOLUME_TYPE)
 
     def test_create(self):
-        self.stubs.Set(volume_types, 'create',
-                       return_volume_types_create)
-        self.stubs.Set(volume_types, 'get_volume_type_by_name',
-                       return_volume_types_get_by_name)
+        self.mock_object(volume_types, 'create',
+                         return_volume_types_create)
+        self.mock_object(volume_types, 'get_volume_type_by_name',
+                         return_volume_types_get_by_name)
 
         body = {"volume_type": {"name": "vol_type_1",
                                 "os-volume-type-access:is_public": True,
@@ -221,7 +221,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
 
         self.assertEqual(0, len(self.notifier.notifications))
-        res_dict = self.controller._create(req, body)
+        res_dict = self.controller._create(req, body=body)
 
         self.assertEqual(1, len(self.notifier.notifications))
         id = res_dict['volume_type']['id']
@@ -245,7 +245,7 @@ class VolumeTypesManageApiTest(test.TestCase):
                                 "extra_specs": {"key1": "value1"}}}
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
 
-        res_dict = self.controller._create(req, body)
+        res_dict = self.controller._create(req, body=body)
 
         self._check_test_results(res_dict, {
             'expected_name': 'vol_type_1', 'expected_desc': ''})
@@ -255,8 +255,8 @@ class VolumeTypesManageApiTest(test.TestCase):
         body = {"volume_type": {"name": type_name,
                                 "extra_specs": {"key1": "value1"}}}
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
-        self.assertRaises(exception.InvalidInput,
-                          self.controller._create, req, body)
+        self.assertRaises(exception.ValidationError,
+                          self.controller._create, req, body=body)
 
     def test_create_type_with_description_too_long(self):
         type_description = 'a' * 256
@@ -264,20 +264,20 @@ class VolumeTypesManageApiTest(test.TestCase):
                                 "description": type_description,
                                 "extra_specs": {"key1": "value1"}}}
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
-        self.assertRaises(exception.InvalidInput,
-                          self.controller._create, req, body)
+        self.assertRaises(exception.ValidationError,
+                          self.controller._create, req, body=body)
 
     def test_create_duplicate_type_fail(self):
-        self.stubs.Set(volume_types, 'create',
-                       return_volume_types_create_duplicate_type)
-        self.stubs.Set(volume_types, 'get_volume_type_by_name',
-                       return_volume_types_get_by_name)
+        self.mock_object(volume_types, 'create',
+                         return_volume_types_create_duplicate_type)
+        self.mock_object(volume_types, 'get_volume_type_by_name',
+                         return_volume_types_get_by_name)
 
         body = {"volume_type": {"name": "vol_type_1",
                                 "extra_specs": {"key1": "value1"}}}
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
         self.assertRaises(webob.exc.HTTPConflict,
-                          self.controller._create, req, body)
+                          self.controller._create, req, body=body)
 
     def test_create_type_with_invalid_is_public(self):
         body = {"volume_type": {"name": "vol_type_1",
@@ -285,8 +285,8 @@ class VolumeTypesManageApiTest(test.TestCase):
                                 "description": "test description",
                                 "extra_specs": {"key1": "value1"}}}
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
-        self.assertRaises(exception.InvalidParameterValue,
-                          self.controller._create, req, body)
+        self.assertRaises(exception.ValidationError,
+                          self.controller._create, req, body=body)
 
     @ddt.data('0', 'f', 'false', 'off', 'n', 'no', '1', 't', 'true', 'on',
               'y', 'yes')
@@ -305,7 +305,7 @@ class VolumeTypesManageApiTest(test.TestCase):
                                 "extra_specs": {"key1": "value1"}}}
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
         req.environ['cinder.context'] = ctxt
-        self.controller._create(req, body)
+        self.controller._create(req, body=body)
         mock_create.assert_called_once_with(
             ctxt, 'vol_type_1', {'key1': 'value1'},
             boolean_is_public, description=None)
@@ -313,8 +313,8 @@ class VolumeTypesManageApiTest(test.TestCase):
     def _create_volume_type_bad_body(self, body):
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
         req.method = 'POST'
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self.controller._create, req, body)
+        self.assertRaises(exception.ValidationError,
+                          self.controller._create, req, body=body)
 
     def test_create_no_body(self):
         self._create_volume_type_bad_body(body=None)
@@ -329,13 +329,13 @@ class VolumeTypesManageApiTest(test.TestCase):
 
     @mock.patch('cinder.volume.volume_types.create')
     @mock.patch('cinder.volume.volume_types.get_volume_type_by_name')
-    @mock.patch('cinder.policy.enforce')
-    def test_create_with_none_admin(self, mock_policy_enforce,
+    @mock.patch('cinder.policy.authorize')
+    def test_create_with_none_admin(self, mock_policy_authorize,
                                     mock_get_volume_type_by_name,
                                     mock_create_type):
 
         # allow policy authorized user to create type
-        mock_policy_enforce.return_value = None
+        mock_policy_authorize.return_value = None
         mock_get_volume_type_by_name.return_value = \
             {'extra_specs': {"key1": "value1"},
              'id': DEFAULT_VOLUME_TYPE,
@@ -349,18 +349,18 @@ class VolumeTypesManageApiTest(test.TestCase):
                                       use_admin_context=False)
 
         self.assertEqual(0, len(self.notifier.notifications))
-        res_dict = self.controller._create(req, body)
+        res_dict = self.controller._create(req, body=body)
 
         self.assertEqual(1, len(self.notifier.notifications))
         self._check_test_results(res_dict, {
             'expected_name': 'vol_type_1', 'expected_desc': 'vol_type_desc_1'})
 
         # non policy authorized user fails to create type
-        mock_policy_enforce.side_effect = (
+        mock_policy_authorize.side_effect = (
             exception.PolicyNotAuthorized(action='type_create'))
         self.assertRaises(exception.PolicyNotAuthorized,
                           self.controller._create,
-                          req, body)
+                          req, body=body)
 
     @ddt.data({'a' * 256: 'a'},
               {'a': 'a' * 256},
@@ -373,8 +373,8 @@ class VolumeTypesManageApiTest(test.TestCase):
                                 "description": "test description"}}
         body['volume_type']['extra_specs'] = value
         req = fakes.HTTPRequest.blank('/v2/%s/types' % fake.PROJECT_ID)
-        self.assertRaises(exception.InvalidInput,
-                          self.controller._create, req, body)
+        self.assertRaises(exception.ValidationError,
+                          self.controller._create, req, body=body)
 
     @mock.patch('cinder.volume.volume_types.update')
     @mock.patch('cinder.volume.volume_types.get_volume_type')
@@ -387,7 +387,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         req.method = 'PUT'
 
         self.assertEqual(0, len(self.notifier.notifications))
-        res_dict = self.controller._update(req, DEFAULT_VOLUME_TYPE, body)
+        res_dict = self.controller._update(req, DEFAULT_VOLUME_TYPE, body=body)
         self.assertEqual(1, len(self.notifier.notifications))
         self._check_test_results(
             res_dict,
@@ -414,7 +414,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         req.environ['cinder.context'] = ctxt
         boolean_is_public = strutils.bool_from_string(is_public)
 
-        self.controller._update(req, DEFAULT_VOLUME_TYPE, body)
+        self.controller._update(req, DEFAULT_VOLUME_TYPE, body=body)
         mock_update.assert_called_once_with(
             ctxt, DEFAULT_VOLUME_TYPE, None, None,
             is_public=boolean_is_public)
@@ -433,7 +433,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
             fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
         req.method = 'PUT'
-        resp = self.controller._update(req, DEFAULT_VOLUME_TYPE, body)
+        resp = self.controller._update(req, DEFAULT_VOLUME_TYPE, body=body)
         self._check_test_results(resp,
                                  {'expected_desc': '',
                                   'expected_name': 'vol_type_1'})
@@ -445,9 +445,9 @@ class VolumeTypesManageApiTest(test.TestCase):
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
             fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
         req.method = 'PUT'
-        self.assertRaises(exception.InvalidInput,
+        self.assertRaises(exception.ValidationError,
                           self.controller._update, req,
-                          DEFAULT_VOLUME_TYPE, body)
+                          DEFAULT_VOLUME_TYPE, body=body)
 
     def test_update_type_with_description_too_long(self):
         type_description = 'a' * 256
@@ -455,9 +455,9 @@ class VolumeTypesManageApiTest(test.TestCase):
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
             fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
         req.method = 'PUT'
-        self.assertRaises(exception.InvalidInput,
+        self.assertRaises(exception.ValidationError,
                           self.controller._update, req,
-                          DEFAULT_VOLUME_TYPE, body)
+                          DEFAULT_VOLUME_TYPE, body=body)
 
     @mock.patch('cinder.volume.volume_types.get_volume_type')
     @mock.patch('cinder.volume.volume_types.update')
@@ -473,7 +473,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         self.assertEqual(0, len(self.notifier.notifications))
         self.assertRaises(exception.VolumeTypeNotFound,
                           self.controller._update, req,
-                          NOT_FOUND_VOLUME_TYPE, body)
+                          NOT_FOUND_VOLUME_TYPE, body=body)
         self.assertEqual(1, len(self.notifier.notifications))
 
     @mock.patch('cinder.volume.volume_types.get_volume_type')
@@ -481,7 +481,7 @@ class VolumeTypesManageApiTest(test.TestCase):
     def test_update_db_fail(self, mock_update, mock_get_volume_type):
         mock_update.side_effect = exception.VolumeTypeUpdateFailed(
             id=DEFAULT_VOLUME_TYPE)
-        mock_get_volume_type.return_value = stub_volume_type(
+        mock_get_volume_type.return_value = fake_volume_type(
             DEFAULT_VOLUME_TYPE)
 
         body = {"volume_type": {"name": "vol_type_1_1",
@@ -493,7 +493,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         self.assertEqual(0, len(self.notifier.notifications))
         self.assertRaises(webob.exc.HTTPInternalServerError,
                           self.controller._update, req,
-                          DEFAULT_VOLUME_TYPE, body)
+                          DEFAULT_VOLUME_TYPE, body=body)
         self.assertEqual(1, len(self.notifier.notifications))
 
     def test_update_no_name_no_description(self):
@@ -504,7 +504,7 @@ class VolumeTypesManageApiTest(test.TestCase):
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller._update, req,
-                          DEFAULT_VOLUME_TYPE, body)
+                          DEFAULT_VOLUME_TYPE, body=body)
 
     def test_update_empty_name(self):
         body = {"volume_type": {"name": "  ",
@@ -515,7 +515,7 @@ class VolumeTypesManageApiTest(test.TestCase):
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller._update, req,
-                          DEFAULT_VOLUME_TYPE, body)
+                          DEFAULT_VOLUME_TYPE, body=body)
 
     @mock.patch('cinder.volume.volume_types.get_volume_type')
     @mock.patch('cinder.db.volume_type_update')
@@ -537,7 +537,8 @@ class VolumeTypesManageApiTest(test.TestCase):
         req.environ['cinder.context'] = ctxt
 
         self.assertEqual(0, len(self.notifier.notifications))
-        res_dict = self.controller._update(req, UPDATE_NAME_ONLY_TYPE, body)
+        res_dict = self.controller._update(req, UPDATE_NAME_ONLY_TYPE,
+                                           body=body)
         self.assertEqual(1, len(self.notifier.notifications))
         mock_update_quota.assert_called_once_with(ctxt, updated_name, name)
         self._check_test_results(res_dict,
@@ -558,7 +559,8 @@ class VolumeTypesManageApiTest(test.TestCase):
         req.method = 'PUT'
 
         self.assertEqual(0, len(self.notifier.notifications))
-        res_dict = self.controller._update(req, UPDATE_DESC_ONLY_TYPE, body)
+        res_dict = self.controller._update(req, UPDATE_DESC_ONLY_TYPE,
+                                           body=body)
         self.assertEqual(1, len(self.notifier.notifications))
         self._check_test_results(res_dict,
                                  {'expected_name': name,
@@ -580,7 +582,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         req.method = 'PUT'
 
         self.assertEqual(0, len(self.notifier.notifications))
-        res_dict = self.controller._update(req, DEFAULT_VOLUME_TYPE, body)
+        res_dict = self.controller._update(req, DEFAULT_VOLUME_TYPE, body=body)
         self.assertEqual(1, len(self.notifier.notifications))
         self._check_test_results(res_dict,
                                  {'expected_name': updated_name,
@@ -595,9 +597,9 @@ class VolumeTypesManageApiTest(test.TestCase):
             fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
         req.method = 'PUT'
 
-        self.assertRaises(exception.InvalidParameterValue,
+        self.assertRaises(exception.ValidationError,
                           self.controller._update, req,
-                          DEFAULT_VOLUME_TYPE, body)
+                          DEFAULT_VOLUME_TYPE, body=body)
 
     @mock.patch('cinder.volume.volume_types.update')
     @mock.patch('cinder.volume.volume_types.get_volume_type')
@@ -619,14 +621,14 @@ class VolumeTypesManageApiTest(test.TestCase):
         self.assertEqual(0, len(self.notifier.notifications))
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._update, req,
-                          UPDATE_NAME_AFTER_DELETE_TYPE, body)
+                          UPDATE_NAME_AFTER_DELETE_TYPE, body=body)
 
         self.assertEqual(1, len(self.notifier.notifications))
 
         # delete
         self.notifier.reset()
-        self.stubs.Set(volume_types, 'destroy',
-                       return_volume_types_destroy)
+        self.mock_object(volume_types, 'destroy',
+                         return_volume_types_destroy)
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
             fake.PROJECT_ID, UPDATE_NAME_AFTER_DELETE_TYPE))
         self.assertEqual(0, len(self.notifier.notifications))
@@ -643,7 +645,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         self.notifier.reset()
         self.assertEqual(0, len(self.notifier.notifications))
         res_dict = self.controller._update(req, UPDATE_NAME_AFTER_DELETE_TYPE,
-                                           body)
+                                           body=body)
         self._check_test_results(res_dict,
                                  {'expected_name': name,
                                   'expected_desc': desc})
@@ -651,12 +653,12 @@ class VolumeTypesManageApiTest(test.TestCase):
 
     @mock.patch('cinder.volume.volume_types.update')
     @mock.patch('cinder.volume.volume_types.get_volume_type')
-    @mock.patch('cinder.policy.enforce')
-    def test_update_with_non_admin(self, mock_policy_enforce, mock_get,
+    @mock.patch('cinder.policy.authorize')
+    def test_update_with_non_admin(self, mock_policy_authorize, mock_get,
                                    mock_update):
 
         # allow policy authorized user to update type
-        mock_policy_enforce.return_value = None
+        mock_policy_authorize.return_value = None
         mock_get.return_value = return_volume_types_get_volume_type_updated(
             DEFAULT_VOLUME_TYPE, is_public=False)
         name = "vol_type_%s" % DEFAULT_VOLUME_TYPE
@@ -673,7 +675,7 @@ class VolumeTypesManageApiTest(test.TestCase):
         req.method = 'PUT'
 
         self.assertEqual(0, len(self.notifier.notifications))
-        res_dict = self.controller._update(req, DEFAULT_VOLUME_TYPE, body)
+        res_dict = self.controller._update(req, DEFAULT_VOLUME_TYPE, body=body)
         self.assertEqual(1, len(self.notifier.notifications))
         self._check_test_results(res_dict,
                                  {'expected_desc': updated_desc,
@@ -681,11 +683,11 @@ class VolumeTypesManageApiTest(test.TestCase):
                                   'is_public': False})
 
         # non policy authorized user fails to update type
-        mock_policy_enforce.side_effect = (
+        mock_policy_authorize.side_effect = (
             exception.PolicyNotAuthorized(action='type_update'))
         self.assertRaises(exception.PolicyNotAuthorized,
                           self.controller._update,
-                          req, DEFAULT_VOLUME_TYPE, body)
+                          req, DEFAULT_VOLUME_TYPE, body=body)
 
     def _check_test_results(self, results, expected_results):
         self.assertEqual(1, len(results))
@@ -697,3 +699,38 @@ class VolumeTypesManageApiTest(test.TestCase):
         if expected_results.get('is_public') is not None:
             self.assertEqual(expected_results['is_public'],
                              results['volume_type']['is_public'])
+
+    def test_update_with_name_null(self):
+        body = {"volume_type": {"name": None}}
+        req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
+            fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
+        req.method = 'PUT'
+
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller._update, req,
+                          DEFAULT_VOLUME_TYPE, body=body)
+
+    @ddt.data({"volume_type": {"name": None, "description": "description"}},
+              {"volume_type": {"name": None, "is_public": True}},
+              {"volume_type": {"description": "description",
+                               "is_public": True}})
+    def test_update_volume_type(self, body):
+        req = fakes.HTTPRequest.blank('/v2/%s/types/%s' % (
+            fake.PROJECT_ID, DEFAULT_VOLUME_TYPE))
+        req.method = 'PUT'
+        ctxt = context.RequestContext(fake.USER_ID, fake.PROJECT_ID, True)
+        req.environ['cinder.context'] = ctxt
+        volume_type_1 = volume_types.create(ctxt, 'volume_type')
+        res = self.controller._update(req, volume_type_1.get('id'), body=body)
+
+        expected_name = body['volume_type'].get('name')
+        if expected_name is not None:
+            self.assertEqual(expected_name, res['volume_type']['name'])
+
+        expected_is_public = body['volume_type'].get('is_public')
+        if expected_is_public is not None:
+            self.assertEqual(expected_is_public,
+                             res['volume_type']['is_public'])
+
+        self.assertEqual(body['volume_type'].get('description'),
+                         res['volume_type']['description'])

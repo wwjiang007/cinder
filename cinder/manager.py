@@ -98,10 +98,6 @@ class Manager(base.Base, PeriodicTasks):
     def service_topic_queue(self):
         return self.cluster or self.host
 
-    def periodic_tasks(self, context, raise_on_error=False):
-        """Tasks to be run at a periodic interval."""
-        return self.run_periodic_tasks(context, raise_on_error=raise_on_error)
-
     def init_host(self, service_id=None, added_to_cluster=None):
         """Handle initialization if this is a standalone service.
 
@@ -186,7 +182,6 @@ class SchedulerDependentManager(ThreadPoolManager):
         """Remember these capabilities to send on next periodic update."""
         self.last_capabilities = capabilities
 
-    @periodic_task.periodic_task
     def _publish_service_capabilities(self, context):
         """Pass data back to the scheduler at a periodic interval."""
         if self.last_capabilities:

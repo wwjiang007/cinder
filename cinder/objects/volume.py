@@ -60,7 +60,9 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
     # Version 1.4: Added cluster fields
     # Version 1.5: Added group
     # Version 1.6: This object is now cleanable (adds rows to workers table)
-    VERSION = '1.6'
+    # Version 1.7: Added service_uuid
+    # Version 1.8: Added shared_targets
+    VERSION = '1.8'
 
     OPTIONAL_FIELDS = ('metadata', 'admin_metadata', 'glance_metadata',
                        'volume_type', 'volume_attachment', 'consistencygroup',
@@ -124,6 +126,8 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
                                                nullable=True),
         'snapshots': fields.ObjectField('SnapshotList', nullable=True),
         'group': fields.ObjectField('Group', nullable=True),
+        'service_uuid': fields.StringField(nullable=True),
+        'shared_targets': fields.BooleanField(default=True, nullable=True),
     }
 
     # NOTE(thangp): obj_extra_fields is used to hold properties that are not
@@ -232,14 +236,18 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
 
     def obj_make_compatible(self, primitive, target_version):
         """Make a Volume representation compatible with a target version."""
+        added_fields = (((1, 4), ('cluster', 'cluster_name')),
+                        ((1, 5), ('group', 'group_id')),
+                        ((1, 7), ('service_uuid')))
+
         # Convert all related objects
         super(Volume, self).obj_make_compatible(primitive, target_version)
 
         target_version = versionutils.convert_version_to_tuple(target_version)
-        # Before v1.4 we didn't have cluster fields so we have to remove them.
-        if target_version < (1, 4):
-            for obj_field in ('cluster', 'cluster_name'):
-                primitive.pop(obj_field, None)
+        for version, remove_fields in added_fields:
+            if target_version < version:
+                for obj_field in remove_fields:
+                    primitive.pop(obj_field, None)
 
     @classmethod
     def _from_db_object(cls, context, volume, db_volume, expected_attrs=None):
@@ -339,12 +347,16 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
     def save(self):
         updates = self.cinder_obj_get_changes()
         if updates:
-            if 'consistencygroup' in updates:
-                # NOTE(xyang): Allow this to pass if 'consistencygroup' is
-                # set to None. This is to support backward compatibility.
-                if updates.get('consistencygroup'):
-                    raise exception.ObjectActionError(
-                        action='save', reason=_('consistencygroup changed'))
+            # NOTE(xyang): Allow this to pass if 'consistencygroup' is
+            # set to None. This is to support backward compatibility.
+            # Also remove 'consistencygroup' from updates because
+            # consistencygroup is the name of a relationship in the ORM
+            # Volume model, so SQLA tries to do some kind of update of
+            # the foreign key based on the provided updates if
+            # 'consistencygroup' is in updates.
+            if updates.pop('consistencygroup', None):
+                raise exception.ObjectActionError(
+                    action='save', reason=_('consistencygroup changed'))
             if 'group' in updates:
                 raise exception.ObjectActionError(
                     action='save', reason=_('group changed'))
@@ -507,6 +519,13 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
         dest_volume.save()
         return dest_volume
 
+    def get_latest_snapshot(self):
+        """Get volume's latest snapshot"""
+        snapshot_db = db.snapshot_get_latest_for_volume(self._context, self.id)
+        snapshot = objects.Snapshot(self._context)
+        return snapshot._from_db_object(self._context,
+                                        snapshot, snapshot_db)
+
     @staticmethod
     def _is_cleanable(status, obj_version):
         # Before 1.6 we didn't have workers table, so cleanup wasn't supported.
@@ -544,6 +563,9 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
         self.obj_reset_changes(
             list(volume_updates.keys()) +
             ['volume_attachment', 'admin_metadata'])
+
+    def is_replicated(self):
+        return self.volume_type and self.volume_type.is_replicated()
 
 
 @base.CinderObjectRegistry.register

@@ -46,6 +46,12 @@ class FakeFilterClass2(filters.BaseBackendFilter):
         pass
 
 
+class FakeFilterClass3(filters.BaseHostFilter):
+    def host_passes(self, host_state, filter_properties):
+        return host_state.get('volume_backend_name') == \
+            filter_properties.get('volume_type')['volume_backend_name']
+
+
 @ddt.ddt
 class HostManagerTestCase(test.TestCase):
     """Test case for HostManager class."""
@@ -152,7 +158,7 @@ class HostManagerTestCase(test.TestCase):
         capab1 = {'pools': [{
                   'pool_name': 'pool1', 'thick_provisioning_support': True,
                   'thin_provisioning_support': False, 'total_capacity_gb': 10,
-                  'free_capacity_gb': 10, 'max_over_subscription_ratio': 1,
+                  'free_capacity_gb': 10, 'max_over_subscription_ratio': '1',
                   'provisioned_capacity_gb': 0, 'allocated_capacity_gb': 0,
                   'reserved_percentage': 0}]}
 
@@ -181,7 +187,7 @@ class HostManagerTestCase(test.TestCase):
             self.host_manager.service_states_last_update['host1'])
 
         # notify capab1 to ceilometer by S0
-        self.assertTrue(1, _mock_get_usage_and_notify.call_count)
+        self.assertEqual(1, _mock_get_usage_and_notify.call_count)
 
         # S1: update_service_capabilities()
         self.host_manager_1.update_service_capabilities(service_name, 'host1',
@@ -204,7 +210,7 @@ class HostManagerTestCase(test.TestCase):
         capab1 = {'pools': [{
                   'pool_name': 'pool1', 'thick_provisioning_support': True,
                   'thin_provisioning_support': False, 'total_capacity_gb': 10,
-                  'free_capacity_gb': 10, 'max_over_subscription_ratio': 1,
+                  'free_capacity_gb': 10, 'max_over_subscription_ratio': '1',
                   'provisioned_capacity_gb': 0, 'allocated_capacity_gb': 0,
                   'reserved_percentage': 0}]}
 
@@ -257,7 +263,7 @@ class HostManagerTestCase(test.TestCase):
             dict(dict(timestamp=31339), **capab1))
 
         # Don't notify capab1 to ceilometer.
-        self.assertTrue(1, _mock_get_usage_and_notify.call_count)
+        self.assertEqual(0, _mock_get_usage_and_notify.call_count)
 
     @mock.patch(
         'cinder.scheduler.host_manager.HostManager.get_usage_and_notify')
@@ -273,7 +279,7 @@ class HostManagerTestCase(test.TestCase):
         capab1 = {'pools': [{
                   'pool_name': 'pool1', 'thick_provisioning_support': True,
                   'thin_provisioning_support': False, 'total_capacity_gb': 10,
-                  'free_capacity_gb': 10, 'max_over_subscription_ratio': 1,
+                  'free_capacity_gb': 10, 'max_over_subscription_ratio': '1',
                   'provisioned_capacity_gb': 0, 'allocated_capacity_gb': 0,
                   'reserved_percentage': 0}]}
 
@@ -305,7 +311,7 @@ class HostManagerTestCase(test.TestCase):
                              self.host_manager.service_states['host1'])
 
         # Don't notify capab1 to ceilometer.
-        self.assertTrue(1, _mock_get_usage_and_notify.call_count)
+        self.assertEqual(0, _mock_get_usage_and_notify.call_count)
 
         # S0: update_service_capabilities()
         self.host_manager.update_service_capabilities(service_name, 'host1',
@@ -342,7 +348,7 @@ class HostManagerTestCase(test.TestCase):
         capab1 = {'pools': [{
                   'pool_name': 'pool1', 'thick_provisioning_support': True,
                   'thin_provisioning_support': False, 'total_capacity_gb': 10,
-                  'free_capacity_gb': 10, 'max_over_subscription_ratio': 1,
+                  'free_capacity_gb': 10, 'max_over_subscription_ratio': '1',
                   'provisioned_capacity_gb': 0, 'allocated_capacity_gb': 0,
                   'reserved_percentage': 0}]}
 
@@ -358,7 +364,7 @@ class HostManagerTestCase(test.TestCase):
         capab2 = {'pools': [{
                   'pool_name': 'pool1', 'thick_provisioning_support': True,
                   'thin_provisioning_support': False, 'total_capacity_gb': 10,
-                  'free_capacity_gb': 9, 'max_over_subscription_ratio': 1,
+                  'free_capacity_gb': 9, 'max_over_subscription_ratio': '1',
                   'provisioned_capacity_gb': 1, 'allocated_capacity_gb': 1,
                   'reserved_percentage': 0}]}
 
@@ -391,7 +397,7 @@ class HostManagerTestCase(test.TestCase):
             self.host_manager_1.service_states_last_update['host1'])
 
         # notify capab2 to ceilometer.
-        self.assertTrue(2, _mock_get_usage_and_notify.call_count)
+        self.assertLess(0, _mock_get_usage_and_notify.call_count)
 
         # S1: update_service_capabilities()
         self.host_manager_1.update_service_capabilities(service_name, 'host1',
@@ -417,14 +423,14 @@ class HostManagerTestCase(test.TestCase):
         capab1 = {'pools': [{
                   'pool_name': 'pool1', 'thick_provisioning_support': True,
                   'thin_provisioning_support': False, 'total_capacity_gb': 10,
-                  'free_capacity_gb': 10, 'max_over_subscription_ratio': 1,
+                  'free_capacity_gb': 10, 'max_over_subscription_ratio': '1',
                   'provisioned_capacity_gb': 0, 'allocated_capacity_gb': 0,
                   'reserved_percentage': 0}]}
 
         capab2 = {'pools': [{
                   'pool_name': 'pool1', 'thick_provisioning_support': True,
                   'thin_provisioning_support': False, 'total_capacity_gb': 10,
-                  'free_capacity_gb': 9, 'max_over_subscription_ratio': 1,
+                  'free_capacity_gb': 9, 'max_over_subscription_ratio': '1',
                   'provisioned_capacity_gb': 1, 'allocated_capacity_gb': 1,
                   'reserved_percentage': 0}]}
 
@@ -465,7 +471,7 @@ class HostManagerTestCase(test.TestCase):
                              self.host_manager.service_states['host1'])
 
         # S0 notify capab2 to ceilometer.
-        self.assertTrue(3, _mock_get_usage_and_notify.call_count)
+        self.assertLess(0, _mock_get_usage_and_notify.call_count)
 
         # S0: update_service_capabilities()
         self.host_manager.update_service_capabilities(service_name, 'host1',
@@ -496,11 +502,14 @@ class HostManagerTestCase(test.TestCase):
         _mock_service_is_up.return_value = True
         services = [
             dict(id=1, host='host1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'),
             dict(id=2, host='host2', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='4200b32b-0bf9-436c-86b2-0675f6ac218e'),
             dict(id=3, host='host3', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='6d91e7f5-ca17-4e3b-bf4f-19ca77166dd7'),
         ]
         _mock_service_get_all.return_value = services
         # Create host_manager again to let db.service_get_all mock run
@@ -547,7 +556,8 @@ class HostManagerTestCase(test.TestCase):
         services = [
             # This is the first call to utcnow()
             dict(id=1, host='host1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='6d91e7f5-ca17-4e3b-bf4f-19ca77166dd7',)
         ]
 
         mocked_service_states = {
@@ -653,19 +663,23 @@ class HostManagerTestCase(test.TestCase):
             dict(id=1, host='host1', topic='volume', disabled=False,
                  availability_zone='zone1', updated_at=timeutils.utcnow(),
                  binary=None, deleted=False, created_at=None, modified_at=None,
-                 report_count=0, deleted_at=None, disabled_reason=None),
+                 report_count=0, deleted_at=None, disabled_reason=None,
+                 uuid='a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'),
             dict(id=2, host='host2', topic='volume', disabled=False,
                  availability_zone='zone1', updated_at=timeutils.utcnow(),
                  binary=None, deleted=False, created_at=None, modified_at=None,
-                 report_count=0, deleted_at=None, disabled_reason=None),
+                 report_count=0, deleted_at=None, disabled_reason=None,
+                 uuid='4200b32b-0bf9-436c-86b2-0675f6ac218e'),
             dict(id=3, host='host3', topic='volume', disabled=False,
                  availability_zone='zone2', updated_at=timeutils.utcnow(),
                  binary=None, deleted=False, created_at=None, modified_at=None,
-                 report_count=0, deleted_at=None, disabled_reason=None),
+                 report_count=0, deleted_at=None, disabled_reason=None,
+                 uuid='6d91e7f5-ca17-4e3b-bf4f-19ca77166dd7'),
             dict(id=4, host='host4', topic='volume', disabled=False,
                  availability_zone='zone3', updated_at=timeutils.utcnow(),
                  binary=None, deleted=False, created_at=None, modified_at=None,
-                 report_count=0, deleted_at=None, disabled_reason=None),
+                 report_count=0, deleted_at=None, disabled_reason=None,
+                 uuid='18417850-2ca9-43d1-9619-ae16bfb0f655'),
         ]
 
         service_objs = []
@@ -753,11 +767,14 @@ class HostManagerTestCase(test.TestCase):
 
         services = [
             dict(id=1, host='host1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'),
             dict(id=2, host='host2@back1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='4200b32b-0bf9-436c-86b2-0675f6ac218e'),
             dict(id=3, host='host2@back2', topic='volume', disabled=False,
-                 availability_zone='zone2', updated_at=timeutils.utcnow()),
+                 availability_zone='zone2', updated_at=timeutils.utcnow(),
+                 uuid='6d91e7f5-ca17-4e3b-bf4f-19ca77166dd7'),
         ]
 
         mocked_service_states = {
@@ -845,7 +862,7 @@ class HostManagerTestCase(test.TestCase):
                           'free_capacity_gb': 28.01,
                           'allocated_capacity_gb': 2.0,
                           'provisioned_capacity_gb': 2.0,
-                          'max_over_subscription_ratio': 1.0,
+                          'max_over_subscription_ratio': '1.0',
                           'thin_provisioning_support': False,
                           'thick_provisioning_support': True,
                           'reserved_percentage': 5},
@@ -854,7 +871,7 @@ class HostManagerTestCase(test.TestCase):
                           'free_capacity_gb': 18.01,
                           'allocated_capacity_gb': 2.0,
                           'provisioned_capacity_gb': 2.0,
-                          'max_over_subscription_ratio': 2.0,
+                          'max_over_subscription_ratio': '2.0',
                           'thin_provisioning_support': True,
                           'thick_provisioning_support': False,
                           'reserved_percentage': 5}]}
@@ -864,7 +881,7 @@ class HostManagerTestCase(test.TestCase):
                            'free_capacity_gb': 28.01,
                            'allocated_capacity_gb': 2.0,
                            'provisioned_capacity_gb': 2.0,
-                           'max_over_subscription_ratio': 1.0,
+                           'max_over_subscription_ratio': '1.0',
                            'thin_provisioning_support': False,
                            'thick_provisioning_support': True,
                            'reserved_percentage': 5},
@@ -873,7 +890,7 @@ class HostManagerTestCase(test.TestCase):
                            'free_capacity_gb': 18.01,
                            'allocated_capacity_gb': 2.0,
                            'provisioned_capacity_gb': 2.0,
-                           'max_over_subscription_ratio': 2.0,
+                           'max_over_subscription_ratio': '2.0',
                            'thin_provisioning_support': True,
                            'thick_provisioning_support': False,
                            'reserved_percentage': 5}]
@@ -884,7 +901,7 @@ class HostManagerTestCase(test.TestCase):
                           'free_capacity_gb': 28.01,
                           'allocated_capacity_gb': 2.0,
                           'provisioned_capacity_gb': 2.0,
-                          'max_over_subscription_ratio': 2.0,
+                          'max_over_subscription_ratio': '2.0',
                           'thin_provisioning_support': True,
                           'thick_provisioning_support': False,
                           'reserved_percentage': 0},
@@ -893,7 +910,7 @@ class HostManagerTestCase(test.TestCase):
                           'free_capacity_gb': 18.01,
                           'allocated_capacity_gb': 2.0,
                           'provisioned_capacity_gb': 2.0,
-                          'max_over_subscription_ratio': 2.0,
+                          'max_over_subscription_ratio': '2.0',
                           'thin_provisioning_support': True,
                           'thick_provisioning_support': False,
                           'reserved_percentage': 5}]}
@@ -903,7 +920,7 @@ class HostManagerTestCase(test.TestCase):
                            'free_capacity_gb': 28.01,
                            'allocated_capacity_gb': 2.0,
                            'provisioned_capacity_gb': 2.0,
-                           'max_over_subscription_ratio': 2.0,
+                           'max_over_subscription_ratio': '2.0',
                            'thin_provisioning_support': True,
                            'thick_provisioning_support': False,
                            'reserved_percentage': 0}]
@@ -976,9 +993,11 @@ class HostManagerTestCase(test.TestCase):
 
         services = [
             dict(id=1, host='host1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'),
             dict(id=2, host='host2@back1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow())
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='4200b32b-0bf9-436c-86b2-0675f6ac218e')
         ]
 
         mocked_service_states = {
@@ -1020,6 +1039,45 @@ class HostManagerTestCase(test.TestCase):
 
             self.assertEqual(expected, res)
 
+    @mock.patch('cinder.scheduler.host_manager.HostManager.'
+                '_choose_backend_filters')
+    def test_get_pools_filtered_by_volume_type(self,
+                                               _mock_choose_backend_filters):
+        context = 'fake_context'
+        filter_class = FakeFilterClass3
+        _mock_choose_backend_filters.return_value = [filter_class]
+
+        hosts = {
+            'host1': {'volume_backend_name': 'AAA',
+                      'total_capacity_gb': 512,
+                      'free_capacity_gb': 200,
+                      'timestamp': None,
+                      'reserved_percentage': 0,
+                      'provisioned_capacity_gb': 312},
+            'host2@back1': {'volume_backend_name': 'BBB',
+                            'total_capacity_gb': 256,
+                            'free_capacity_gb': 100,
+                            'timestamp': None,
+                            'reserved_percentage': 0,
+                            'provisioned_capacity_gb': 156}}
+        mock_warning = mock.Mock()
+        host_manager.LOG.warn = mock_warning
+        mock_volume_type = {
+            'volume_backend_name': 'AAA',
+            'qos_specs': 'BBB',
+        }
+
+        res = self.host_manager._filter_pools_by_volume_type(context,
+                                                             mock_volume_type,
+                                                             hosts)
+        expected = {'host1': {'volume_backend_name': 'AAA',
+                              'total_capacity_gb': 512,
+                              'free_capacity_gb': 200,
+                              'timestamp': None, 'reserved_percentage': 0,
+                              'provisioned_capacity_gb': 312}}
+
+        self.assertEqual(expected, res)
+
     @mock.patch('cinder.db.service_get_all')
     @mock.patch('cinder.objects.service.Service.is_up',
                 new_callable=mock.PropertyMock)
@@ -1029,9 +1087,11 @@ class HostManagerTestCase(test.TestCase):
 
         services = [
             dict(id=1, host='host1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow()),
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'),
             dict(id=2, host='host2@back1', topic='volume', disabled=False,
-                 availability_zone='zone1', updated_at=timeutils.utcnow())
+                 availability_zone='zone1', updated_at=timeutils.utcnow(),
+                 uuid='4200b32b-0bf9-436c-86b2-0675f6ac218e')
         ]
 
         mocked_service_states = {

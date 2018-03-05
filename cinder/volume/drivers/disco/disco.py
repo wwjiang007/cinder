@@ -31,9 +31,11 @@ from cinder import exception
 from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.disco import disco_api
 from cinder.volume.drivers.disco import disco_attach_detach
+from cinder.volume.drivers.san import san
 
 
 LOG = logging.getLogger(__name__)
@@ -41,45 +43,59 @@ LOG = logging.getLogger(__name__)
 disco_opts = [
     cfg.IPOpt('disco_client',
               default='127.0.0.1',
-              help='The IP of DMS client socket server'),
+              help='The IP of DMS client socket server',
+              deprecated_group='DEFAULT'),
     cfg.PortOpt('disco_client_port',
-                default='9898',
-                help='The port to connect DMS client socket server'),
+                default=9898,
+                help='The port to connect DMS client socket server',
+                deprecated_group='DEFAULT'),
     cfg.StrOpt('disco_wsdl_path',
                default='/etc/cinder/DISCOService.wsdl',
                deprecated_for_removal=True,
                help='Path to the wsdl file '
                     'to communicate with DISCO request manager'),
-    cfg.IPOpt('rest_ip',
-              help='The IP address of the REST server'),
-    cfg.StrOpt('choice_client',
+    cfg.IPOpt('disco_rest_ip',
+              help='The IP address of the REST server',
+              deprecated_for_removal=True,
+              deprecated_reason='Using san_ip later',
+              deprecated_name='rest_ip', deprecated_group='DEFAULT'),
+    cfg.StrOpt('disco_choice_client',
                help='Use soap client or rest client for communicating '
                     'with DISCO. Possible values are "soap" or '
-                    '"rest".'),
+                    '"rest".', choices=['soap', 'rest'],
+               deprecated_name='choice_client', deprecated_group='DEFAULT'),
     cfg.PortOpt('disco_src_api_port',
-                default='8080',
-                help='The port of DISCO source API'),
-    cfg.StrOpt('volume_name_prefix',
+                default=8080,
+                deprecated_for_removal=True,
+                deprecated_reason='Using san_api_port later',
+                help='The port of DISCO source API',
+                deprecated_group='DEFAULT'),
+    cfg.StrOpt('disco_volume_name_prefix',
                default='openstack-',
                help='Prefix before volume name to differentiate '
                     'DISCO volume created through openstack '
-                    'and the other ones'),
-    cfg.IntOpt('snapshot_check_timeout',
+                    'and the other ones',
+               deprecated_name='volume_name_prefix'),
+    cfg.IntOpt('disco_snapshot_check_timeout',
                default=3600,
                help='How long we check whether a snapshot '
-                    'is finished before we give up'),
-    cfg.IntOpt('restore_check_timeout',
+                    'is finished before we give up',
+               deprecated_name='snapshot_check_timeout'),
+    cfg.IntOpt('disco_restore_check_timeout',
                default=3600,
                help='How long we check whether a restore '
-                    'is finished before we give up'),
-    cfg.IntOpt('clone_check_timeout',
+                    'is finished before we give up',
+               deprecated_name='restore_check_timeout'),
+    cfg.IntOpt('disco_clone_check_timeout',
                default=3600,
                help='How long we check whether a clone '
-                    'is finished before we give up'),
-    cfg.IntOpt('retry_interval',
+                    'is finished before we give up',
+               deprecated_name='clone_check_timeout'),
+    cfg.IntOpt('disco_retry_interval',
                default=1,
                help='How long we wait before retrying to '
-                    'get an item detail')
+                    'get an item detail',
+               deprecated_name='retry_interval')
 ]
 
 DISCO_CODE_MAPPING = {
@@ -89,7 +105,7 @@ DISCO_CODE_MAPPING = {
 }
 
 CONF = cfg.CONF
-CONF.register_opts(disco_opts)
+CONF.register_opts(disco_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 # Driver to communicate with DISCO storage solution
@@ -97,10 +113,12 @@ CONF.register_opts(disco_opts)
 class DiscoDriver(driver.VolumeDriver):
     """Execute commands related to DISCO Volumes.
 
-    Version history:
-        1.0 - disco volume driver using SOAP
-        1.1 - disco volume driver using REST and only compatible
-              with version greater than disco-1.6.4
+    .. code:: text
+
+      Version history:
+          1.0 - disco volume driver using SOAP
+          1.1 - disco volume driver using REST and only compatible
+                with version greater than disco-1.6.4
 
     """
 
@@ -111,16 +129,24 @@ class DiscoDriver(driver.VolumeDriver):
         """Init Disco driver : get configuration, create client."""
         super(DiscoDriver, self).__init__(*args, **kwargs)
         self.configuration.append_config_values(disco_opts)
+        self.configuration.append_config_values(san.san_opts)
         self.ctxt = context.get_admin_context()
         self.attach_detach_volume = (
-            disco_attach_detach.AttachDetachDiscoVolume())
+            disco_attach_detach.AttachDetachDiscoVolume(self.configuration))
 
     def do_setup(self, context):
         """Create client for DISCO request manager."""
         LOG.debug("Enter in DiscoDriver do_setup.")
-        if CONF.choice_client.lower() == "rest":
+        if (self.configuration.disco_choice_client.lower() == "rest" and
+                self.configuration.san_ip):
             self.client = disco_api.DiscoApi(
-                CONF.rest_ip, CONF.disco_src_api_port)
+                self.configuration.san_ip,
+                self.configuration.san_api_port)
+        elif (self.configuration.disco_choice_client.lower() == "rest" and
+                self.configuration.disco_rest_ip):
+            self.client = disco_api.DiscoApi(
+                self.configuration.disco_rest_ip,
+                self.configuration.disco_src_api_port)
         else:
             path = ''.join(['file:', self.configuration.disco_wsdl_path])
             init_client = client.Client(path, cache=None)
@@ -128,18 +154,20 @@ class DiscoDriver(driver.VolumeDriver):
 
     def check_for_setup_error(self):
         """Make sure we have the pre-requisites."""
-        if not CONF.rest_ip and CONF.choice_client.lower() == "rest":
-            msg = _("Could not find the IP address of the REST server.")
-            raise exception.VolumeBackendAPIException(data=msg)
-        else:
+        if self.configuration.disco_choice_client.lower() == "soap":
             path = self.configuration.disco_wsdl_path
             if not os.path.exists(path):
                 msg = _("Could not find DISCO wsdl file.")
                 raise exception.VolumeBackendAPIException(data=msg)
+        else:
+            if not (self.configuration.disco_rest_ip or
+                    self.configuration.san_ip):
+                msg = _("Could not find the IP address of the REST server.")
+                raise exception.VolumeBackendAPIException(data=msg)
 
     def create_volume(self, volume):
         """Create a disco volume."""
-        name = self.configuration.volume_name_prefix, volume["id"]
+        name = self.configuration.disco_volume_name_prefix, volume["id"]
         vol_name = ''.join(name)
         vol_size = volume['size'] * units.Ki
         LOG.debug("Create volume : [name] %(vname)s - [size] %(vsize)s.",
@@ -210,8 +238,9 @@ class DiscoDriver(driver.VolumeDriver):
         snapshot_request = DISCOCheck(self.client,
                                       params,
                                       start_time,
-                                      "snapshot_detail")
-        timeout = self.configuration.snapshot_check_timeout
+                                      "snapshot_detail",
+                                      self.configuration)
+        timeout = self.configuration.disco_snapshot_check_timeout
         snapshot_request._monitor_request(timeout)
 
         snapshot['provider_location'] = result
@@ -241,7 +270,7 @@ class DiscoDriver(driver.VolumeDriver):
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create a volume from a snapshot."""
-        name = self.configuration.volume_name_prefix, volume['id']
+        name = self.configuration.disco_volume_name_prefix, volume['id']
         snap_id = snapshot['provider_location']
         vol_name = ''.join(name)
         # Trigger an asynchronous restore operation
@@ -271,8 +300,9 @@ class DiscoDriver(driver.VolumeDriver):
         restore_request = DISCOCheck(self.client,
                                      params,
                                      start_time,
-                                     "restore_detail")
-        timeout = self.configuration.restore_check_timeout
+                                     "restore_detail",
+                                     self.configuration)
+        timeout = self.configuration.disco_restore_check_timeout
         restore_request._monitor_request(timeout)
         reply = self.client.volumeDetailByName(vol_name)
         status = reply['status']
@@ -292,7 +322,7 @@ class DiscoDriver(driver.VolumeDriver):
     def create_cloned_volume(self, volume, src_vref):
         """Create a clone of the specified volume."""
         LOG.debug("Creating clone of volume: %s.", src_vref['id'])
-        name = self.configuration.volume_name_prefix, volume['id']
+        name = self.configuration.disco_volume_name_prefix, volume['id']
         vol_name = ''.join(name)
         vol_size = volume['size'] * units.Ki
         src_vol_id = src_vref['provider_location']
@@ -322,8 +352,10 @@ class DiscoDriver(driver.VolumeDriver):
         clone_request = DISCOCheck(self.client,
                                    params,
                                    start_time,
-                                   "clone_detail")
-        clone_request._monitor_request(self.configuration.clone_check_timeout)
+                                   "clone_detail",
+                                   self.configuration)
+        clone_request._monitor_request(
+            self.configuration.disco_clone_check_timeout)
         reply = self.client.volumeDetailByName(vol_name)
         status = reply['status']
         new_vol_id = reply['volumeInfoResult']['volumeId']
@@ -346,7 +378,8 @@ class DiscoDriver(driver.VolumeDriver):
 
         try:
             attach_detach_volume = (
-                disco_attach_detach.AttachDetachDiscoVolume())
+                disco_attach_detach.AttachDetachDiscoVolume(
+                    self.configuration))
             device_info = attach_detach_volume._attach_volume(volume)
             image_utils.fetch_to_raw(context,
                                      image_service,
@@ -362,7 +395,8 @@ class DiscoDriver(driver.VolumeDriver):
         LOG.debug("Enter in copy image to volume for disco.")
         try:
             attach_detach_volume = (
-                disco_attach_detach.AttachDetachDiscoVolume())
+                disco_attach_detach.AttachDetachDiscoVolume(
+                    self.configuration))
             device_info = attach_detach_volume._attach_volume(volume)
             image_utils.upload_volume(context,
                                       image_service,
@@ -534,12 +568,13 @@ class DiscoDriver(driver.VolumeDriver):
 class DISCOCheck(object):
     """Used to monitor DISCO operations."""
 
-    def __init__(self, client, param, start_time, function):
+    def __init__(self, client, param, start_time, function, configuration):
         """Init some variables for checking some requests done in DISCO."""
         self.start_time = start_time
         self.function = function
         self.client = client
         self.param = param
+        self.configuration = configuration
 
     def is_timeout(self, start_time, timeout):
         """Check whether we reach the timeout."""
@@ -609,4 +644,4 @@ class DISCOCheck(object):
             timeout,
             self.function,
             self.param)
-        timer.start(interval=CONF.retry_interval).wait()
+        timer.start(interval=self.configuration.disco_retry_interval).wait()

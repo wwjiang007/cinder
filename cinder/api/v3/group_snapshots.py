@@ -13,7 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""The group_snapshots api."""
+"""The group_snapshots API."""
 
 from oslo_log import log as logging
 import six
@@ -22,8 +22,11 @@ import webob
 from webob import exc
 
 from cinder.api import common
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
+from cinder.api.schemas import group_snapshots as snapshot
 from cinder.api.v3.views import group_snapshots as group_snapshot_views
+from cinder.api import validation
 from cinder import exception
 from cinder import group as group_api
 from cinder.i18n import _
@@ -31,8 +34,6 @@ from cinder import rpc
 from cinder.volume import group_types
 
 LOG = logging.getLogger(__name__)
-
-GROUP_SNAPSHOT_API_VERSION = '3.14'
 
 
 class GroupSnapshotsController(wsgi.Controller):
@@ -52,7 +53,7 @@ class GroupSnapshotsController(wsgi.Controller):
                    % {'group_type': group_type_id})
             raise exc.HTTPBadRequest(explanation=msg)
 
-    @wsgi.Controller.api_version(GROUP_SNAPSHOT_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_SNAPSHOTS)
     def show(self, req, id):
         """Return data about the given group_snapshot."""
         LOG.debug('show called for member %s', id)
@@ -66,7 +67,7 @@ class GroupSnapshotsController(wsgi.Controller):
 
         return self._view_builder.detail(req, group_snapshot)
 
-    @wsgi.Controller.api_version(GROUP_SNAPSHOT_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_SNAPSHOTS)
     def delete(self, req, id):
         """Delete a group_snapshot."""
         LOG.debug('delete called for member %s', id)
@@ -93,12 +94,12 @@ class GroupSnapshotsController(wsgi.Controller):
 
         return webob.Response(status_int=http_client.ACCEPTED)
 
-    @wsgi.Controller.api_version(GROUP_SNAPSHOT_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_SNAPSHOTS)
     def index(self, req):
         """Returns a summary list of group_snapshots."""
         return self._get_group_snapshots(req, is_detail=False)
 
-    @wsgi.Controller.api_version(GROUP_SNAPSHOT_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_SNAPSHOTS)
     def detail(self, req):
         """Returns a detailed list of group_snapshots."""
         return self._get_group_snapshots(req, is_detail=True)
@@ -109,13 +110,16 @@ class GroupSnapshotsController(wsgi.Controller):
         context = req.environ['cinder.context']
         req_version = req.api_version_request
         filters = marker = limit = offset = sort_keys = sort_dirs = None
-        if req_version.matches("3.29"):
+        if req_version.matches(mv.GROUP_SNAPSHOT_PAGINATION):
             filters = req.params.copy()
             marker, limit, offset = common.get_pagination_params(filters)
             sort_keys, sort_dirs = common.get_sort_params(filters)
 
-        if req.api_version_request.matches(common.FILTERING_VERSION):
-            common.reject_invalid_filters(context, filters, 'group_snapshot')
+        if req_version.matches(mv.RESOURCE_FILTER):
+            support_like = (True if req_version.matches(
+                mv.LIKE_FILTER) else False)
+            common.reject_invalid_filters(context, filters, 'group_snapshot',
+                                          support_like)
 
         group_snapshots = self.group_snapshot_api.get_all_group_snapshots(
             context, filters=filters, marker=marker, limit=limit,
@@ -142,22 +146,17 @@ class GroupSnapshotsController(wsgi.Controller):
         group_snapshots['group_snapshots'] = new_group_snapshots
         return group_snapshots
 
-    @wsgi.Controller.api_version(GROUP_SNAPSHOT_API_VERSION)
+    @wsgi.Controller.api_version(mv.GROUP_SNAPSHOTS)
     @wsgi.response(http_client.ACCEPTED)
+    @validation.schema(snapshot.create)
     def create(self, req, body):
         """Create a new group_snapshot."""
         LOG.debug('Creating new group_snapshot %s', body)
-        self.assert_valid_body(body, 'group_snapshot')
 
         context = req.environ['cinder.context']
         group_snapshot = body['group_snapshot']
-        self.validate_name_and_description(group_snapshot)
 
-        try:
-            group_id = group_snapshot['group_id']
-        except KeyError:
-            msg = _("'group_id' must be specified")
-            raise exc.HTTPBadRequest(explanation=msg)
+        group_id = group_snapshot['group_id']
 
         group = self.group_snapshot_api.get(context, group_id)
         self._check_default_cgsnapshot_type(group.group_type_id)
@@ -180,8 +179,9 @@ class GroupSnapshotsController(wsgi.Controller):
 
         return retval
 
-    @wsgi.Controller.api_version('3.19')
+    @wsgi.Controller.api_version(mv.GROUP_SNAPSHOT_RESET_STATUS)
     @wsgi.action("reset_status")
+    @validation.schema(snapshot.reset_status)
     def reset_status(self, req, id, body):
         return self._reset_status(req, id, body)
 
@@ -189,10 +189,7 @@ class GroupSnapshotsController(wsgi.Controller):
         """Reset status on group snapshots"""
 
         context = req.environ['cinder.context']
-        try:
-            status = body['reset_status']['status'].lower()
-        except (TypeError, KeyError):
-            raise exc.HTTPBadRequest(explanation=_("Must specify 'status'"))
+        status = body['reset_status']['status'].lower()
 
         LOG.debug("Updating group '%(id)s' with "
                   "'%(update)s'", {'id': id,

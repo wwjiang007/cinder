@@ -22,12 +22,11 @@ import six
 from six.moves import http_client
 import webob
 
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
+from cinder.api.schemas import volume_metadata as metadata
 from cinder.api.v2 import volume_metadata as volume_meta_v2
-from cinder import exception
-
-
-METADATA_MICRO_VERSION = '3.15'
+from cinder.api import validation
 
 
 class Controller(volume_meta_v2.Controller):
@@ -43,38 +42,41 @@ class Controller(volume_meta_v2.Controller):
         checksum = hashlib.md5(data).hexdigest()
         return checksum in req.if_match.etags
 
-    def _ensure_min_version(self, req, allowed_version):
-        version = req.api_version_request
-        if not version.matches(allowed_version, None):
-            raise exception.VersionNotFoundForAPIMethod(version=version)
-
     @wsgi.extends
     def index(self, req, volume_id):
-        self._ensure_min_version(req, METADATA_MICRO_VERSION)
+        req_version = req.api_version_request
         metadata = super(Controller, self).index(req, volume_id)
-        resp = webob.Response()
-        data = jsonutils.dumps(metadata)
-        if six.PY3:
-            data = data.encode('utf-8')
-        resp.headers['Etag'] = hashlib.md5(data).hexdigest()
-        resp.body = data
-        return resp
+        if req_version.matches(mv.ETAGS):
+            data = jsonutils.dumps(metadata)
+            if six.PY3:
+                data = data.encode('utf-8')
+            resp = webob.Response()
+            resp.headers['Etag'] = hashlib.md5(data).hexdigest()
+            resp.body = data
+            return resp
+        return metadata
 
     @wsgi.extends
+    @validation.schema(metadata.update)
     def update(self, req, volume_id, id, body):
-        self._ensure_min_version(req, METADATA_MICRO_VERSION)
-        if not self._validate_etag(req, volume_id):
-            return webob.Response(status_int=http_client.PRECONDITION_FAILED)
+        req_version = req.api_version_request
+        if req_version.matches(mv.ETAGS):
+            if not self._validate_etag(req, volume_id):
+                return webob.Response(
+                    status_int=http_client.PRECONDITION_FAILED)
         return super(Controller, self).update(req, volume_id,
-                                              id, body)
+                                              id, body=body)
 
     @wsgi.extends
+    @validation.schema(metadata.create)
     def update_all(self, req, volume_id, body):
-        self._ensure_min_version(req, METADATA_MICRO_VERSION)
-        if not self._validate_etag(req, volume_id):
-            return webob.Response(status_int=http_client.PRECONDITION_FAILED)
+        req_version = req.api_version_request
+        if req_version.matches(mv.ETAGS):
+            if not self._validate_etag(req, volume_id):
+                return webob.Response(
+                    status_int=http_client.PRECONDITION_FAILED)
         return super(Controller, self).update_all(req, volume_id,
-                                                  body)
+                                                  body=body)
 
 
 def create_resource():

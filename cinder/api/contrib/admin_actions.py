@@ -20,6 +20,7 @@ from webob import exc
 
 from cinder.api import common
 from cinder.api import extensions
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
 from cinder import backup
 from cinder import db
@@ -78,9 +79,10 @@ class AdminController(wsgi.Controller):
         return update
 
     def authorize(self, context, action_name):
-        # e.g. "snapshot_admin_actions:reset_status"
-        action = '%s_admin_actions:%s' % (self.resource_name, action_name)
-        extensions.extension_authorizer('volume', action)(context)
+        context.authorize(
+            'volume_extension:%(resource)s_admin_actions:%(action)s' %
+            {'resource': self.resource_name,
+             'action': action_name})
 
     def _remove_worker(self, context, id):
         # Remove the cleanup worker from the DB when we change a resource
@@ -91,6 +93,7 @@ class AdminController(wsgi.Controller):
             LOG.debug('Worker entry for %s with id %s has been deleted.',
                       self.collection, id)
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-reset_status')
     def _reset_status(self, req, id, body):
         """Reset status on the resource."""
@@ -124,8 +127,7 @@ class AdminController(wsgi.Controller):
         notifier.info(context, self.collection + '.reset_status.end',
                       notifier_info)
 
-        return webob.Response(status_int=http_client.ACCEPTED)
-
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-force_delete')
     def _force_delete(self, req, id, body):
         """Delete a resource, bypassing the check that it must be available."""
@@ -134,7 +136,6 @@ class AdminController(wsgi.Controller):
         # Not found exception will be handled at the wsgi level
         resource = self._get(context, id)
         self._delete(context, resource, force=True)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
 
 class VolumeAdminController(AdminController):
@@ -198,6 +199,7 @@ class VolumeAdminController(AdminController):
                               "or 'migration_status' for update."))
         return update
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-force_detach')
     def _force_detach(self, req, id, body):
         """Roll back a bad detach after the volume been disconnected."""
@@ -207,9 +209,10 @@ class VolumeAdminController(AdminController):
         volume = self._get(context, id)
         try:
             connector = body['os-force_detach'].get('connector', None)
-        except KeyError:
-            raise webob.exc.HTTPBadRequest(
-                explanation=_("Must specify 'connector'."))
+        except AttributeError:
+            msg = _("Invalid value '%s' for "
+                    "os-force_detach.") % body['os-force_detach']
+            raise webob.exc.HTTPBadRequest(explanation=msg)
         try:
             self.volume_api.terminate_connection(context, volume, connector)
         except exception.VolumeBackendAPIException as error:
@@ -233,8 +236,8 @@ class VolumeAdminController(AdminController):
                 # be exposed to the user and in such cases it should raise
                 # 500 error.
                 raise
-        return webob.Response(status_int=http_client.ACCEPTED)
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-migrate_volume')
     def _migrate_volume(self, req, id, body):
         """Migrate a volume to the specified host."""
@@ -244,12 +247,12 @@ class VolumeAdminController(AdminController):
         volume = self._get(context, id)
         params = body['os-migrate_volume']
 
-        cluster_name, host = common.get_cluster_host(req, params, '3.16')
+        cluster_name, host = common.get_cluster_host(req, params,
+                                                     mv.VOLUME_MIGRATE_CLUSTER)
         force_host_copy = utils.get_bool_param('force_host_copy', params)
         lock_volume = utils.get_bool_param('lock_volume', params)
         self.volume_api.migrate_volume(context, volume, host, cluster_name,
                                        force_host_copy, lock_volume)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
     @wsgi.action('os-migrate_volume_completion')
     def _migrate_volume_completion(self, req, id, body):
@@ -308,6 +311,7 @@ class BackupAdminController(AdminController):
     def _delete(self, *args, **kwargs):
         return self.backup_api.delete(*args, **kwargs)
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-reset_status')
     def _reset_status(self, req, id, body):
         """Reset status on the resource."""
@@ -326,7 +330,6 @@ class BackupAdminController(AdminController):
         # Not found exception will be handled at the wsgi level
         self.backup_api.reset_status(context=context, backup_id=id,
                                      status=update['status'])
-        return webob.Response(status_int=http_client.ACCEPTED)
 
 
 class Admin_actions(extensions.ExtensionDescriptor):

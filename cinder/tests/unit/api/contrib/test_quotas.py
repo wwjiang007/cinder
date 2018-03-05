@@ -19,8 +19,8 @@ Tests for cinder.api.contrib.quotas.py
 """
 
 
+import ddt
 import mock
-
 import uuid
 import webob.exc
 
@@ -43,13 +43,14 @@ CONF = cfg.CONF
 
 def make_body(root=True, gigabytes=1000, snapshots=10,
               volumes=10, backups=10, backup_gigabytes=1000,
-              tenant_id=fake.PROJECT_ID, per_volume_gigabytes=-1):
+              tenant_id=fake.PROJECT_ID, per_volume_gigabytes=-1, groups=10):
     resources = {'gigabytes': gigabytes,
                  'snapshots': snapshots,
                  'volumes': volumes,
                  'backups': backups,
                  'backup_gigabytes': backup_gigabytes,
-                 'per_volume_gigabytes': per_volume_gigabytes, }
+                 'per_volume_gigabytes': per_volume_gigabytes,
+                 'groups': groups}
     # need to consider preexisting volume types as well
     volume_types = db.volume_type_get_all(context.get_admin_context())
 
@@ -119,7 +120,7 @@ class QuotaSetsControllerTestBase(test.TestCase):
         self.fixture.config(auth_uri=self.auth_url, group='keystone_authtoken')
 
     def _create_project_hierarchy(self):
-        """Sets an environment used for nested quotas tests.
+        r"""Sets an environment used for nested quotas tests.
 
         Create a project hierarchy such as follows:
         +-----------+
@@ -175,7 +176,7 @@ class QuotaSetsControllerTest(QuotaSetsControllerTestBase):
         self.req.environ['cinder.context'].is_admin = False
         self.req.environ['cinder.context'].user_id = fake.USER_ID
         self.req.environ['cinder.context'].project_id = fake.PROJECT_ID
-        self.assertRaises(webob.exc.HTTPForbidden, self.controller.show,
+        self.assertRaises(exception.PolicyNotAuthorized, self.controller.show,
                           self.req, fake.PROJECT2_ID)
 
     def test_show_non_admin_user(self):
@@ -308,32 +309,15 @@ class QuotaSetsControllerTest(QuotaSetsControllerTestBase):
                          db.quota_usage_get_all_by_project(ctxt,
                                                            fake.PROJECT_ID))
 
-    def test_update_lower_than_existing_resources_when_skip_false(self):
+    def test_update_lower_than_existing_resources(self):
         self._commit_quota_reservation()
-        body = {'quota_set': {'volumes': 0},
-                'skip_validation': 'false'}
+        body = {'quota_set': {'volumes': 0}}
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                           self.req, fake.PROJECT_ID, body)
         # Ensure that validation works even if some resources are valid
-        body = {'quota_set': {'gigabytes': 1, 'volumes': 10},
-                'skip_validation': 'false'}
+        body = {'quota_set': {'gigabytes': 1, 'volumes': 10}}
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                           self.req, fake.PROJECT_ID, body)
-
-    def test_update_lower_than_existing_resources_when_skip_true(self):
-        self._commit_quota_reservation()
-        body = {'quota_set': {'volumes': 0},
-                'skip_validation': 'true'}
-        result = self.controller.update(self.req, fake.PROJECT_ID, body)
-        self.assertEqual(body['quota_set']['volumes'],
-                         result['quota_set']['volumes'])
-
-    def test_update_lower_than_existing_resources_without_skip_argument(self):
-        self._commit_quota_reservation()
-        body = {'quota_set': {'volumes': 0}}
-        result = self.controller.update(self.req, fake.PROJECT_ID, body)
-        self.assertEqual(body['quota_set']['volumes'],
-                         result['quota_set']['volumes'])
 
     def test_delete(self):
         result_show = self.controller.show(self.req, fake.PROJECT_ID)
@@ -384,6 +368,7 @@ class QuotaSetsControllerTest(QuotaSetsControllerTestBase):
         self.controller.show(self.req, self.A.id)
 
 
+@ddt.ddt
 class QuotaSetControllerValidateNestedQuotaSetup(QuotaSetsControllerTestBase):
     """Validates the setup before using NestedQuota driver.
 
@@ -392,7 +377,7 @@ class QuotaSetControllerValidateNestedQuotaSetup(QuotaSetsControllerTestBase):
     """
 
     def _create_project_hierarchy(self):
-        """Sets an environment used for nested quotas tests.
+        r"""Sets an environment used for nested quotas tests.
 
         Create a project hierarchy such as follows:
         +-----------------+
@@ -415,6 +400,30 @@ class QuotaSetControllerValidateNestedQuotaSetup(QuotaSetsControllerTestBase):
 
         self.project_by_id.update({self.E.id: self.E, self.F.id: self.F,
                                    self.G.id: self.G})
+
+    @ddt.data({'param': None, 'result': False},
+              {'param': 'true', 'result': True},
+              {'param': 'false', 'result': False})
+    @ddt.unpack
+    def test_validate_setup_for_nested_quota_use_with_param(self, param,
+                                                            result):
+        with mock.patch(
+                'cinder.quota_utils.validate_setup_for_nested_quota_use') as \
+                mock_quota_utils:
+            if param:
+                self.req.params['fix_allocated_quotas'] = param
+            self.controller.validate_setup_for_nested_quota_use(self.req)
+            mock_quota_utils.assert_called_once_with(
+                self.req.environ['cinder.context'],
+                mock.ANY, mock.ANY,
+                fix_allocated_quotas=result)
+
+    def test_validate_setup_for_nested_quota_use_with_invalid_param(self):
+        self.req.params['fix_allocated_quotas'] = 'non_boolean'
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            self.controller.validate_setup_for_nested_quota_use,
+            self.req)
 
     def test_validate_nested_quotas_no_in_use_vols(self):
         # Update the project A quota.
@@ -1034,7 +1043,8 @@ class QuotaSetsControllerNestedQuotasTest(QuotaSetsControllerTestBase):
                     self.until_refresh = None
                     self.total = self.reserved + self.in_use
 
-        def _fake__get_quota_usages(context, session, project_id):
+        def _fake__get_quota_usages(context, session, project_id,
+                                    resources=None):
             if not project_id:
                 return {}
             return {'volumes': FakeUsage(fake_usages[project_id], 0)}

@@ -22,7 +22,6 @@ import time
 
 import ddt
 import mock
-from oslo_concurrency import processutils as putils
 from oslo_utils import timeutils
 import six
 from six.moves import range
@@ -33,6 +32,19 @@ from cinder import exception
 from cinder import test
 from cinder.tests.unit import fake_constants as fake
 from cinder import utils
+
+POOL_CAPS = {'total_capacity_gb': 0,
+             'free_capacity_gb': 0,
+             'allocated_capacity_gb': 0,
+             'provisioned_capacity_gb': 0,
+             'max_over_subscription_ratio': '1.0',
+             'thin_provisioning_support': False,
+             'thick_provisioning_support': True,
+             'reserved_percentage': 0,
+             'volume_backend_name': 'lvm1',
+             'timestamp': timeutils.utcnow(),
+             'multiattach': True,
+             'uuid': 'a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'}
 
 
 class ExecuteTestCase(test.TestCase):
@@ -65,6 +77,7 @@ class ExecuteTestCase(test.TestCase):
                                                 root_helper=mock_helper)
 
 
+@ddt.ddt
 class GenericUtilsTestCase(test.TestCase):
     def test_as_int(self):
         test_obj_int = '2'
@@ -136,25 +149,6 @@ class GenericUtilsTestCase(test.TestCase):
         self.assertEqual('/dev/xvda', utils.make_dev_path('xvda'))
         self.assertEqual('/dev/xvdb1', utils.make_dev_path('xvdb', 1))
         self.assertEqual('/foo/xvdc1', utils.make_dev_path('xvdc', 1, '/foo'))
-
-    @mock.patch('cinder.utils.execute')
-    def test_read_file_as_root(self, mock_exec):
-        out = mock.Mock()
-        err = mock.Mock()
-        mock_exec.return_value = (out, err)
-        test_filepath = '/some/random/path'
-        output = utils.read_file_as_root(test_filepath)
-        mock_exec.assert_called_once_with('cat', test_filepath,
-                                          run_as_root=True)
-        self.assertEqual(out, output)
-
-    @mock.patch('cinder.utils.execute',
-                side_effect=putils.ProcessExecutionError)
-    def test_read_file_as_root_fails(self, mock_exec):
-        test_filepath = '/some/random/path'
-        self.assertRaises(exception.FileNotFound,
-                          utils.read_file_as_root,
-                          test_filepath)
 
     @test.testtools.skipIf(sys.platform == "darwin", "SKIP on OSX")
     @mock.patch('tempfile.NamedTemporaryFile')
@@ -282,6 +276,21 @@ class GenericUtilsTestCase(test.TestCase):
         self.assertEqual('sudo cinder-rootwrap /path/to/conf',
                          utils.get_root_helper())
 
+    @ddt.data({'path_a': 'test', 'path_b': 'test', 'exp_eq': True})
+    @ddt.data({'path_a': 'test', 'path_b': 'other', 'exp_eq': False})
+    @ddt.unpack
+    @mock.patch('os.path.normcase')
+    def test_paths_normcase_equal(self, mock_normcase, path_a,
+                                  path_b, exp_eq):
+        # os.path.normcase will lower the path string on Windows
+        # while doing nothing on other platforms.
+        mock_normcase.side_effect = lambda x: x
+
+        result = utils.paths_normcase_equal(path_a, path_b)
+        self.assertEqual(exp_eq, result)
+
+        mock_normcase.assert_has_calls([mock.call(path_a), mock.call(path_b)])
+
 
 class TemporaryChownTestCase(test.TestCase):
     @mock.patch('os.stat')
@@ -325,6 +334,16 @@ class TemporaryChownTestCase(test.TestCase):
         mock_getuid.assert_called_once_with()
         mock_stat.assert_called_once_with(test_filename)
         self.assertFalse(mock_exec.called)
+
+    @mock.patch('os.name', 'nt')
+    @mock.patch('os.stat')
+    @mock.patch('cinder.utils.execute')
+    def test_temporary_chown_win32(self, mock_exec, mock_stat):
+        with utils.temporary_chown(mock.sentinel.path):
+            pass
+
+        mock_exec.assert_not_called()
+        mock_stat.assert_not_called()
 
 
 class TempdirTestCase(test.TestCase):
@@ -1475,7 +1494,7 @@ class TestLogLevels(test.TestCase):
     def test_get_log_levels(self):
         levels = utils.get_log_levels('cinder.api')
         self.assertTrue(len(levels) > 1)
-        self.assertSetEqual({'DEBUG'}, set(levels.values()))
+        self.assertSetEqual({'INFO'}, set(levels.values()))
 
     @ddt.data(None, '', 'wronglevel')
     def test_set_log_levels_invalid(self, level):
@@ -1485,12 +1504,113 @@ class TestLogLevels(test.TestCase):
     def test_set_log_levels(self):
         prefix = 'cinder.utils'
         levels = utils.get_log_levels(prefix)
+
+        utils.set_log_levels(prefix, 'debug')
+        levels = utils.get_log_levels(prefix)
         self.assertEqual('DEBUG', levels[prefix])
 
         utils.set_log_levels(prefix, 'warning')
         levels = utils.get_log_levels(prefix)
         self.assertEqual('WARNING', levels[prefix])
 
-        utils.set_log_levels(prefix, 'debug')
-        levels = utils.get_log_levels(prefix)
-        self.assertEqual('DEBUG', levels[prefix])
+
+@ddt.ddt
+class TestCheckMetadataProperties(test.TestCase):
+    @ddt.data(
+        {'a': {'foo': 'bar'}},  # value is a nested dict
+        {'a': 123},  # value is an integer
+        {'a': 123.4},  # value is a float
+        {'a': True},  # value is a bool
+        {'a': ('foo', 'bar')},  # value is a tuple
+        {'a': []},  # value is a list
+        {'a': None}  # value is None
+    )
+    def test_metadata_value_not_string_raise(self, meta):
+        self.assertRaises(exception.InvalidVolumeMetadata,
+                          utils.check_metadata_properties,
+                          meta)
+
+    def test_metadata_value_not_dict_raise(self):
+        meta = 123
+        self.assertRaises(exception.InvalidInput,
+                          utils.check_metadata_properties,
+                          meta)
+
+
+POOL_CAP1 = {'allocated_capacity_gb': 10, 'provisioned_capacity_gb': 10,
+             'thin_provisioning_support': False, 'total_capacity_gb': 10,
+             'free_capacity_gb': 10, 'max_over_subscription_ratio': 1.0}
+POOL_CAP2 = {'allocated_capacity_gb': 10, 'provisioned_capacity_gb': 10,
+             'thin_provisioning_support': True, 'total_capacity_gb': 100,
+             'free_capacity_gb': 95, 'max_over_subscription_ratio': None}
+POOL_CAP3 = {'allocated_capacity_gb': 0, 'provisioned_capacity_gb': 0,
+             'thin_provisioning_support': True, 'total_capacity_gb': 100,
+             'free_capacity_gb': 100, 'max_over_subscription_ratio': 'auto'}
+POOL_CAP4 = {'allocated_capacity_gb': 100,
+             'thin_provisioning_support': True, 'total_capacity_gb': 2500,
+             'free_capacity_gb': 500, 'max_over_subscription_ratio': 'auto'}
+POOL_CAP5 = {'allocated_capacity_gb': 10000,
+             'thin_provisioning_support': True, 'total_capacity_gb': 2500,
+             'free_capacity_gb': 0.1, 'max_over_subscription_ratio': 'auto'}
+POOL_CAP6 = {'allocated_capacity_gb': 1000, 'provisioned_capacity_gb': 1010,
+             'thin_provisioning_support': True, 'total_capacity_gb': 2500,
+             'free_capacity_gb': 2500, 'max_over_subscription_ratio': 'auto'}
+POOL_CAP7 = {'allocated_capacity_gb': 10, 'provisioned_capacity_gb': 10,
+             'thin_provisioning_support': True, 'total_capacity_gb': 10,
+             'free_capacity_gb': 10}
+POOL_CAP8 = {'allocated_capacity_gb': 10, 'provisioned_capacity_gb': 10,
+             'thin_provisioning_support': True, 'total_capacity_gb': 10,
+             'free_capacity_gb': 10, 'max_over_subscription_ratio': '15.5'}
+POOL_CAP9 = {'allocated_capacity_gb': 10, 'provisioned_capacity_gb': 10,
+             'thin_provisioning_support': True, 'total_capacity_gb': 10,
+             'free_capacity_gb': 'unknown',
+             'max_over_subscription_ratio': '15.5'}
+POOL_CAP10 = {'allocated_capacity_gb': 10, 'provisioned_capacity_gb': 10,
+              'thin_provisioning_support': True,
+              'total_capacity_gb': 'infinite', 'free_capacity_gb': 10,
+              'max_over_subscription_ratio': '15.5'}
+
+
+@ddt.ddt
+class TestAutoMaxOversubscriptionRatio(test.TestCase):
+    @ddt.data({'data': POOL_CAP1,
+               'global_max_over_subscription_ratio': 'auto',
+               'expected_result': 1.0},
+              {'data': POOL_CAP2,
+               'global_max_over_subscription_ratio': 'auto',
+               'expected_result': 2.67},
+              {'data': POOL_CAP3,
+               'global_max_over_subscription_ratio': '20.0',
+               'expected_result': 20},
+              {'data': POOL_CAP4,
+               'global_max_over_subscription_ratio': '20.0',
+               'expected_result': 1.05},
+              {'data': POOL_CAP5,
+               'global_max_over_subscription_ratio': '10.0',
+               'expected_result': 5.0},
+              {'data': POOL_CAP6,
+               'global_max_over_subscription_ratio': '20.0',
+               'expected_result': 1011.0},
+              {'data': POOL_CAP7,
+               'global_max_over_subscription_ratio': 'auto',
+               'expected_result': 11.0},
+              {'data': POOL_CAP8,
+               'global_max_over_subscription_ratio': '20.0',
+               'expected_result': 15.5},
+              {'data': POOL_CAP9,
+               'global_max_over_subscription_ratio': '20.0',
+               'expected_result': 1.0},
+              {'data': POOL_CAP10,
+               'global_max_over_subscription_ratio': '20.0',
+               'expected_result': 1.0},
+              )
+    @ddt.unpack
+    def test_calculate_max_over_subscription_ratio(
+            self, data, expected_result, global_max_over_subscription_ratio):
+
+        result = utils.calculate_max_over_subscription_ratio(
+            data, global_max_over_subscription_ratio)
+        # Just for sake of testing we reduce the float precision
+        if result is not None:
+            result = round(result, 2)
+        self.assertEqual(expected_result, result)

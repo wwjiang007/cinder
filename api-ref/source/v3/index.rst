@@ -22,9 +22,10 @@ Block Storage API V3 (CURRENT)
 .. include:: volumes-v3-volumes-actions.inc
 
 .. List the other random volume APIs in just alphabetical order.
-.. include:: os-vol-image-meta-v3.inc
 .. include:: volume-manage.inc
 .. include:: volumes-v3-snapshots.inc
+.. include:: volumes-v3-snapshots-actions.inc
+.. include:: snapshot-manage.inc
 .. include:: os-vol-transfer-v3.inc
 
 .. Now the other random things in alphabetical order.
@@ -35,13 +36,19 @@ Block Storage API V3 (CURRENT)
 .. include:: capabilities-v3.inc
 .. include:: consistencygroups-v3.inc
 .. include:: os-cgsnapshots-v3.inc
+.. include:: os-services.inc
 .. include:: groups.inc
+.. include:: group-replication.inc
 .. include:: group-snapshots.inc
 .. include:: group-types.inc
+.. include:: group-type-specs.inc
 .. include:: hosts.inc
 .. include:: limits.inc
 .. include:: messages.inc
+.. include:: resource-filters.inc
 .. include:: qos-specs-v3-qos-specs.inc
 .. quota-sets should arguably live closer to limits, but that would mess up
    our nice alphabetical ordering
+.. include:: quota-classes.inc
 .. include:: quota-sets.inc
+.. include:: worker-cleanup.inc

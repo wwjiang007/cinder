@@ -17,13 +17,17 @@ Tests for Backup NFS driver.
 
 """
 import bz2
+import ddt
 import filecmp
 import hashlib
 import os
 import shutil
+import stat
 import tempfile
+import threading
 import zlib
 
+from eventlet import tpool
 import mock
 from os_brick.remotefs import remotefs as remotefs_brick
 from oslo_config import cfg
@@ -37,7 +41,6 @@ from cinder.i18n import _
 from cinder import objects
 from cinder import test
 from cinder.tests.unit import fake_constants as fake
-from cinder import utils
 
 CONF = cfg.CONF
 
@@ -54,8 +57,10 @@ FAKE_BACKUP_ID_REST = fake.BACKUP_ID[4:]
 UPDATED_CONTAINER_NAME = os.path.join(FAKE_BACKUP_ID_PART1,
                                       FAKE_BACKUP_ID_PART2,
                                       FAKE_BACKUP_ID)
+FAKE_EGID = 1234
 
 
+@ddt.ddt
 class BackupNFSShareTestCase(test.TestCase):
 
     def setUp(self):
@@ -68,38 +73,67 @@ class BackupNFSShareTestCase(test.TestCase):
         self.mock_object(nfs.NFSBackupDriver, '_init_backup_repo_path',
                          return_value=FAKE_BACKUP_PATH)
 
-        with mock.patch.object(nfs.NFSBackupDriver, '_check_configuration'):
-            driver = nfs.NFSBackupDriver(self.ctxt)
-        self.assertRaises(exception.ConfigNotFound,
-                          driver._check_configuration)
+        driver = nfs.NFSBackupDriver(self.ctxt)
+        self.assertRaises(exception.InvalidConfigurationValue,
+                          driver.check_for_setup_error)
 
-    @mock.patch.object(remotefs_brick, 'RemoteFsClient')
-    def test_init_backup_repo_path(self, mock_remotefs_client_class):
+    @mock.patch('os.getegid', return_value=FAKE_EGID)
+    @mock.patch('cinder.utils.get_file_gid')
+    @mock.patch('cinder.utils.get_file_mode')
+    @ddt.data((FAKE_EGID, 0),
+              (FAKE_EGID, stat.S_IWGRP),
+              (6666, 0),
+              (6666, stat.S_IWGRP))
+    @ddt.unpack
+    def test_init_backup_repo_path(self,
+                                   file_gid,
+                                   file_mode,
+                                   mock_get_file_mode,
+                                   mock_get_file_gid,
+                                   mock_getegid):
         self.override_config('backup_share', FAKE_BACKUP_SHARE)
         self.override_config('backup_mount_point_base',
                              FAKE_BACKUP_MOUNT_POINT_BASE)
         mock_remotefsclient = mock.Mock()
         mock_remotefsclient.get_mount_point = mock.Mock(
             return_value=FAKE_BACKUP_PATH)
-        self.mock_object(nfs.NFSBackupDriver, '_check_configuration')
-        mock_remotefs_client_class.return_value = mock_remotefsclient
-        self.mock_object(utils, 'get_root_helper')
+        self.mock_object(nfs.NFSBackupDriver, 'check_for_setup_error')
+        self.mock_object(remotefs_brick, 'RemoteFsClient',
+                         return_value=mock_remotefsclient)
+
         with mock.patch.object(nfs.NFSBackupDriver, '_init_backup_repo_path'):
             driver = nfs.NFSBackupDriver(self.ctxt)
+
+        mock_get_file_gid.return_value = file_gid
+        mock_get_file_mode.return_value = file_mode
+        mock_execute = self.mock_object(driver, '_execute')
 
         path = driver._init_backup_repo_path()
 
         self.assertEqual(FAKE_BACKUP_PATH, path)
-        utils.get_root_helper.called_once()
-        mock_remotefs_client_class.assert_called_once_with(
-            'nfs',
-            utils.get_root_helper(),
-            nfs_mount_point_base=FAKE_BACKUP_MOUNT_POINT_BASE,
-            nfs_mount_options=None
-        )
         mock_remotefsclient.mount.assert_called_once_with(FAKE_BACKUP_SHARE)
         mock_remotefsclient.get_mount_point.assert_called_once_with(
             FAKE_BACKUP_SHARE)
+
+        mock_execute_calls = []
+        if file_gid != FAKE_EGID:
+            mock_execute_calls.append(
+                mock.call('chgrp',
+                          FAKE_EGID,
+                          path,
+                          root_helper=driver._root_helper,
+                          run_as_root=True))
+
+        if not (file_mode & stat.S_IWGRP):
+            mock_execute_calls.append(
+                mock.call('chmod',
+                          'g+w',
+                          path,
+                          root_helper=driver._root_helper,
+                          run_as_root=True))
+
+        mock_execute.assert_has_calls(mock_execute_calls, any_order=True)
+        self.assertEqual(len(mock_execute_calls), mock_execute.call_count)
 
 
 def fake_md5(arg):
@@ -143,6 +177,16 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
                   }
         return db.backup_create(self.ctxt, backup)['id']
 
+    def _write_effective_compression_file(self, data_size):
+        """Ensure file contents can be effectively compressed."""
+        self.volume_file.seek(0)
+        self.volume_file.write(bytes([65] * data_size))
+        self.volume_file.seek(0)
+
+    def _store_thread(self, *args, **kwargs):
+        self.thread_dict['thread'] = threading.current_thread()
+        return self.thread_original_method(*args, **kwargs)
+
     def setUp(self):
         super(BackupNFSSwiftBasedTestCase, self).setUp()
 
@@ -153,17 +197,19 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self.addCleanup(self.volume_file.close)
         self.override_config('backup_share', FAKE_BACKUP_SHARE)
         self.override_config('backup_mount_point_base',
-                             '/tmp')
+                             FAKE_BACKUP_MOUNT_POINT_BASE)
         self.override_config('backup_file_size', 52428800)
-        mock_remotefsclient = mock.Mock()
-        mock_remotefsclient.get_mount_point = mock.Mock(
-            return_value=self.temp_dir)
-        self.mock_object(remotefs_brick, 'RemoteFsClient',
-                         return_value=mock_remotefsclient)
+        self.mock_object(nfs.NFSBackupDriver, '_init_backup_repo_path',
+                         return_value=self.temp_dir)
         # Remove tempdir.
         self.addCleanup(shutil.rmtree, self.temp_dir)
+        self.size_volume_file = 0
         for _i in range(0, 32):
             self.volume_file.write(os.urandom(1024))
+            self.size_volume_file += 1024
+
+        # Use dictionary to share data between threads
+        self.thread_dict = {}
 
     def test_backup_uncompressed(self):
         volume_id = fake.VOLUME_ID
@@ -179,7 +225,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='bz2')
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -188,7 +234,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='zlib')
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -518,7 +564,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
 
         In backup(), after an exception occurs in
         self._backup_metadata(), we want to check the process when the
-        second exception occurs in self.delete().
+        second exception occurs in self.delete_backup().
         """
         volume_id = fake.VOLUME_ID
 
@@ -539,7 +585,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
             raise exception.BackupOperationError()
 
         # Raise a pseudo exception.BackupOperationError.
-        self.mock_object(nfs.NFSBackupDriver, 'delete', fake_delete)
+        self.mock_object(nfs.NFSBackupDriver, 'delete_backup', fake_delete)
 
         # We expect that the second exception is notified.
         self.assertRaises(exception.BackupOperationError,
@@ -565,14 +611,17 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
                             restored_file.name))
 
     def test_restore_bz2(self):
+        self.thread_original_method = bz2.decompress
         volume_id = fake.VOLUME_ID
+        self.mock_object(bz2, 'decompress', side_effect=self._store_thread)
 
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='bz2')
-        self.flags(backup_file_size=(1024 * 3))
+        file_size = 1024 * 3
+        self.flags(backup_file_size=file_size)
         self.flags(backup_sha_block_size_bytes=1024)
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(file_size)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -582,15 +631,21 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
             self.assertTrue(filecmp.cmp(self.volume_file.name,
                             restored_file.name))
 
+        self.assertNotEqual(threading.current_thread(),
+                            self.thread_dict['thread'])
+
     def test_restore_zlib(self):
+        self.thread_original_method = zlib.decompress
+        self.mock_object(zlib, 'decompress', side_effect=self._store_thread)
         volume_id = fake.VOLUME_ID
 
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='zlib')
-        self.flags(backup_file_size=(1024 * 3))
+        file_size = 1024 * 3
+        self.flags(backup_file_size=file_size)
         self.flags(backup_sha_block_size_bytes=1024)
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(file_size)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -599,6 +654,9 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
             service.restore(backup, volume_id, restored_file)
             self.assertTrue(filecmp.cmp(self.volume_file.name,
                             restored_file.name))
+
+        self.assertNotEqual(threading.current_thread(),
+                            self.thread_dict['thread'])
 
     def test_restore_delta(self):
         volume_id = fake.VOLUME_ID
@@ -654,7 +712,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         service = nfs.NFSBackupDriver(self.ctxt)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
-        service.delete(backup)
+        service.delete_backup(backup)
 
     def test_get_compressor(self):
         service = nfs.NFSBackupDriver(self.ctxt)
@@ -662,8 +720,10 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self.assertIsNone(compressor)
         compressor = service._get_compressor('zlib')
         self.assertEqual(compressor, zlib)
+        self.assertIsInstance(compressor, tpool.Proxy)
         compressor = service._get_compressor('bz2')
         self.assertEqual(compressor, bz2)
+        self.assertIsInstance(compressor, tpool.Proxy)
         self.assertRaises(ValueError, service._get_compressor, 'fake')
 
     def create_buffer(self, size):
@@ -677,12 +737,19 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         return fake_data
 
     def test_prepare_output_data_effective_compression(self):
+        """Test compression works on a native thread."""
+        self.thread_original_method = zlib.compress
+        self.mock_object(zlib, 'compress', side_effect=self._store_thread)
+
         service = nfs.NFSBackupDriver(self.ctxt)
         fake_data = self.create_buffer(128)
+
         result = service._prepare_output_data(fake_data)
 
         self.assertEqual('zlib', result[0])
-        self.assertGreater(len(fake_data), len(result))
+        self.assertGreater(len(fake_data), len(result[1]))
+        self.assertNotEqual(threading.current_thread(),
+                            self.thread_dict['thread'])
 
     def test_prepare_output_data_no_compresssion(self):
         self.flags(backup_compression_algorithm='none')

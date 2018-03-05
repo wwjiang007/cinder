@@ -38,7 +38,7 @@ class TestBaseISCSITargetDriver(tf.TargetDriverFixture):
                                                     'CHAP otzL 234Z'}))
 
     def test_abc_methods_not_present_fails(self):
-        configuration = conf.Configuration(cfg.StrOpt('iscsi_target_prefix',
+        configuration = conf.Configuration(cfg.StrOpt('target_prefix',
                                                       default='foo',
                                                       help='you wish'))
         self.assertRaises(TypeError,
@@ -136,7 +136,7 @@ class TestBaseISCSITargetDriver(tf.TargetDriverFixture):
                           bad_connector)
 
         connector = {'initiator': 'fake_init'}
-        self.assertTrue(self.target.validate_connector,
+        self.assertTrue(bool(self.target.validate_connector),
                         connector)
 
     def test_show_target_error(self):

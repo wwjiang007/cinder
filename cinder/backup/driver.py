@@ -25,7 +25,6 @@ import six
 from cinder.db import base
 from cinder import exception
 from cinder.i18n import _
-from cinder import keymgr as key_manager
 
 service_opts = [
     cfg.IntOpt('backup_metadata_version', default=2,
@@ -54,9 +53,10 @@ class BackupMetadataAPI(base.Base):
     TYPE_TAG_VOL_META = 'volume-metadata'
     TYPE_TAG_VOL_GLANCE_META = 'volume-glance-metadata'
 
-    def __init__(self, context, db_driver=None):
-        super(BackupMetadataAPI, self).__init__(db_driver)
+    def __init__(self, context, db=None):
+        super(BackupMetadataAPI, self).__init__(db)
         self.context = context
+        self._key_mgr = None
 
     @staticmethod
     def _is_serializable(value):
@@ -87,11 +87,13 @@ class BackupMetadataAPI(base.Base):
                     LOG.info("Unable to serialize field '%s' - excluding "
                              "from backup", key)
                     continue
-                # Copy the encryption key uuid for backup
-                if key is 'encryption_key_id' and value is not None:
-                    km = key_manager.API(CONF)
-                    value = km.store(self.context, km.get(self.context, value))
-                    LOG.debug("Copying encryption key uuid for backup.")
+                # NOTE(abishop): The backup manager is now responsible for
+                # ensuring a copy of the volume's encryption key ID is
+                # retained in case the volume is deleted. Yes, this means
+                # the backup's volume base metadata now stores the volume's
+                # original encryption key ID, which affects how things are
+                # handled when backups are restored. The backup manager
+                # handles this, too.
                 container[type_tag][key] = value
 
             LOG.debug("Completed fetching metadata type '%s'", type_tag)
@@ -347,10 +349,10 @@ class BackupMetadataAPI(base.Base):
 @six.add_metaclass(abc.ABCMeta)
 class BackupDriver(base.Base):
 
-    def __init__(self, context, db_driver=None):
-        super(BackupDriver, self).__init__(db_driver)
+    def __init__(self, context, db=None):
+        super(BackupDriver, self).__init__(db)
         self.context = context
-        self.backup_meta_api = BackupMetadataAPI(context, db_driver)
+        self.backup_meta_api = BackupMetadataAPI(context, db)
         # This flag indicates if backup driver supports force
         # deletion. So it should be set to True if the driver that inherits
         # from BackupDriver supports the force deletion function.
@@ -364,16 +366,28 @@ class BackupDriver(base.Base):
 
     @abc.abstractmethod
     def backup(self, backup, volume_file, backup_metadata=False):
-        """Start a backup of a specified volume."""
+        """Start a backup of a specified volume.
+
+        Some I/O operations may block greenthreads, so in order to prevent
+        starvation parameter volume_file will be a proxy that will execute all
+        methods in native threads, so the method implementation doesn't need to
+        worry about that..
+        """
         return
 
     @abc.abstractmethod
     def restore(self, backup, volume_id, volume_file):
-        """Restore a saved backup."""
+        """Restore a saved backup.
+
+        Some I/O operations may block greenthreads, so in order to prevent
+        starvation parameter volume_file will be a proxy that will execute all
+        methods in native threads, so the method implementation doesn't need to
+        worry about that..
+        """
         return
 
     @abc.abstractmethod
-    def delete(self, backup):
+    def delete_backup(self, backup):
         """Delete a saved backup."""
         return
 
@@ -408,6 +422,10 @@ class BackupDriver(base.Base):
                             information
         :returns: nothing
         """
+        return
+
+    def check_for_setup_error(self):
+        """Method for checking if backup backend is successfully installed."""
         return
 
 

@@ -23,12 +23,12 @@ from cinder import test
 # NOTE: The hashes in this list should only be changed if they come with a
 # corresponding version bump in the affected objects.
 object_data = {
-    'Backup': '1.4-c50f7a68bb4c400dd53dd219685b3992',
+    'Backup': '1.6-c7ede487ba6fbcdd2a4711343cd972be',
     'BackupDeviceInfo': '1.0-74b3950676c690538f4bc6796bd0042e',
-    'BackupImport': '1.4-c50f7a68bb4c400dd53dd219685b3992',
+    'BackupImport': '1.6-c7ede487ba6fbcdd2a4711343cd972be',
     'BackupList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'CleanupRequest': '1.0-e7c688b893e1d5537ccf65cc3eb10a28',
-    'Cluster': '1.1-cdb1572b250837933d950cc6662313b8',
+    'Cluster': '1.1-e2c533eb8cdd8d229b6c45c6cf3a9e2c',
     'ClusterList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'CGSnapshot': '1.1-3212ac2b4c2811b7134fb9ba2c49ff74',
     'CGSnapshotList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
@@ -41,22 +41,22 @@ object_data = {
     'ManageableVolume': '1.0-5fd0152237ec9dfb7b5c7095b8b09ffa',
     'ManageableVolumeList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'QualityOfServiceSpecs': '1.0-0b212e0a86ee99092229874e03207fe8',
-    'QualityOfServiceSpecsList': '1.0-1b54e51ad0fc1f3a8878f5010e7e16dc',
-    'RequestSpec': '1.1-b0bd1a28d191d75648901fa853e8a733',
-    'Service': '1.4-c7d011989d1718ca0496ccf640b42712',
+    'QualityOfServiceSpecsList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
+    'RequestSpec': '1.3-9510bf37e30fd4c282599a4b2a26675e',
+    'Service': '1.6-e881b6b324151dd861e09cdfffcdaccd',
     'ServiceList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
-    'Snapshot': '1.4-b7aa184837ccff570b8443bfd1773017',
+    'Snapshot': '1.5-ac1cdbd5b89588f6a8f44afdf6b8b201',
     'SnapshotList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
-    'Volume': '1.6-7d3bc8577839d5725670d55e480fe95f',
+    'Volume': '1.8-6cf615b72269cef48702a2a5c2940159',
     'VolumeList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
-    'VolumeAttachment': '1.2-b68b357a1756582b706006ea9de40c9a',
+    'VolumeAttachment': '1.3-e6a3f7c5590d19f1e3ff6f819fbe6593',
     'VolumeAttachmentList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'VolumeProperties': '1.1-cadac86b2bdc11eb79d1dcea988ff9e8',
     'VolumeType': '1.3-a5d8c3473db9bc3bbcdbab9313acf4d1',
     'VolumeTypeList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'GroupType': '1.0-d4a7b272199d0b0d6fc3ceed58539d30',
-    'GroupTypeList': '1.0-1b54e51ad0fc1f3a8878f5010e7e16dc',
-    'Group': '1.1-bd853b1d1ee05949d9ce4b33f80ac1a0',
+    'GroupTypeList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
+    'Group': '1.2-2ade6acf2e55687b980048fc3f51dad9',
     'GroupList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'GroupSnapshot': '1.0-9af3e994e889cbeae4427c3e351fa91d',
     'GroupSnapshotList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
@@ -70,9 +70,14 @@ class TestObjectVersions(test.TestCase):
             base.CinderObjectRegistry.obj_classes())
         expected, actual = checker.test_hashes(object_data)
         self.assertEqual(expected, actual,
-                         'Some objects have changed; please make sure the '
-                         'versions have been bumped, and then update their '
-                         'hashes in the object_data map in this test module.')
+                         "Some objects have changed; please make sure the "
+                         "versions have been bumped and backporting "
+                         "compatibility code has been added to "
+                         "obj_make_compatible if necessary, and then update "
+                         "their hashes in the object_data map in this test "
+                         "module.  If we don't need to add backporting code "
+                         "then it means we also don't need the version bump "
+                         "and we just have to change the hash in this module.")
 
     def test_versions_history(self):
         classes = base.CinderObjectRegistry.obj_classes()
@@ -96,6 +101,12 @@ class TestObjectVersions(test.TestCase):
         # db model and object match.
         def _check_table_matched(db_model, cls):
             for column in db_model.__table__.columns:
+
+                # NOTE(jdg): Model and Object don't match intentionally here
+                if (column.name in cls.fields and
+                        (column.name == 'uuid' and name == 'Service')):
+                    continue
+
                 # NOTE(xyang): Skip the comparison of the colume name
                 # group_type_id in table Group because group_type_id
                 # is in the object Group but it is stored in a different
@@ -121,7 +132,9 @@ class TestObjectVersions(test.TestCase):
         # the converted data, but at least ensures the method doesn't blow
         # up on something simple.
         init_args = {}
-        init_kwargs = {objects.Snapshot: {'context': 'ctxt'}}
+        init_kwargs = {objects.Snapshot: {'context': 'ctxt'},
+                       objects.Backup: {'context': 'ctxt'},
+                       objects.BackupImport: {'context': 'ctxt'}}
         checker = fixture.ObjectVersionChecker(
             base.CinderObjectRegistry.obj_classes())
         checker.test_compatibility_routines(init_args=init_args,

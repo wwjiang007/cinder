@@ -37,7 +37,7 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 QUOTAS = quota.QUOTAS
 ENCRYPTION_IGNORED_FIELDS = ['volume_type_id', 'created_at', 'updated_at',
-                             'deleted_at']
+                             'deleted_at', 'encryption_id']
 
 
 def create(context,
@@ -275,7 +275,7 @@ def volume_types_diff(context, vol_type_id1, vol_type_id2):
     whether there is any difference, and 'diff' is a dictionary with the
     following format:
 
-    .. code-block:: json
+    .. code-block:: default
 
         {
             'extra_specs': {'key1': (value_in_1st_vol_type,

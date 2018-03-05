@@ -21,6 +21,7 @@ import mock
 from oslo_config import cfg
 from oslo_serialization import jsonutils
 
+from cinder.common import constants
 from cinder import db
 from cinder import exception
 from cinder import objects
@@ -356,7 +357,7 @@ class VolumeRPCAPITestCase(test.RPCAPITestCase):
     def test_freeze_host(self):
         service = fake_service.fake_service_obj(self.context,
                                                 host='fake_host',
-                                                binary='cinder-volume')
+                                                binary=constants.VOLUME_BINARY)
         self._test_rpc_api('freeze_host',
                            rpc_method='call',
                            server='fake_host',
@@ -366,7 +367,7 @@ class VolumeRPCAPITestCase(test.RPCAPITestCase):
     def test_thaw_host(self):
         service = fake_service.fake_service_obj(self.context,
                                                 host='fake_host',
-                                                binary='cinder-volume')
+                                                binary=constants.VOLUME_BINARY)
         self._test_rpc_api('thaw_host',
                            rpc_method='call',
                            server='fake_host',
@@ -592,3 +593,66 @@ class VolumeRPCAPITestCase(test.RPCAPITestCase):
                            service=service,
                            log_request='log_request',
                            version='3.12')
+
+    @ddt.data(None, 'mycluster')
+    def test_initialize_connection_snapshot(self, cluster_name):
+        self._change_cluster_name(self.fake_snapshot.volume, cluster_name)
+        self._test_rpc_api('initialize_connection_snapshot',
+                           rpc_method='call',
+                           server=(cluster_name or
+                                   self.fake_snapshot.volume.host),
+                           connector='fake_connector',
+                           snapshot=self.fake_snapshot,
+                           expected_kwargs_diff={
+                               'snapshot_id': self.fake_snapshot.id},
+                           version='3.13')
+
+    @ddt.data(None, 'mycluster')
+    def test_terminate_connection_snapshot(self, cluster_name):
+        self._change_cluster_name(self.fake_snapshot.volume, cluster_name)
+        self._test_rpc_api('terminate_connection_snapshot',
+                           rpc_method='call',
+                           server=(cluster_name or
+                                   self.fake_snapshot.volume.host),
+                           snapshot=self.fake_snapshot,
+                           connector='fake_connector',
+                           force=False,
+                           retval=None,
+                           expected_kwargs_diff={
+                               'snapshot_id': self.fake_snapshot.id},
+                           version='3.13')
+
+    def test_remove_export_snapshot(self):
+        self._test_rpc_api('remove_export_snapshot',
+                           rpc_method='cast',
+                           server=self.fake_volume_obj.host,
+                           snapshot=self.fake_snapshot,
+                           expected_kwargs_diff={
+                               'snapshot_id': self.fake_snapshot.id},
+                           version='3.13')
+
+    def test_enable_replication(self):
+        self._test_rpc_api('enable_replication', rpc_method='cast',
+                           server=self.fake_group.host,
+                           group=self.fake_group,
+                           version='3.14')
+
+    def test_disable_replication(self):
+        self._test_rpc_api('disable_replication', rpc_method='cast',
+                           server=self.fake_group.host,
+                           group=self.fake_group,
+                           version='3.14')
+
+    def test_failover_replication(self):
+        self._test_rpc_api('failover_replication', rpc_method='cast',
+                           server=self.fake_group.host,
+                           group=self.fake_group,
+                           allow_attached_volume=False,
+                           secondary_backend_id=None,
+                           version='3.14')
+
+    def test_list_replication_targets(self):
+        self._test_rpc_api('list_replication_targets', rpc_method='call',
+                           server=self.fake_group.host,
+                           group=self.fake_group,
+                           version='3.14')

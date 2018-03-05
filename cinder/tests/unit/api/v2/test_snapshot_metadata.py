@@ -28,6 +28,7 @@ from cinder import context
 import cinder.db
 from cinder import exception
 from cinder.objects import fields
+from cinder.scheduler import rpcapi as scheduler_rpcapi
 from cinder import test
 from cinder.tests.unit.api import fakes
 from cinder.tests.unit import fake_constants as fake
@@ -113,8 +114,10 @@ class SnapshotMetaDataTest(test.TestCase):
         super(SnapshotMetaDataTest, self).setUp()
         self.volume_api = cinder.volume.api.API()
         self.mock_object(volume.api.API, 'get', fake_get)
+        self.mock_object(scheduler_rpcapi.SchedulerAPI, 'create_snapshot')
         self.mock_object(cinder.db, 'snapshot_get', return_snapshot)
         self.mock_object(self.volume_api, 'update_snapshot_metadata')
+        self.patch('cinder.objects.volume.Volume.refresh')
 
         self.ext_mgr = extensions.ExtensionManager()
         self.ext_mgr.extensions = {}
@@ -124,16 +127,13 @@ class SnapshotMetaDataTest(test.TestCase):
         self.url = '/v2/%s/snapshots/%s/metadata' % (
             fake.PROJECT_ID, self.req_id)
 
-        snap = {"volume_size": 100,
-                "volume_id": fake.VOLUME_ID,
+        snap = {"volume_id": fake.VOLUME_ID,
                 "display_name": "Volume Test Name",
-                "display_description": "Volume Test Desc",
-                "availability_zone": "zone1:host1",
-                "host": "fake-host",
+                "description": "Volume Test Desc",
                 "metadata": {}}
         body = {"snapshot": snap}
         req = fakes.HTTPRequest.blank('/v2/snapshots')
-        self.snapshot_controller.create(req, body)
+        self.snapshot_controller.create(req, body=body)
 
     @mock.patch('cinder.objects.Snapshot.get_by_id')
     def test_index(self, snapshot_get_by_id):

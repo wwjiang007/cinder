@@ -23,7 +23,7 @@ import webob
 from webob import exc
 
 from cinder.api.contrib import admin_actions
-from cinder.api.openstack import api_version_request as api_version
+from cinder.api import microversions as mv
 from cinder.backup import api as backup_api
 from cinder.backup import rpcapi as backup_rpcapi
 from cinder.common import constants
@@ -35,12 +35,12 @@ from cinder.objects import base as obj_base
 from cinder.objects import fields
 from cinder.scheduler import rpcapi as scheduler_rpcapi
 from cinder import test
-from cinder.tests.unit.api.contrib import test_backups
 from cinder.tests.unit.api import fakes
 from cinder.tests.unit.api.v2 import fakes as v2_fakes
 from cinder.tests.unit import cast_as_call
 from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import fake_snapshot
+from cinder.tests.unit import utils as test_utils
 from cinder.volume import api as volume_api
 from cinder.volume import rpcapi
 
@@ -50,6 +50,13 @@ def app():
     api = fakes.router.APIRouter()
     mapper = fakes.urlmap.URLMap()
     mapper['/v2'] = api
+    return mapper
+
+
+def app_v3():
+    api = fakes.router.APIRouter()
+    mapper = fakes.urlmap.URLMap()
+    mapper['/v3'] = api
     return mapper
 
 
@@ -63,7 +70,7 @@ class BaseAdminTest(test.TestCase):
     def _create_volume(self, context, updates=None):
         db_volume = {'status': 'available',
                      'host': 'test',
-                     'binary': 'cinder-volume',
+                     'binary': constants.VOLUME_BINARY,
                      'availability_zone': 'fake_zone',
                      'attach_status': fields.VolumeAttachStatus.DETACHED}
         if updates:
@@ -98,9 +105,9 @@ class AdminActionsTest(BaseAdminTest):
 
         def _get_minimum_rpc_version_mock(ctxt, binary):
             binary_map = {
-                'cinder-volume': rpcapi.VolumeAPI,
-                'cinder-backup': backup_rpcapi.BackupAPI,
-                'cinder-scheduler': scheduler_rpcapi.SchedulerAPI,
+                constants.VOLUME_BINARY: rpcapi.VolumeAPI,
+                constants.BACKUP_BINARY: backup_rpcapi.BackupAPI,
+                constants.SCHEDULER_BINARY: scheduler_rpcapi.SchedulerAPI,
             }
             return binary_map[binary].RPC_API_VERSION
 
@@ -260,10 +267,7 @@ class AdminActionsTest(BaseAdminTest):
 
     def test_backup_reset_status_as_non_admin(self):
         ctx = context.RequestContext(fake.USER_ID, fake.PROJECT_ID)
-        backup = db.backup_create(ctx, {'status': 'available',
-                                        'size': 1,
-                                        'volume_id': "fakeid",
-                                        'host': 'test'})
+        backup = test_utils.create_backup(ctx, status='available')
         resp = self._issue_backup_reset(ctx,
                                         backup,
                                         {'status': fields.BackupStatus.ERROR})
@@ -504,12 +508,12 @@ class AdminActionsTest(BaseAdminTest):
         db.service_create(self.ctx,
                           {'host': 'test',
                            'topic': constants.VOLUME_TOPIC,
-                           'binary': 'cinder-volume',
+                           'binary': constants.VOLUME_BINARY,
                            'created_at': timeutils.utcnow()})
         db.service_create(self.ctx,
                           {'host': 'test2',
                            'topic': constants.VOLUME_TOPIC,
-                           'binary': 'cinder-volume',
+                           'binary': constants.VOLUME_BINARY,
                            'created_at': timeutils.utcnow()})
         db.service_create(self.ctx,
                           {'host': 'clustered_host',
@@ -528,29 +532,29 @@ class AdminActionsTest(BaseAdminTest):
                                force_host_copy=False, version=None,
                                cluster=None):
         # build request to migrate to host
-        # req = fakes.HTTPRequest.blank('/v3/%s/volumes/%s/action' % (
-        #     fake.PROJECT_ID, volume['id']))
         req = webob.Request.blank('/v3/%s/volumes/%s/action' % (
             fake.PROJECT_ID, volume['id']))
         req.method = 'POST'
-        req.headers['content-type'] = 'application/json'
         body = {'os-migrate_volume': {'host': host,
                                       'force_host_copy': force_host_copy}}
-        version = version or '3.0'
-        req.headers = {'OpenStack-API-Version': 'volume %s' % version}
-        req.api_version_request = api_version.APIVersionRequest(version)
-        if version == '3.16':
+        version = version or mv.BASE_VERSION
+        req.headers = mv.get_mv_header(version)
+        req.headers['Content-Type'] = 'application/json'
+        req.api_version_request = mv.get_api_version(version)
+        if version == mv.VOLUME_MIGRATE_CLUSTER:
             body['os-migrate_volume']['cluster'] = cluster
         req.body = jsonutils.dump_as_bytes(body)
         req.environ['cinder.context'] = ctx
-        resp = self.controller._migrate_volume(req, volume.id, body)
+        resp = req.get_response(app_v3())
 
         # verify status
         self.assertEqual(expected_status, resp.status_int)
         volume = db.volume_get(self.ctx, volume['id'])
         return volume
 
-    @ddt.data('3.0', '3.15', '3.16')
+    @ddt.data(mv.BASE_VERSION,
+              mv.get_prior_version(mv.VOLUME_MIGRATE_CLUSTER),
+              mv.VOLUME_MIGRATE_CLUSTER)
     def test_migrate_volume_success_3(self, version):
         expected_status = http_client.ACCEPTED
         host = 'test2'
@@ -566,7 +570,8 @@ class AdminActionsTest(BaseAdminTest):
         cluster = 'cluster'
         volume = self._migrate_volume_prep()
         volume = self._migrate_volume_3_exec(self.ctx, volume, host,
-                                             expected_status, version='3.16',
+                                             expected_status,
+                                             version=mv.VOLUME_MIGRATE_CLUSTER,
                                              cluster=cluster)
         self.assertEqual('starting', volume['migration_status'])
 
@@ -575,9 +580,10 @@ class AdminActionsTest(BaseAdminTest):
         host = 'test2'
         cluster = 'cluster'
         volume = self._migrate_volume_prep()
-        self.assertRaises(exception.InvalidInput,
-                          self._migrate_volume_3_exec, self.ctx, volume, host,
-                          None, version='3.16', cluster=cluster)
+        expected_status = http_client.BAD_REQUEST
+        self._migrate_volume_3_exec(self.ctx, volume, host, expected_status,
+                                    version=mv.VOLUME_MIGRATE_CLUSTER,
+                                    cluster=cluster)
 
     def _migrate_volume_exec(self, ctx, volume, host, expected_status,
                              force_host_copy=False):
@@ -613,6 +619,18 @@ class AdminActionsTest(BaseAdminTest):
                                      {'provider_location': '',
                                       'attach_status': None,
                                       'replication_status': 'active'})
+        volume = self._migrate_volume_exec(self.ctx, volume, host,
+                                           expected_status)
+
+    def test_migrate_volume_replication_not_caple_success(self):
+        expected_status = http_client.ACCEPTED
+        host = 'test2'
+        volume = self._migrate_volume_prep()
+        # current status is available
+        volume = self._create_volume(self.ctx,
+                                     {'provider_location': '',
+                                      'attach_status': None,
+                                      'replication_status': 'not-capable'})
         volume = self._migrate_volume_exec(self.ctx, volume, host,
                                            expected_status)
 
@@ -771,24 +789,26 @@ class AdminActionsTest(BaseAdminTest):
                                   mock_service_get_all):
         mock_service_get_all.return_value = [
             {'availability_zone': "az1", 'host': 'testhost',
-             'disabled': 0, 'updated_at': timeutils.utcnow()}]
+             'disabled': 0, 'updated_at': timeutils.utcnow(),
+             'uuid': 'a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'}]
         # admin context
         mock_check_support.return_value = True
         # current status is dependent on argument: test_status.
-        id = test_backups.BackupsAPITestCase._create_backup(status=test_status)
+        backup = test_utils.create_backup(self.ctx, status=test_status,
+                                          size=1, availability_zone='az1',
+                                          host='testhost')
         req = webob.Request.blank('/v2/%s/backups/%s/action' % (
-            fake.PROJECT_ID, id))
+            fake.PROJECT_ID, backup.id))
         req.method = 'POST'
         req.headers['Content-Type'] = 'application/json'
         req.body = jsonutils.dump_as_bytes({'os-force_delete': {}})
         req.environ['cinder.context'] = self.ctx
         res = req.get_response(app())
 
+        backup.refresh()
         self.assertEqual(http_client.ACCEPTED, res.status_int)
-        self.assertEqual(
-            'deleting',
-            test_backups.BackupsAPITestCase._get_backup_attrib(id, 'status'))
-        db.backup_destroy(self.ctx, id)
+        self.assertEqual('deleting', backup.status)
+        backup.destroy()
 
     def test_delete_backup_force_when_creating(self):
         self._force_delete_backup_util('creating')
@@ -813,9 +833,9 @@ class AdminActionsTest(BaseAdminTest):
     def test_delete_backup_force_when_not_supported(self, mock_check_support):
         # admin context
         self.override_config('backup_driver', 'cinder.backup.drivers.ceph')
-        id = test_backups.BackupsAPITestCase._create_backup()
+        backup = test_utils.create_backup(self.ctx, size=1)
         req = webob.Request.blank('/v2/%s/backups/%s/action' % (
-            fake.PROJECT_ID, id))
+            fake.PROJECT_ID, backup.id))
         req.method = 'POST'
         req.headers['Content-Type'] = 'application/json'
         req.body = jsonutils.dump_as_bytes({'os-force_delete': {}})
@@ -978,24 +998,6 @@ class AdminActionsAttachDetachTest(BaseAdminTest):
             resp = req.get_response(app())
             self.assertEqual(http_client.BAD_REQUEST, resp.status_int)
 
-        # test for KeyError when missing connector
-        volume_remote_error = (
-            messaging.RemoteError(exc_type='KeyError'))
-        with mock.patch.object(volume_api.API, 'detach',
-                               side_effect=volume_remote_error):
-            req = webob.Request.blank('/v2/%s/volumes/%s/action' % (
-                fake.PROJECT_ID, volume.id))
-            req.method = 'POST'
-            req.headers['content-type'] = 'application/json'
-            body = {'os-force_detach': {'attachment_id': fake.ATTACHMENT_ID}}
-            req.body = jsonutils.dump_as_bytes(body)
-            # attach admin context to request
-            req.environ['cinder.context'] = self.ctx
-            # make request
-            self.assertRaises(messaging.RemoteError,
-                              req.get_response,
-                              app())
-
         # test for VolumeBackendAPIException
         volume_remote_error = (
             messaging.RemoteError(exc_type='VolumeBackendAPIException'))
@@ -1060,6 +1062,46 @@ class AdminActionsAttachDetachTest(BaseAdminTest):
             self.assertRaises(messaging.RemoteError,
                               req.get_response,
                               app())
+
+    def test_volume_force_detach_missing_connector(self):
+        # current status is available
+        volume = self._create_volume(self.ctx, {'provider_location': '',
+                                                'size': 1})
+        connector = {'initiator': 'iqn.2012-07.org.fake:01'}
+
+        self.volume_api.reserve_volume(self.ctx, volume)
+        mountpoint = '/dev/vbd'
+        attachment = self.volume_api.attach(self.ctx, volume, fake.INSTANCE_ID,
+                                            None, mountpoint, 'rw')
+        # volume is attached
+        volume.refresh()
+        self.assertEqual('in-use', volume.status)
+        self.assertEqual(fake.INSTANCE_ID, attachment['instance_uuid'])
+        self.assertEqual(mountpoint, attachment['mountpoint'])
+        self.assertEqual(fields.VolumeAttachStatus.ATTACHED,
+                         attachment['attach_status'])
+        admin_metadata = volume.admin_metadata
+        self.assertEqual(2, len(admin_metadata))
+        self.assertEqual('False', admin_metadata['readonly'])
+        self.assertEqual('rw', admin_metadata['attached_mode'])
+        conn_info = self.volume_api.initialize_connection(self.ctx,
+                                                          volume,
+                                                          connector)
+        self.assertEqual('rw', conn_info['data']['access_mode'])
+
+        # test when missing connector
+        with mock.patch.object(volume_api.API, 'detach'):
+            req = webob.Request.blank('/v2/%s/volumes/%s/action' % (
+                fake.PROJECT_ID, volume.id))
+            req.method = 'POST'
+            req.headers['content-type'] = 'application/json'
+            body = {'os-force_detach': {'attachment_id': fake.ATTACHMENT_ID}}
+            req.body = jsonutils.dump_as_bytes(body)
+            # attach admin context to request
+            req.environ['cinder.context'] = self.ctx
+            # make request
+            resp = req.get_response(app())
+            self.assertEqual(http_client.ACCEPTED, resp.status_int)
 
     def test_attach_in_used_volume_by_instance(self):
         """Test that attaching to an in-use volume fails."""

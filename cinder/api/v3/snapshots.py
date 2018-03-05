@@ -13,13 +13,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""The volumes snapshots V3 api."""
+"""The volumes snapshots V3 API."""
 
 import ast
 
 from oslo_log import log as logging
 
 from cinder.api import common
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
 from cinder.api.v2 import snapshots as snapshots_v2
 from cinder.api.v3.views import snapshots as snapshot_views
@@ -56,9 +57,10 @@ class SnapshotsController(snapshots_v2.SnapshotsController):
                                     req_version=None):
         """Formats allowed filters"""
 
-        # if the max version is less than or same as 3.21
+        # if the max version is less than SNAPSHOT_LIST_METADATA_FILTER
         # metadata based filtering is not supported
-        if req_version.matches(None, "3.21"):
+        if req_version.matches(
+                None, mv.get_prior_version(mv.SNAPSHOT_LIST_METADATA_FILTER)):
             filters.pop('metadata', None)
 
         # Filter out invalid options
@@ -76,6 +78,13 @@ class SnapshotsController(snapshots_v2.SnapshotsController):
         sort_keys, sort_dirs = common.get_sort_params(search_opts)
         marker, limit, offset = common.get_pagination_params(search_opts)
 
+        req_version = req.api_version_request
+        show_count = False
+        if req_version.matches(
+                mv.SUPPORT_COUNT_INFO) and 'with_count' in search_opts:
+            show_count = utils.get_bool_param('with_count', search_opts)
+            search_opts.pop('with_count')
+
         # process filters
         self._process_snapshot_filtering(context=context,
                                          filters=search_opts,
@@ -84,27 +93,34 @@ class SnapshotsController(snapshots_v2.SnapshotsController):
         self._format_snapshot_filter_options(search_opts)
 
         req_version = req.api_version_request
-        if req_version.matches("3.30", None) and 'name' in sort_keys:
+        if req_version.matches(mv.SNAPSHOT_SORT, None) and 'name' in sort_keys:
             sort_keys[sort_keys.index('name')] = 'display_name'
 
         # NOTE(thingee): v3 API allows name instead of display_name
         if 'name' in search_opts:
             search_opts['display_name'] = search_opts.pop('name')
 
-        snapshots = self.volume_api.get_all_snapshots(context,
-                                                      search_opts=search_opts,
-                                                      marker=marker,
-                                                      limit=limit,
-                                                      sort_keys=sort_keys,
-                                                      sort_dirs=sort_dirs,
-                                                      offset=offset)
+        snapshots = self.volume_api.get_all_snapshots(
+            context,
+            search_opts=search_opts.copy(),
+            marker=marker,
+            limit=limit,
+            sort_keys=sort_keys,
+            sort_dirs=sort_dirs,
+            offset=offset)
+        total_count = None
+        if show_count:
+            total_count = self.volume_api.calculate_resource_count(
+                context, 'snapshot', search_opts)
 
         req.cache_db_snapshots(snapshots.objects)
 
         if is_detail:
-            snapshots = self._view_builder.detail_list(req, snapshots.objects)
+            snapshots = self._view_builder.detail_list(req, snapshots.objects,
+                                                       total_count)
         else:
-            snapshots = self._view_builder.summary_list(req, snapshots.objects)
+            snapshots = self._view_builder.summary_list(req, snapshots.objects,
+                                                        total_count)
         return snapshots
 
 

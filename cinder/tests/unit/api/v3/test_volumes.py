@@ -16,25 +16,30 @@ import ddt
 import iso8601
 
 import mock
+from oslo_utils import strutils
 import webob
 
 from cinder.api import extensions
-from cinder.api.openstack import api_version_request as api_version
+from cinder.api import microversions as mv
+from cinder.api.v2.views.volumes import ViewBuilder
 from cinder.api.v3 import volumes
+from cinder.backup import api as backup_api
 from cinder import context
 from cinder import db
 from cinder import exception
 from cinder.group import api as group_api
+from cinder import objects
+from cinder.objects import fields
 from cinder import test
 from cinder.tests.unit.api import fakes
 from cinder.tests.unit.api.v2 import fakes as v2_fakes
 from cinder.tests.unit.api.v2 import test_volumes as v2_test_volumes
 from cinder.tests.unit import fake_constants as fake
+from cinder.tests.unit.image import fake as fake_image
+from cinder.tests.unit import utils as test_utils
 from cinder import utils
 from cinder.volume import api as volume_api
 from cinder.volume import api as vol_get
-
-version_header_name = 'OpenStack-API-Version'
 
 DEFAULT_AZ = "zone1:host1"
 
@@ -45,6 +50,7 @@ class VolumeApiTest(test.TestCase):
         super(VolumeApiTest, self).setUp()
         self.ext_mgr = extensions.ExtensionManager()
         self.ext_mgr.extensions = {}
+        fake_image.mock_image_service(self)
         self.controller = volumes.VolumeController(self.ext_mgr)
 
         self.flags(host='fake')
@@ -56,7 +62,7 @@ class VolumeApiTest(test.TestCase):
             req = fakes.HTTPRequest.blank('/v3/volumes?bootable=True')
             req.method = 'GET'
             req.content_type = 'application/json'
-            req.headers = {version_header_name: 'volume 3.0'}
+            req.headers = mv.get_mv_header(mv.BASE_VERSION)
             req.environ['cinder.context'].is_admin = True
 
             self.override_config('query_volume_filters', 'bootable')
@@ -72,9 +78,10 @@ class VolumeApiTest(test.TestCase):
             req = fakes.HTTPRequest.blank('/v3/volumes?bootable=True')
             req.method = 'GET'
             req.content_type = 'application/json'
-            req.headers = {version_header_name: 'volume 3.2'}
+            req.headers = mv.get_mv_header(mv.VOLUME_LIST_BOOTABLE)
             req.environ['cinder.context'].is_admin = True
-            req.api_version_request = api_version.APIVersionRequest('3.29')
+            req.api_version_request = mv.get_api_version(
+                mv.VOLUME_LIST_BOOTABLE)
 
             self.override_config('query_volume_filters', 'bootable')
             self.controller.index(req)
@@ -97,25 +104,36 @@ class VolumeApiTest(test.TestCase):
                                          'qcow2')
         return [vol1, vol2]
 
-    def _create_volume_with_consistency_group(self):
+    def _create_volume_with_group(self):
         vol1 = db.volume_create(self.ctxt, {'display_name': 'test1',
                                             'project_id':
                                             self.ctxt.project_id,
-                                            'consistencygroup_id':
-                                            fake.CONSISTENCY_GROUP_ID})
+                                            'group_id':
+                                            fake.GROUP_ID})
         vol2 = db.volume_create(self.ctxt, {'display_name': 'test2',
                                             'project_id':
                                             self.ctxt.project_id,
-                                            'consistencygroup_id':
-                                            fake.CONSISTENCY_GROUP2_ID})
+                                            'group_id':
+                                            fake.GROUP2_ID})
         return [vol1, vol2]
+
+    def _create_multiple_volumes_with_different_project(self):
+        # Create volumes in project 1
+        db.volume_create(self.ctxt, {'display_name': 'test1',
+                                     'project_id': fake.PROJECT_ID})
+        db.volume_create(self.ctxt, {'display_name': 'test2',
+                                     'project_id': fake.PROJECT_ID})
+        # Create volume in project 2
+        db.volume_create(self.ctxt, {'display_name': 'test3',
+                                     'project_id': fake.PROJECT2_ID})
 
     def test_volume_index_filter_by_glance_metadata(self):
         vols = self._create_volume_with_glance_metadata()
         req = fakes.HTTPRequest.blank("/v3/volumes?glance_metadata="
                                       "{'image_name': 'imageTestOne'}")
-        req.headers["OpenStack-API-Version"] = "volume 3.4"
-        req.api_version_request = api_version.APIVersionRequest('3.4')
+        req.headers = mv.get_mv_header(mv.VOLUME_LIST_GLANCE_METADATA)
+        req.api_version_request = mv.get_api_version(
+            mv.VOLUME_LIST_GLANCE_METADATA)
         req.environ['cinder.context'] = self.ctxt
         res_dict = self.controller.index(req)
         volumes = res_dict['volumes']
@@ -126,45 +144,162 @@ class VolumeApiTest(test.TestCase):
         self._create_volume_with_glance_metadata()
         req = fakes.HTTPRequest.blank("/v3/volumes?glance_metadata="
                                       "{'image_name': 'imageTestOne'}")
-        req.headers["OpenStack-API-Version"] = "volume 3.0"
-        req.api_version_request = api_version.APIVersionRequest('3.0')
+        req.headers = mv.get_mv_header(mv.BASE_VERSION)
+        req.api_version_request = mv.get_api_version(mv.BASE_VERSION)
         req.environ['cinder.context'] = self.ctxt
         res_dict = self.controller.index(req)
         volumes = res_dict['volumes']
         self.assertEqual(2, len(volumes))
 
     def test_volume_index_filter_by_group_id(self):
-        vols = self._create_volume_with_consistency_group()
+        vols = self._create_volume_with_group()
         req = fakes.HTTPRequest.blank(("/v3/volumes?group_id=%s") %
-                                      fake.CONSISTENCY_GROUP_ID)
-        req.headers["OpenStack-API-Version"] = "volume 3.10"
-        req.api_version_request = api_version.APIVersionRequest('3.10')
+                                      fake.GROUP_ID)
+        req.headers = mv.get_mv_header(mv.VOLUME_LIST_GROUP)
+        req.api_version_request = mv.get_api_version(mv.VOLUME_LIST_GROUP)
         req.environ['cinder.context'] = self.ctxt
         res_dict = self.controller.index(req)
         volumes = res_dict['volumes']
         self.assertEqual(1, len(volumes))
         self.assertEqual(vols[0].id, volumes[0]['id'])
 
+    @ddt.data('volumes', 'volumes/detail')
+    def test_list_volume_with_count_param_version_not_matched(self, action):
+        self._create_multiple_volumes_with_different_project()
+
+        is_detail = True if 'detail' in action else False
+        req = fakes.HTTPRequest.blank("/v3/%s?with_count=True" % action)
+        req.headers = mv.get_mv_header(
+            mv.get_prior_version(mv.SUPPORT_COUNT_INFO))
+        req.api_version_request = mv.get_api_version(
+            mv.get_prior_version(mv.SUPPORT_COUNT_INFO))
+        ctxt = context.RequestContext(fake.USER_ID, fake.PROJECT_ID, True)
+        req.environ['cinder.context'] = ctxt
+        res_dict = self.controller._get_volumes(req, is_detail=is_detail)
+        self.assertNotIn('count', res_dict)
+
+    @ddt.data({'method': 'volumes',
+               'display_param': 'True'},
+              {'method': 'volumes',
+               'display_param': 'False'},
+              {'method': 'volumes',
+               'display_param': '1'},
+              {'method': 'volumes/detail',
+               'display_param': 'True'},
+              {'method': 'volumes/detail',
+               'display_param': 'False'},
+              {'method': 'volumes/detail',
+               'display_param': '1'}
+              )
+    @ddt.unpack
+    def test_list_volume_with_count_param(self, method, display_param):
+        self._create_multiple_volumes_with_different_project()
+
+        is_detail = True if 'detail' in method else False
+        show_count = strutils.bool_from_string(display_param, strict=True)
+        # Request with 'with_count' and 'limit'
+        req = fakes.HTTPRequest.blank(
+            "/v3/%s?with_count=%s&limit=1" % (method, display_param))
+        req.headers = mv.get_mv_header(mv.SUPPORT_COUNT_INFO)
+        req.api_version_request = mv.get_api_version(mv.SUPPORT_COUNT_INFO)
+        ctxt = context.RequestContext(fake.USER_ID, fake.PROJECT_ID, False)
+        req.environ['cinder.context'] = ctxt
+        res_dict = self.controller._get_volumes(req, is_detail=is_detail)
+        self.assertEqual(1, len(res_dict['volumes']))
+        if show_count:
+            self.assertEqual(2, res_dict['count'])
+        else:
+            self.assertNotIn('count', res_dict)
+
+        # Request with 'with_count'
+        req = fakes.HTTPRequest.blank(
+            "/v3/%s?with_count=%s" % (method, display_param))
+        req.headers = mv.get_mv_header(mv.SUPPORT_COUNT_INFO)
+        req.api_version_request = mv.get_api_version(mv.SUPPORT_COUNT_INFO)
+        ctxt = context.RequestContext(fake.USER_ID, fake.PROJECT_ID, False)
+        req.environ['cinder.context'] = ctxt
+        res_dict = self.controller._get_volumes(req, is_detail=is_detail)
+        self.assertEqual(2, len(res_dict['volumes']))
+        if show_count:
+            self.assertEqual(2, res_dict['count'])
+        else:
+            self.assertNotIn('count', res_dict)
+
+        # Request with admin context and 'all_tenants'
+        req = fakes.HTTPRequest.blank(
+            "/v3/%s?with_count=%s&all_tenants=1" % (method, display_param))
+        req.headers = mv.get_mv_header(mv.SUPPORT_COUNT_INFO)
+        req.api_version_request = mv.get_api_version(mv.SUPPORT_COUNT_INFO)
+        ctxt = context.RequestContext(fake.USER_ID, fake.PROJECT_ID, True)
+        req.environ['cinder.context'] = ctxt
+        res_dict = self.controller._get_volumes(req, is_detail=is_detail)
+        self.assertEqual(3, len(res_dict['volumes']))
+        if show_count:
+            self.assertEqual(3, res_dict['count'])
+        else:
+            self.assertNotIn('count', res_dict)
+
     def test_volume_index_filter_by_group_id_in_unsupport_version(self):
-        self._create_volume_with_consistency_group()
+        self._create_volume_with_group()
         req = fakes.HTTPRequest.blank(("/v3/volumes?group_id=%s") %
-                                      fake.CONSISTENCY_GROUP2_ID)
-        req.headers["OpenStack-API-Version"] = "volume 3.9"
-        req.api_version_request = api_version.APIVersionRequest('3.9')
+                                      fake.GROUP_ID)
+        req.headers = mv.get_mv_header(mv.BACKUP_UPDATE)
+        req.api_version_request = mv.get_api_version(mv.BACKUP_UPDATE)
         req.environ['cinder.context'] = self.ctxt
         res_dict = self.controller.index(req)
         volumes = res_dict['volumes']
         self.assertEqual(2, len(volumes))
 
-    def _fake_volumes_summary_request(self, version='3.12'):
-        req = fakes.HTTPRequest.blank('/v3/volumes/summary')
-        req.headers = {'OpenStack-API-Version': 'volume ' + version}
-        req.api_version_request = api_version.APIVersionRequest(version)
+    def _fake_volumes_summary_request(self,
+                                      version=mv.VOLUME_SUMMARY,
+                                      all_tenant=False,
+                                      is_admin=False):
+        req_url = '/v3/volumes/summary'
+        if all_tenant:
+            req_url += '?all_tenants=True'
+        req = fakes.HTTPRequest.blank(req_url, use_admin_context=is_admin)
+        req.headers = mv.get_mv_header(version)
+        req.api_version_request = mv.get_api_version(version)
         return req
+
+    @mock.patch.object(db.sqlalchemy.api, '_volume_type_get_full',
+                       autospec=True)
+    @mock.patch.object(volume_api.API, 'get_snapshot', autospec=True)
+    @mock.patch.object(volume_api.API, 'create', autospec=True)
+    @mock.patch(
+        'cinder.api.openstack.wsgi.Controller.validate_name_and_description')
+    def test_volume_create_with_snapshot_image(self, mock_validate, create,
+                                               get_snapshot, volume_type_get):
+        create.side_effect = v2_fakes.fake_volume_api_create
+        get_snapshot.side_effect = v2_fakes.fake_snapshot_get
+        volume_type_get.side_effect = v2_fakes.fake_volume_type_get
+
+        self.ext_mgr.extensions = {'os-image-create': 'fake'}
+        vol = self._vol_in_request_body(
+            image_id="b0a599e0-41d7-3582-b260-769f443c862a")
+
+        snapshot_id = fake.SNAPSHOT_ID
+        ex = self._expected_vol_from_controller(snapshot_id=snapshot_id)
+        body = {"volume": vol}
+        req = fakes.HTTPRequest.blank('/v3/volumes')
+        req.headers = mv.get_mv_header(mv.SUPPORT_NOVA_IMAGE)
+        req.api_version_request = mv.get_api_version(mv.SUPPORT_NOVA_IMAGE)
+        res_dict = self.controller.create(req, body)
+        self.assertEqual(ex, res_dict)
+        context = req.environ['cinder.context']
+        get_snapshot.assert_called_once_with(self.controller.volume_api,
+                                             context, snapshot_id)
+        kwargs = self._expected_volume_api_create_kwargs(
+            v2_fakes.fake_snapshot(snapshot_id))
+        create.assert_called_once_with(
+            self.controller.volume_api, context,
+            vol['size'], v2_fakes.DEFAULT_VOL_NAME,
+            v2_fakes.DEFAULT_VOL_DESCRIPTION, **kwargs)
 
     def test_volumes_summary_in_unsupport_version(self):
         """Function call to test summary volumes API in unsupported version"""
-        req = self._fake_volumes_summary_request(version='3.7')
+        req = self._fake_volumes_summary_request(
+            version=mv.get_prior_version(mv.VOLUME_SUMMARY))
         self.assertRaises(exception.VersionNotFoundForAPIMethod,
                           self.controller.summary, req)
 
@@ -186,6 +321,68 @@ class VolumeApiTest(test.TestCase):
         expected = {'volume-summary': {'total_size': 1.0, 'total_count': 1}}
         self.assertEqual(expected, res_dict)
 
+    @ddt.data(
+        (mv.get_prior_version(mv.VOLUME_SUMMARY_METADATA),
+         {'volume-summary': {'total_size': 0.0,
+                             'total_count': 0}}),
+        (mv.VOLUME_SUMMARY_METADATA, {'volume-summary': {'total_size': 0.0,
+                                                         'total_count': 0,
+                                                         'metadata': {}}}))
+    @ddt.unpack
+    def test_volume_summary_empty(self, summary_api_version, expect_result):
+        req = self._fake_volumes_summary_request(version=summary_api_version)
+        res_dict = self.controller.summary(req)
+        self.assertEqual(expect_result, res_dict)
+
+    @ddt.data(
+        (mv.get_prior_version(mv.VOLUME_SUMMARY_METADATA),
+         {'volume-summary': {'total_size': 2,
+                             'total_count': 2}}),
+        (mv.VOLUME_SUMMARY_METADATA,
+         {'volume-summary': {'total_size': 2,
+                             'total_count': 2,
+                             'metadata': {
+                                 'name': ['test_name1', 'test_name2'],
+                                 'age': ['test_age']}}}))
+    @ddt.unpack
+    def test_volume_summary_return_metadata(self, summary_api_version,
+                                            expect_result):
+        test_utils.create_volume(self.ctxt, metadata={'name': 'test_name1',
+                                                      'age': 'test_age'})
+        test_utils.create_volume(self.ctxt, metadata={'name': 'test_name2',
+                                                      'age': 'test_age'})
+        ctxt2 = context.RequestContext(fake.USER_ID, fake.PROJECT2_ID, True)
+        test_utils.create_volume(ctxt2, metadata={'name': 'test_name3'})
+
+        req = self._fake_volumes_summary_request(version=summary_api_version)
+        res_dict = self.controller.summary(req)
+        self.assertEqual(expect_result, res_dict)
+
+    @ddt.data(
+        (mv.get_prior_version(mv.VOLUME_SUMMARY_METADATA),
+            {'volume-summary': {'total_size': 2,
+                                'total_count': 2}}),
+        (mv.VOLUME_SUMMARY_METADATA,
+            {'volume-summary': {'total_size': 2,
+                                'total_count': 2,
+                                'metadata': {
+                                    'name': ['test_name1', 'test_name2'],
+                                    'age': ['test_age']}}}))
+    @ddt.unpack
+    def test_volume_summary_return_metadata_all_tenant(
+            self, summary_api_version, expect_result):
+        test_utils.create_volume(self.ctxt, metadata={'name': 'test_name1',
+                                                      'age': 'test_age'})
+        ctxt2 = context.RequestContext(fake.USER_ID, fake.PROJECT2_ID, True)
+        test_utils.create_volume(ctxt2, metadata={'name': 'test_name2',
+                                                  'age': 'test_age'})
+
+        req = self._fake_volumes_summary_request(version=summary_api_version,
+                                                 all_tenant=True,
+                                                 is_admin=True)
+        res_dict = self.controller.summary(req)
+        self.assertEqual(expect_result, res_dict)
+
     def _vol_in_request_body(self,
                              size=v2_fakes.DEFAULT_VOL_SIZE,
                              name=v2_fakes.DEFAULT_VOL_NAME,
@@ -193,19 +390,18 @@ class VolumeApiTest(test.TestCase):
                              availability_zone=DEFAULT_AZ,
                              snapshot_id=None,
                              source_volid=None,
-                             source_replica=None,
                              consistencygroup_id=None,
                              volume_type=None,
                              image_ref=None,
                              image_id=None,
-                             group_id=None):
+                             group_id=None,
+                             backup_id=None):
         vol = {"size": size,
                "name": name,
                "description": description,
                "availability_zone": availability_zone,
                "snapshot_id": snapshot_id,
                "source_volid": source_volid,
-               "source_replica": source_replica,
                "consistencygroup_id": consistencygroup_id,
                "volume_type": volume_type,
                "group_id": group_id,
@@ -215,6 +411,8 @@ class VolumeApiTest(test.TestCase):
             vol['image_id'] = image_id
         elif image_ref is not None:
             vol['imageRef'] = image_ref
+        elif backup_id is not None:
+            vol['backup_id'] = backup_id
 
         return vol
 
@@ -243,9 +441,9 @@ class VolumeApiTest(test.TestCase):
                    'consistencygroup_id': consistencygroup_id,
                    'group_id': group_id,
                    'created_at': datetime.datetime(
-                       1900, 1, 1, 1, 1, 1, tzinfo=iso8601.iso8601.Utc()),
+                       1900, 1, 1, 1, 1, 1, tzinfo=iso8601.UTC),
                    'updated_at': datetime.datetime(
-                       1900, 1, 1, 1, 1, 1, tzinfo=iso8601.iso8601.Utc()),
+                       1900, 1, 1, 1, 1, 1, tzinfo=iso8601.UTC),
                    'description': description,
                    'id': v2_fakes.DEFAULT_VOL_ID,
                    'links':
@@ -270,8 +468,9 @@ class VolumeApiTest(test.TestCase):
         if with_migration_status:
             volume['volume']['migration_status'] = None
 
-        # Remove group_id if max version is less than 3.13.
-        if req_version and req_version.matches(None, "3.12"):
+        # Remove group_id if max version is less than GROUP_VOLUME.
+        if req_version and req_version.matches(
+                None, mv.get_prior_version(mv.GROUP_VOLUME)):
             volume['volume'].pop('group_id')
 
         return volume
@@ -285,7 +484,6 @@ class VolumeApiTest(test.TestCase):
             'metadata': None,
             'snapshot': snapshot,
             'source_volume': source_volume,
-            'source_replica': None,
             'consistencygroup': None,
             'availability_zone': availability_zone,
             'scheduler_hints': None,
@@ -293,13 +491,14 @@ class VolumeApiTest(test.TestCase):
             'group': test_group,
         }
 
-        # Remove group_id if max version is less than 3.13.
-        if req_version and req_version.matches(None, "3.12"):
+        # Remove group_id if max version is less than GROUP_VOLUME.
+        if req_version and req_version.matches(
+                None, mv.get_prior_version(mv.GROUP_VOLUME)):
             volume.pop('group')
 
         return volume
 
-    @ddt.data('3.13', '3.12')
+    @ddt.data(mv.GROUP_VOLUME, mv.get_prior_version(mv.GROUP_VOLUME))
     @mock.patch(
         'cinder.api.openstack.wsgi.Controller.validate_name_and_description')
     def test_volume_create(self, max_ver, mock_validate):
@@ -312,14 +511,14 @@ class VolumeApiTest(test.TestCase):
         vol = self._vol_in_request_body()
         body = {"volume": vol}
         req = fakes.HTTPRequest.blank('/v3/volumes')
-        req.api_version_request = api_version.APIVersionRequest(max_ver)
+        req.api_version_request = mv.get_api_version(max_ver)
         res_dict = self.controller.create(req, body)
         ex = self._expected_vol_from_controller(
             req_version=req.api_version_request)
         self.assertEqual(ex, res_dict)
         self.assertTrue(mock_validate.called)
 
-    @ddt.data('3.14', '3.13')
+    @ddt.data(mv.GROUP_SNAPSHOTS, mv.get_prior_version(mv.GROUP_SNAPSHOTS))
     @mock.patch.object(group_api.API, 'get')
     @mock.patch.object(db.sqlalchemy.api, '_volume_type_get_full',
                        autospec=True)
@@ -342,7 +541,7 @@ class VolumeApiTest(test.TestCase):
                                         group_id=fake.GROUP_ID)
         body = {"volume": vol}
         req = fakes.HTTPRequest.blank('/v3/volumes')
-        req.api_version_request = api_version.APIVersionRequest(max_ver)
+        req.api_version_request = mv.get_api_version(max_ver)
         res_dict = self.controller.create(req, body)
         ex = self._expected_vol_from_controller(
             snapshot_id=snapshot_id,
@@ -362,6 +561,42 @@ class VolumeApiTest(test.TestCase):
                                        v2_fakes.DEFAULT_VOL_DESCRIPTION,
                                        **kwargs)
 
+    @ddt.data(mv.VOLUME_CREATE_FROM_BACKUP,
+              mv.get_prior_version(mv.VOLUME_CREATE_FROM_BACKUP))
+    @mock.patch.object(db.sqlalchemy.api, '_volume_type_get_full',
+                       autospec=True)
+    @mock.patch.object(backup_api.API, 'get', autospec=True)
+    @mock.patch.object(volume_api.API, 'create', autospec=True)
+    def test_volume_creation_from_backup(self, max_ver, create, get_backup,
+                                         volume_type_get):
+        create.side_effect = v2_fakes.fake_volume_api_create
+        get_backup.side_effect = v2_fakes.fake_backup_get
+        volume_type_get.side_effect = v2_fakes.fake_volume_type_get
+
+        backup_id = fake.BACKUP_ID
+        vol = self._vol_in_request_body(backup_id=backup_id)
+        body = {"volume": vol}
+        req = fakes.HTTPRequest.blank('/v3/volumes')
+        req.api_version_request = mv.get_api_version(max_ver)
+        res_dict = self.controller.create(req, body)
+        ex = self._expected_vol_from_controller(
+            req_version=req.api_version_request)
+        self.assertEqual(ex, res_dict)
+
+        context = req.environ['cinder.context']
+        kwargs = self._expected_volume_api_create_kwargs(
+            req_version=req.api_version_request)
+        if max_ver >= mv.VOLUME_CREATE_FROM_BACKUP:
+            get_backup.assert_called_once_with(self.controller.backup_api,
+                                               context, backup_id)
+            kwargs.update({'backup': v2_fakes.fake_backup_get(None, context,
+                                                              backup_id)})
+        create.assert_called_once_with(self.controller.volume_api, context,
+                                       vol['size'],
+                                       v2_fakes.DEFAULT_VOL_NAME,
+                                       v2_fakes.DEFAULT_VOL_DESCRIPTION,
+                                       **kwargs)
+
     @ddt.data({'s': 'ea895e29-8485-4930-bbb8-c5616a309c0e'},
               ['ea895e29-8485-4930-bbb8-c5616a309c0e'],
               42)
@@ -376,8 +611,6 @@ class VolumeApiTest(test.TestCase):
 
     @ddt.data({'source_volid': 1},
               {'source_volid': []},
-              {'source_replica': 1},
-              {'source_replica': []},
               {'consistencygroup_id': 1},
               {'consistencygroup_id': []})
     def test_volume_creation_fails_with_invalid_uuids(self, updated_uuids):
@@ -389,21 +622,26 @@ class VolumeApiTest(test.TestCase):
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.create,
                           req, body)
 
-    @ddt.data('3.30', '3.31')
+    @ddt.data(mv.get_prior_version(mv.RESOURCE_FILTER), mv.RESOURCE_FILTER,
+              mv.LIKE_FILTER)
     @mock.patch.object(volume_api.API, 'check_volume_filters', mock.Mock())
     @mock.patch.object(utils, 'add_visible_admin_metadata', mock.Mock())
     @mock.patch('cinder.api.common.reject_invalid_filters')
     def test_list_volume_with_general_filter(self, version, mock_update):
         req = fakes.HTTPRequest.blank('/v3/volumes', version=version)
         self.controller.index(req)
-        if version != '3.30':
+        if version >= mv.RESOURCE_FILTER:
+            support_like = True if version == mv.LIKE_FILTER else False
             mock_update.assert_called_once_with(req.environ['cinder.context'],
-                                                mock.ANY, 'volume')
+                                                mock.ANY, 'volume',
+                                                support_like)
 
-    @ddt.data({'admin': True, 'version': '3.21'},
-              {'admin': False, 'version': '3.21'},
-              {'admin': True, 'version': '3.20'},
-              {'admin': False, 'version': '3.20'})
+    @ddt.data({'admin': True, 'version': mv.VOLUME_DETAIL_PROVIDER_ID},
+              {'admin': False, 'version': mv.VOLUME_DETAIL_PROVIDER_ID},
+              {'admin': True,
+               'version': mv.get_prior_version(mv.VOLUME_DETAIL_PROVIDER_ID)},
+              {'admin': False,
+               'version': mv.get_prior_version(mv.VOLUME_DETAIL_PROVIDER_ID)})
     @ddt.unpack
     def test_volume_show_provider_id(self, admin, version):
         self.mock_object(volume_api.API, 'get', v2_fakes.fake_volume_api_get)
@@ -419,8 +657,134 @@ class VolumeApiTest(test.TestCase):
         res_dict = self.controller.show(req, fake.VOLUME_ID)
         req_version = req.api_version_request
         # provider_id is in view if min version is greater than or equal to
-        # 3.21 for admin.
-        if req_version.matches("3.21", None) and admin:
+        # VOLUME_DETAIL_PROVIDER_ID for admin.
+        if req_version.matches(mv.VOLUME_DETAIL_PROVIDER_ID, None) and admin:
             self.assertIn('provider_id', res_dict['volume'])
         else:
             self.assertNotIn('provider_id', res_dict['volume'])
+
+    def _fake_create_volume(self):
+        vol = {
+            'display_name': 'fake_volume1',
+            'status': 'available'
+        }
+        volume = objects.Volume(context=self.ctxt, **vol)
+        volume.create()
+        return volume
+
+    def _fake_create_snapshot(self, volume_id):
+        snap = {
+            'display_name': 'fake_snapshot1',
+            'status': 'available',
+            'volume_id': volume_id
+        }
+        snapshot = objects.Snapshot(context=self.ctxt, **snap)
+        snapshot.create()
+        return snapshot
+
+    @mock.patch.object(objects.Volume, 'get_latest_snapshot')
+    @mock.patch.object(volume_api.API, 'get_volume')
+    def test_volume_revert_with_snapshot_not_found(self, mock_volume,
+                                                   mock_latest):
+        fake_volume = self._fake_create_volume()
+        mock_volume.return_value = fake_volume
+        mock_latest.side_effect = exception.VolumeSnapshotNotFound(volume_id=
+                                                                   'fake_id')
+        req = fakes.HTTPRequest.blank('/v3/volumes/fake_id/revert')
+        req.headers = mv.get_mv_header(mv.VOLUME_REVERT)
+        req.api_version_request = mv.get_api_version(
+            mv.VOLUME_REVERT)
+
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.revert,
+                          req, 'fake_id', {'revert': {'snapshot_id':
+                                                      'fake_snapshot_id'}})
+
+    @mock.patch.object(objects.Volume, 'get_latest_snapshot')
+    @mock.patch.object(volume_api.API, 'get_volume')
+    def test_volume_revert_with_snapshot_not_match(self, mock_volume,
+                                                   mock_latest):
+        fake_volume = self._fake_create_volume()
+        mock_volume.return_value = fake_volume
+        fake_snapshot = self._fake_create_snapshot(fake.UUID1)
+        mock_latest.return_value = fake_snapshot
+        req = fakes.HTTPRequest.blank('/v3/volumes/fake_id/revert')
+        req.headers = mv.get_mv_header(mv.VOLUME_REVERT)
+        req.api_version_request = mv.get_api_version(
+            mv.VOLUME_REVERT)
+
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.revert,
+                          req, 'fake_id', {'revert': {'snapshot_id':
+                                                      'fake_snapshot_id'}})
+
+    @mock.patch.object(objects.Volume, 'get_latest_snapshot')
+    @mock.patch('cinder.objects.base.'
+                'CinderPersistentObject.update_single_status_where')
+    @mock.patch.object(volume_api.API, 'get_volume')
+    def test_volume_revert_update_status_failed(self,
+                                                mock_volume,
+                                                mock_update,
+                                                mock_latest):
+        fake_volume = self._fake_create_volume()
+        fake_snapshot = self._fake_create_snapshot(fake_volume['id'])
+        mock_volume.return_value = fake_volume
+        mock_latest.return_value = fake_snapshot
+        req = fakes.HTTPRequest.blank('/v3/volumes/%s/revert'
+                                      % fake_volume['id'])
+        req.headers = mv.get_mv_header(mv.VOLUME_REVERT)
+        req.api_version_request = mv.get_api_version(
+            mv.VOLUME_REVERT)
+        # update volume's status failed
+        mock_update.side_effect = [False, True]
+
+        self.assertRaises(webob.exc.HTTPConflict, self.controller.revert,
+                          req, fake_volume['id'], {'revert': {'snapshot_id':
+                                                   fake_snapshot['id']}})
+
+        # update snapshot's status failed
+        mock_update.side_effect = [True, False]
+
+        self.assertRaises(webob.exc.HTTPConflict, self.controller.revert,
+                          req, fake_volume['id'], {'revert': {'snapshot_id':
+                                                   fake_snapshot['id']}})
+
+    def test_view_get_attachments(self):
+        fake_volume = self._fake_create_volume()
+        fake_volume['attach_status'] = fields.VolumeAttachStatus.ATTACHING
+        att_time = datetime.datetime(2017, 8, 31, 21, 55, 7,
+                                     tzinfo=iso8601.UTC)
+        a1 = {
+            'id': fake.UUID1,
+            'volume_id': fake.UUID2,
+            'instance': None,
+            'attached_host': None,
+            'mountpoint': None,
+            'attach_time': None,
+            'attach_status': fields.VolumeAttachStatus.ATTACHING
+        }
+        a2 = {
+            'id': fake.UUID3,
+            'volume_id': fake.UUID4,
+            'instance_uuid': fake.UUID5,
+            'attached_host': 'host1',
+            'mountpoint': 'na',
+            'attach_time': att_time,
+            'attach_status': fields.VolumeAttachStatus.ATTACHED
+        }
+        attachment1 = objects.VolumeAttachment(self.ctxt, **a1)
+        attachment2 = objects.VolumeAttachment(self.ctxt, **a2)
+        atts = {'objects': [attachment1, attachment2]}
+        attachments = objects.VolumeAttachmentList(self.ctxt, **atts)
+
+        fake_volume['volume_attachment'] = attachments
+
+        # get_attachments should only return attachments with the
+        # attached status = ATTACHED
+        attachments = ViewBuilder()._get_attachments(fake_volume)
+
+        self.assertEqual(1, len(attachments))
+        self.assertEqual(fake.UUID3, attachments[0]['attachment_id'])
+        self.assertEqual(fake.UUID4, attachments[0]['volume_id'])
+        self.assertEqual(fake.UUID5, attachments[0]['server_id'])
+        self.assertEqual('host1', attachments[0]['host_name'])
+        self.assertEqual('na', attachments[0]['device'])
+        self.assertEqual(att_time, attachments[0]['attached_at'])

@@ -25,6 +25,7 @@ from oslo_utils import importutils
 
 from cinder import exception
 from cinder import interface
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.san import san
 from cinder.zonemanager import utils as fczm_utils
@@ -52,7 +53,7 @@ driver_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(driver_opts)
+CONF.register_opts(driver_opts, group=configuration.SHARED_CONF_GROUP)
 
 LOG = logging.getLogger(__name__)
 
@@ -67,9 +68,18 @@ class IBMStorageDriver(san.SanDriver,
     IBM Storage driver is a unified Volume driver for IBM XIV, Spectrum
     Accelerate, FlashSystem A9000, FlashSystem A9000R and DS8000 storage
     systems.
+
+    Version history:
+
+    .. code-block:: none
+
+        2.0 - First open source driver version
+        2.1.0 - Support Consistency groups through Generic volume groups
+              - Support XIV/A9000 Volume independent QoS
+              - Support Consistency groups replication
     """
 
-    VERSION = "2.0.0"
+    VERSION = "2.1.0"
 
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "IBM_STORAGE_CI"
@@ -101,7 +111,8 @@ class IBMStorageDriver(san.SanDriver,
             LOG,
             exception,
             driver=self,
-            active_backend_id=active_backend_id)
+            active_backend_id=active_backend_id,
+            host=self.host)
 
     def do_setup(self, context):
         """Setup and verify connection to IBM Storage."""
@@ -207,11 +218,11 @@ class IBMStorageDriver(san.SanDriver,
 
         return self.proxy.thaw_backend(context)
 
-    def failover_host(self, context, volumes, secondary_id=None):
+    def failover_host(self, context, volumes, secondary_id=None, groups=None):
         """Failover a backend to a secondary replication target. """
 
         return self.proxy.failover_host(
-            context, volumes, secondary_id)
+            context, volumes, secondary_id, groups)
 
     def get_replication_status(self, context, volume):
         """Return replication status."""
@@ -259,3 +270,25 @@ class IBMStorageDriver(san.SanDriver,
         return self.proxy.create_group_from_src(
             context, group, volumes, group_snapshot, snapshots,
             source_cg, source_vols)
+
+    def enable_replication(self, context, group, volumes):
+        """Enable replication."""
+
+        return self.proxy.enable_replication(context, group, volumes)
+
+    def disable_replication(self, context, group, volumes):
+        """Disable replication."""
+
+        return self.proxy.disable_replication(context, group, volumes)
+
+    def failover_replication(self, context, group, volumes,
+                             secondary_backend_id):
+        """Failover replication."""
+
+        return self.proxy.failover_replication(context, group, volumes,
+                                               secondary_backend_id)
+
+    def get_replication_error_status(self, context, groups):
+        """Returns error info for replicated groups and its volumes."""
+
+        return self.proxy.get_replication_error_status(context, groups)

@@ -9,7 +9,7 @@ API versions
 Show API v2 details
 ~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2
+.. rest_method::  GET /v2/
 
 Shows details for Block Storage API v2.
 
@@ -34,7 +34,7 @@ Response Parameters
 Response Example
 ----------------
 
-.. literalinclude:: ./samples/version-v2-show-response.json
+.. literalinclude:: ./samples/version-show-response.json
    :language: javascript
 
 

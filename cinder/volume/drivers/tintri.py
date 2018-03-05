@@ -35,6 +35,7 @@ from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers import nfs
 
@@ -63,7 +64,7 @@ tintri_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(tintri_opts)
+CONF.register_opts(tintri_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 @interface.volumedriver
@@ -109,11 +110,9 @@ class TintriDriver(driver.ManageableVD,
         self._hostname = getattr(self.configuration, 'tintri_server_hostname')
         self._username = getattr(self.configuration, 'tintri_server_username')
         self._password = getattr(self.configuration, 'tintri_server_password')
-        self._api_version = getattr(self.configuration, 'tintri_api_version',
-                                    CONF.tintri_api_version)
+        self._api_version = getattr(self.configuration, 'tintri_api_version')
         self._image_cache_expiry = getattr(self.configuration,
-                                           'tintri_image_cache_expiry_days',
-                                           CONF.tintri_image_cache_expiry_days)
+                                           'tintri_image_cache_expiry_days')
 
     def get_pool(self, volume):
         """Returns pool name where volume resides.
@@ -591,7 +590,7 @@ class TintriDriver(driver.ManageableVD,
         conn, dr = None, None
         if image_location:
             nfs_loc_pattern = \
-                '^nfs://(([\w\-\.]+:[\d]+|[\w\-\.]+)(/[^/].*)*(/[^/\\\\]+))$'
+                r'^nfs://(([\w\-\.]+:[\d]+|[\w\-\.]+)(/[^/].*)*(/[^/\\\\]+))$'
             matched = re.match(nfs_loc_pattern, image_location)
             if not matched:
                 LOG.debug('Image location not in the expected format %s',

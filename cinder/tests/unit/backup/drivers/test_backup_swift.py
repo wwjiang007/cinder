@@ -24,12 +24,15 @@ import hashlib
 import os
 import shutil
 import tempfile
+import threading
 import zlib
 
+from eventlet import tpool
 import mock
 from oslo_config import cfg
 from swiftclient import client as swift
 
+from cinder.backup import chunkeddriver
 from cinder.backup.drivers import swift as swift_dr
 from cinder import context
 from cinder import db
@@ -90,6 +93,12 @@ class BackupSwiftTestCase(test.TestCase):
                   }
         return db.backup_create(self.ctxt, backup)['id']
 
+    def _write_effective_compression_file(self, data_size):
+        """Ensure file contents can be effectively compressed."""
+        self.volume_file.seek(0)
+        self.volume_file.write(bytes([65] * data_size))
+        self.volume_file.seek(0)
+
     def setUp(self):
         super(BackupSwiftTestCase, self).setUp()
         service_catalog = [{u'type': u'object-store', u'name': u'swift',
@@ -110,8 +119,10 @@ class BackupSwiftTestCase(test.TestCase):
         self.addCleanup(self.volume_file.close)
         # Remove tempdir.
         self.addCleanup(shutil.rmtree, self.temp_dir)
+        self.size_volume_file = 0
         for _i in range(0, 64):
             self.volume_file.write(os.urandom(1024))
+            self.size_volume_file += 1024
 
         notify_patcher = mock.patch(
             'cinder.volume.utils.notify_about_backup_usage')
@@ -144,6 +155,10 @@ class BackupSwiftTestCase(test.TestCase):
                                       u'endpoints': [{
                                           u'adminURL':
                                               u'http://example.com'}]}]
+        self.override_config("backup_swift_auth",
+                             "single_user")
+        self.override_config("backup_swift_user",
+                             "fake_user")
         self.assertRaises(exception.BackupDriverException,
                           swift_dr.SwiftBackupDriver,
                           self.ctxt)
@@ -167,6 +182,16 @@ class BackupSwiftTestCase(test.TestCase):
                                    self.ctxt.project_id),
                          backup.swift_url)
 
+    def test_backup_swift_url_conf_nocatalog(self):
+        self.ctxt.service_catalog = []
+        self.ctxt.project_id = fake.PROJECT_ID
+        self.override_config("backup_swift_url",
+                             "http://public.example.com/")
+        backup = swift_dr.SwiftBackupDriver(self.ctxt)
+        self.assertEqual("%s%s" % (CONF.backup_swift_url,
+                                   self.ctxt.project_id),
+                         backup.swift_url)
+
     def test_backup_swift_auth_url_conf(self):
         self.ctxt.service_catalog = [{u'type': u'object-store',
                                       u'name': u'swift',
@@ -182,6 +207,10 @@ class BackupSwiftTestCase(test.TestCase):
         self.ctxt.project_id = fake.PROJECT_ID
         self.override_config("backup_swift_auth_url",
                              "http://public.example.com")
+        self.override_config("backup_swift_auth",
+                             "single_user")
+        self.override_config("backup_swift_user",
+                             "fake_user")
         backup = swift_dr.SwiftBackupDriver(self.ctxt)
         self.assertEqual(CONF.backup_swift_auth_url, backup.auth_url)
 
@@ -284,7 +313,7 @@ class BackupSwiftTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='bz2')
         service = swift_dr.SwiftBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -293,7 +322,7 @@ class BackupSwiftTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='zlib')
         service = swift_dr.SwiftBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -636,7 +665,7 @@ class BackupSwiftTestCase(test.TestCase):
 
         In backup(), after an exception occurs in
         self._backup_metadata(), we want to check the process when the
-        second exception occurs in self.delete().
+        second exception occurs in self.delete_backup().
         """
         volume_id = '2164421d-f181-4db7-b9bd-000000eeb628'
 
@@ -657,7 +686,8 @@ class BackupSwiftTestCase(test.TestCase):
             raise exception.BackupOperationError()
 
         # Raise a pseudo exception.BackupOperationError.
-        self.mock_object(swift_dr.SwiftBackupDriver, 'delete', fake_delete)
+        self.mock_object(swift_dr.SwiftBackupDriver, 'delete_backup',
+                         fake_delete)
 
         # We expect that the second exception is notified.
         self.assertRaises(exception.BackupOperationError,
@@ -757,7 +787,7 @@ class BackupSwiftTestCase(test.TestCase):
                                      service_metadata=object_prefix)
         service = swift_dr.SwiftBackupDriver(self.ctxt)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
-        service.delete(backup)
+        service.delete_backup(backup)
 
     def test_delete_wraps_socket_error(self):
         volume_id = 'f74cb6fa-2900-40df-87ac-0000000f72ea'
@@ -769,7 +799,7 @@ class BackupSwiftTestCase(test.TestCase):
         service = swift_dr.SwiftBackupDriver(self.ctxt)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         self.assertRaises(exception.SwiftConnectionFailed,
-                          service.delete,
+                          service.delete_backup,
                           backup)
 
     def test_delete_without_object_prefix(self):
@@ -785,7 +815,7 @@ class BackupSwiftTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         service = swift_dr.SwiftBackupDriver(self.ctxt)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
-        service.delete(backup)
+        service.delete_backup(backup)
 
     def test_get_compressor(self):
         service = swift_dr.SwiftBackupDriver(self.ctxt)
@@ -793,11 +823,24 @@ class BackupSwiftTestCase(test.TestCase):
         self.assertIsNone(compressor)
         compressor = service._get_compressor('zlib')
         self.assertEqual(zlib, compressor)
+        self.assertIsInstance(compressor, tpool.Proxy)
         compressor = service._get_compressor('bz2')
         self.assertEqual(bz2, compressor)
+        self.assertIsInstance(compressor, tpool.Proxy)
         self.assertRaises(ValueError, service._get_compressor, 'fake')
 
     def test_prepare_output_data_effective_compression(self):
+        """Test compression works on a native thread."""
+        # Use dictionary to share data between threads
+        thread_dict = {}
+        original_compress = zlib.compress
+
+        def my_compress(data):
+            thread_dict['compress'] = threading.current_thread()
+            return original_compress(data)
+
+        self.mock_object(zlib, 'compress', side_effect=my_compress)
+
         service = swift_dr.SwiftBackupDriver(self.ctxt)
         # Set up buffer of 128 zeroed bytes
         fake_data = b'\0' * 128
@@ -805,7 +848,9 @@ class BackupSwiftTestCase(test.TestCase):
         result = service._prepare_output_data(fake_data)
 
         self.assertEqual('zlib', result[0])
-        self.assertGreater(len(fake_data), len(result))
+        self.assertGreater(len(fake_data), len(result[1]))
+        self.assertNotEqual(threading.current_thread(),
+                            thread_dict['compress'])
 
     def test_prepare_output_data_no_compresssion(self):
         self.flags(backup_compression_algorithm='none')
@@ -829,3 +874,71 @@ class BackupSwiftTestCase(test.TestCase):
 
         self.assertEqual('none', result[0])
         self.assertEqual(already_compressed_data, result[1])
+
+
+class WindowsBackupSwiftTestCase(BackupSwiftTestCase):
+    # We're running all the parent class tests, while doing
+    # some patching in order to simulate Windows behavior.
+    def setUp(self):
+        self._mock_utilsfactory = mock.Mock()
+
+        platform_patcher = mock.patch('sys.platform', 'win32')
+        platform_patcher.start()
+        self.addCleanup(platform_patcher.stop)
+
+        super(WindowsBackupSwiftTestCase, self).setUp()
+
+        read = self.volume_file.read
+
+        def win32_read(sz):
+            # We're simulating the Windows behavior.
+            if self.volume_file.tell() > fake_get_size():
+                raise IOError()
+            return read(sz)
+
+        read_patcher = mock.patch.object(
+            self.volume_file, 'read', win32_read)
+        read_patcher.start()
+        self.addCleanup(read_patcher.stop)
+
+        def fake_get_size(*args, **kwargs):
+            pos = self.volume_file.tell()
+            sz = self.volume_file.seek(0, 2)
+            self.volume_file.seek(pos)
+            return sz
+
+        self._disk_size_getter_mocker = mock.patch.object(
+            swift_dr.SwiftBackupDriver,
+            '_get_win32_phys_disk_size',
+            fake_get_size)
+
+        self._disk_size_getter_mocker.start()
+        self.addCleanup(self._disk_size_getter_mocker.stop)
+
+    def test_invalid_chunk_size(self):
+        self.flags(backup_swift_object_size=1000)
+        # We expect multiples of 4096
+        self.assertRaises(exception.InvalidConfigurationValue,
+                          swift_dr.SwiftBackupDriver,
+                          self.ctxt)
+
+    @mock.patch.object(chunkeddriver, 'os_win_utilsfactory', create=True)
+    def test_get_phys_disk_size(self, mock_utilsfactory):
+        # We're patching this method in setUp, so we need to
+        # retrieve the original one. Note that we'll get an unbound
+        # method.
+        service = swift_dr.SwiftBackupDriver(self.ctxt)
+        get_disk_size = self._disk_size_getter_mocker.temp_original
+
+        disk_utils = mock_utilsfactory.get_diskutils.return_value
+        disk_utils.get_device_number_from_device_name.return_value = (
+            mock.sentinel.dev_num)
+        disk_utils.get_disk_size.return_value = mock.sentinel.disk_size
+
+        disk_size = get_disk_size(service, mock.sentinel.disk_path)
+
+        self.assertEqual(mock.sentinel.disk_size, disk_size)
+        disk_utils.get_device_number_from_device_name.assert_called_once_with(
+            mock.sentinel.disk_path)
+        disk_utils.get_disk_size.assert_called_once_with(
+            mock.sentinel.dev_num)

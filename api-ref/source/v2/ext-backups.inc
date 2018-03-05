@@ -40,13 +40,12 @@ in the ``fail_reason`` field for the backup.
 List backups with details
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/backups/detail
+.. rest_method::  GET /v2/{project_id}/backups/detail
 
-Lists Block Storage backups, with details, to which the tenant has access.
+Lists Block Storage backups, with details, to which the project has access.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -54,7 +53,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
@@ -70,18 +70,20 @@ Response Parameters
    - object_count: object_count
    - fail_reason: fail_reason
    - description: description
-   - links: links
+   - links: links_1
    - availability_zone: availability_zone
    - created_at: created_at
    - updated_at: updated_at
-   - name: name
+   - name: name_1
    - has_dependent_backups: has_dependent_backups
    - volume_id: volume_id
    - container: container
    - backups: backups
    - size: size
-   - id: id
+   - id: id_1
    - is_incremental: is_incremental
+   - data_timestamp: data_timestamp
+   - snapshot_id: snapshot_id_2
 
 Response Example
 ----------------
@@ -93,13 +95,12 @@ Response Example
 Show backup details
 ~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/backups/{backup_id}
+.. rest_method::  GET /v2/{project_id}/backups/{backup_id}
 
 Shows details for a backup.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -107,7 +108,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - backup_id: backup_id
 
 
@@ -120,18 +121,20 @@ Response Parameters
    - object_count: object_count
    - container: container
    - description: description
-   - links: links
+   - links: links_1
    - availability_zone: availability_zone
    - created_at: created_at
    - updated_at: updated_at
-   - name: name
+   - name: name_1
    - has_dependent_backups: has_dependent_backups
    - volume_id: volume_id
    - fail_reason: fail_reason
    - size: size
    - backup: backup
-   - id: id
+   - id: id_1
    - is_incremental: is_incremental
+   - data_timestamp: data_timestamp
+   - snapshot_id: snapshot_id_2
 
 Response Example
 ----------------
@@ -143,11 +146,15 @@ Response Example
 Delete backup
 ~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v2/{tenant_id}/backups/{backup_id}
+.. rest_method::  DELETE /v2/{project_id}/backups/{backup_id}
 
 Deletes a backup.
 
-Normal response codes: 202,
+Normal response codes: 202
+
+Error response codes: Bad Request(400)
+
+
 
 
 Request
@@ -155,21 +162,23 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - backup_id: backup_id
 
 
 Restore backup
 ~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/backups/{backup_id}/restore
+.. rest_method::  POST /v2/{project_id}/backups/{backup_id}/restore
 
 Restores a Block Storage backup to an existing or new Block Storage volume.
 
 You must specify either the UUID or name of the volume. If you
 specify both the UUID and name, the UUID takes priority.
 
-Normal response codes: 202,
+Normal response codes: 202
+
+Error response codes: Bad Request(400), Request Entity Too Large(413)
 
 
 Request
@@ -178,9 +187,9 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - restore: restore
-   - name: name
+   - name: name_1
    - volume_id: volume_id
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - backup_id: backup_id
 
 Request Example
@@ -197,15 +206,24 @@ Response Parameters
    - restore: restore
    - backup_id: backup_id
    - volume_id: volume_id
+   - volume_name: volume_name
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/backup-restore-response.json
+   :language: javascript
 
 Create backup
 ~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/backups
+.. rest_method::  POST /v2/{project_id}/backups
 
 Creates a Block Storage backup from a volume.
 
 Normal response codes: 202,
+
+Error response codes: Bad Request(400), Internal Server Error(500)
 
 Request
 -------
@@ -218,8 +236,9 @@ Request
    - volume_id: volume_id
    - force: force
    - backup: backup
-   - name: name
-   - tenant_id: tenant_id
+   - name: name_1
+   - project_id: project_id_path
+   - snapshot_id: snapshot_id_2
 
 Request Example
 ---------------
@@ -233,26 +252,26 @@ Response Parameters
 .. rest_parameters:: parameters.yaml
 
    - backup: backup
-   - id: id
-   - links: links
-   - name: name
+   - id: id_1
+   - links: links_1
+   - name: name_1
 
 List backups
 ~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/backups
+.. rest_method::  GET /v2/{project_id}/backups
 
-Lists Block Storage backups to which the tenant has access.
+Lists Block Storage backups to which the project has access.
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
@@ -264,12 +283,94 @@ Response Parameters
 .. rest_parameters:: parameters.yaml
 
    - backups: backups
-   - id: id
-   - links: links
-   - name: name
+   - id: id_1
+   - links: links_1
+   - name: name_1
 
 Response Example
 ----------------
 
 .. literalinclude:: ./samples/backups-list-response.json
    :language: javascript
+
+
+Export backup
+~~~~~~~~~~~~~
+
+.. rest_method::  GET /v2/{project_id}/backups/{backup_id}/export_record
+
+Export information about a backup.
+
+
+Normal response codes: 200
+
+Error response codes: badRequest(400), itemNotFound(404)
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - project_id: project_id_path
+   - backup_id: backup_id
+
+
+Response Parameters
+-------------------
+
+.. rest_parameters:: parameters.yaml
+
+   - backup_service: backup_service
+   - backup_url: backup_url
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/backup-record-export-response.json
+   :language: javascript
+
+
+Import backup
+~~~~~~~~~~~~~
+
+.. rest_method::  POST /v2/{project_id}/backups/{backup_id}/import_record
+
+Import information about a backup.
+
+
+Normal response codes: 201
+
+Error response codes: badRequest(400), serviceUnavailable(503)
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - project_id: project_id_path
+   - backup_id: backup_id
+
+
+Request Example
+---------------
+
+.. literalinclude:: ./samples/backup-record-import-request.json
+   :language: javascript
+
+
+Response Parameters
+-------------------
+
+.. rest_parameters:: parameters.yaml
+
+   - id: id_1
+   - links: links_1
+   - name: name_1
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/backup-record-import-response.json
+

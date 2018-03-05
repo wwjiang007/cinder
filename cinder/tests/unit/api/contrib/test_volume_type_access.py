@@ -12,6 +12,7 @@
 #    under the License.
 
 import datetime
+import mock
 
 from six.moves import http_client
 import webob
@@ -153,11 +154,11 @@ class VolumeTypeAccessTest(test.TestCase):
 
         def fake_authorize(context, target=None, action=None):
             raise exception.PolicyNotAuthorized(action='index')
-        self.mock_object(type_access, 'authorize', fake_authorize)
-
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.type_access_controller.index,
-                          req, fake.PROJECT_ID)
+        with mock.patch('cinder.context.RequestContext.authorize',
+                        fake_authorize):
+            self.assertRaises(exception.PolicyNotAuthorized,
+                              self.type_access_controller.index,
+                              req, fake.PROJECT_ID)
 
     def test_list_type_with_admin_default_proj1(self):
         expected = {'volume_types': [{'id': fake.VOLUME_TYPE_ID},
@@ -297,7 +298,7 @@ class VolumeTypeAccessTest(test.TestCase):
             fake.PROJECT_ID, fake.VOLUME_TYPE3_ID),
             use_admin_context=True)
         result = self.type_action_controller._addProjectAccess(
-            req, fake.VOLUME_TYPE4_ID, body)
+            req, fake.VOLUME_TYPE4_ID, body=body)
         self.assertEqual(http_client.ACCEPTED, result.status_code)
 
     def test_add_project_access_with_no_admin_user(self):
@@ -307,7 +308,7 @@ class VolumeTypeAccessTest(test.TestCase):
         body = {'addProjectAccess': {'project': PROJ2_UUID}}
         self.assertRaises(exception.PolicyNotAuthorized,
                           self.type_action_controller._addProjectAccess,
-                          req, fake.VOLUME_TYPE3_ID, body)
+                          req, fake.VOLUME_TYPE3_ID, body=body)
 
     def test_add_project_access_with_already_added_access(self):
         def fake_add_volume_type_access(context, type_id, project_id):
@@ -320,7 +321,7 @@ class VolumeTypeAccessTest(test.TestCase):
             fake.PROJECT_ID, fake.VOLUME_TYPE3_ID), use_admin_context=True)
         self.assertRaises(webob.exc.HTTPConflict,
                           self.type_action_controller._addProjectAccess,
-                          req, fake.VOLUME_TYPE3_ID, body)
+                          req, fake.VOLUME_TYPE3_ID, body=body)
 
     def test_remove_project_access_with_bad_access(self):
         def fake_remove_volume_type_access(context, type_id, project_id):
@@ -333,7 +334,7 @@ class VolumeTypeAccessTest(test.TestCase):
             fake.PROJECT_ID, fake.VOLUME_TYPE3_ID), use_admin_context=True)
         self.assertRaises(exception.VolumeTypeAccessNotFound,
                           self.type_action_controller._removeProjectAccess,
-                          req, fake.VOLUME_TYPE4_ID, body)
+                          req, fake.VOLUME_TYPE4_ID, body=body)
 
     def test_remove_project_access_with_no_admin_user(self):
         req = fakes.HTTPRequest.blank('/v2/%s/types/%s/action' % (
@@ -341,4 +342,4 @@ class VolumeTypeAccessTest(test.TestCase):
         body = {'removeProjectAccess': {'project': PROJ2_UUID}}
         self.assertRaises(exception.PolicyNotAuthorized,
                           self.type_action_controller._removeProjectAccess,
-                          req, fake.VOLUME_TYPE3_ID, body)
+                          req, fake.VOLUME_TYPE3_ID, body=body)

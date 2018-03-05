@@ -31,6 +31,7 @@ from cinder import exception
 from cinder.i18n import _
 from cinder import ssh_utils
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume import driver
 
 LOG = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ san_opts = [
     cfg.PortOpt('san_ssh_port',
                 default=22,
                 help='SSH port to use with SAN'),
+    cfg.PortOpt('san_api_port',
+                help='Port to use to access the SAN API'),
     cfg.BoolOpt('san_is_local',
                 default=False,
                 help='Execute commands locally instead of over SSH; '
@@ -74,7 +77,7 @@ san_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(san_opts)
+CONF.register_opts(san_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 class SanDriver(driver.BaseVD):
@@ -179,5 +182,5 @@ class SanISCSIDriver(SanDriver, driver.ISCSIDriver):
         super(SanISCSIDriver, self).__init__(*args, **kwargs)
 
     def _build_iscsi_target_name(self, volume):
-        return "%s%s" % (self.configuration.iscsi_target_prefix,
+        return "%s%s" % (self.configuration.target_prefix,
                          volume['name'])

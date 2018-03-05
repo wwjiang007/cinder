@@ -171,6 +171,7 @@ FAKE_POSITIVE_GROUP_INFO_RESPONSE = {
     'unused_reserve_bytes': 0}
 
 FAKE_GENERIC_POSITIVE_RESPONSE = ""
+FAKE_VOLUME_DELETE_HAS_CLONE_RESPONSE = "Object has a clone"
 
 FAKE_TYPE_ID = fake.VOLUME_TYPE_ID
 FAKE_POOL_ID = fake.GROUP_ID
@@ -247,9 +248,6 @@ class NimbleDriverBaseTestCase(test.TestCase):
             return inner_clent_mock
         return client_mock_wrapper
 
-    def tearDown(self):
-        super(NimbleDriverBaseTestCase, self).tearDown()
-
 
 class NimbleDriverLoginTestCase(NimbleDriverBaseTestCase):
 
@@ -320,6 +318,43 @@ class NimbleDriverVolumeTestCase(NimbleDriverBaseTestCase):
              'size': 1,
              'volume_type_id': None,
              'display_name': '',
+             'display_description': ''},
+            'default',
+            False,
+            'iSCSI',
+            False)
+
+    @mock.patch(NIMBLE_URLLIB2)
+    @mock.patch(NIMBLE_CLIENT)
+    @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
+                       mock.Mock(return_value=[]))
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs',
+                       mock.Mock(type_id=FAKE_TYPE_ID, return_value={
+                                 'nimble:perfpol-name': 'default',
+                                 'nimble:encryption': 'yes'}))
+    @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
+        NIMBLE_SAN_LOGIN, NIMBLE_SAN_PASS, NIMBLE_MANAGEMENT_IP,
+        'default', '*'))
+    def test_create_volume_with_unicode(self):
+        self.mock_client_service.get_vol_info.return_value = (
+            FAKE_GET_VOL_INFO_RESPONSE)
+        self.mock_client_service.get_netconfig.return_value = (
+            FAKE_POSITIVE_NETCONFIG_RESPONSE)
+
+        self.assertEqual({
+            'provider_location': '172.18.108.21:3260 iqn.test',
+            'provider_auth': None},
+            self.driver.create_volume({'name': 'testvolume',
+                                       'size': 1,
+                                       'volume_type_id': None,
+                                       'display_name': u'unicode_name',
+                                       'display_description': ''}))
+
+        self.mock_client_service.create_vol.assert_called_once_with(
+            {'name': 'testvolume',
+             'size': 1,
+             'volume_type_id': None,
+             'display_name': u'unicode_name',
              'display_description': ''},
             'default',
             False,
@@ -644,6 +679,27 @@ class NimbleDriverVolumeTestCase(NimbleDriverBaseTestCase):
             'testvolume', False),
             mock.call.delete_vol('testvolume')]
 
+        self.mock_client_service.assert_has_calls(expected_calls)
+
+    @mock.patch(NIMBLE_URLLIB2)
+    @mock.patch(NIMBLE_CLIENT)
+    @mock.patch.object(obj_volume.VolumeList, 'get_all_by_host',
+                       mock.Mock(return_value=[]))
+    @NimbleDriverBaseTestCase.client_mock_decorator(create_configuration(
+        'nimble', 'nimble_pass', '10.18.108.55', 'default', '*'))
+    @mock.patch(NIMBLE_ISCSI_DRIVER + ".is_volume_backup_clone", mock.Mock(
+        return_value = ['', '']))
+    def test_delete_volume_with_clone(self):
+        self.mock_client_service.delete_vol.side_effect = \
+            nimble.NimbleAPIException(FAKE_VOLUME_DELETE_HAS_CLONE_RESPONSE)
+        self.assertRaises(
+            exception.VolumeIsBusy,
+            self.driver.delete_volume,
+            {'name': 'testvolume'})
+        expected_calls = [mock.call.online_vol(
+            'testvolume', False),
+            mock.call.delete_vol('testvolume'),
+            mock.call.online_vol('testvolume', True)]
         self.mock_client_service.assert_has_calls(expected_calls)
 
     @mock.patch(NIMBLE_URLLIB2)

@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_utils import versionutils
 from oslo_versionedobjects import fields
 
 from cinder import objects
@@ -23,7 +24,9 @@ class RequestSpec(base.CinderObject, base.CinderObjectDictCompat,
                   base.CinderComparableObject):
     # Version 1.0: Initial version
     # Version 1.1: Added group_id and group_backend
-    VERSION = '1.1'
+    # Version 1.2 Added ``resource_backend``
+    # Version 1.3: Added backup_id
+    VERSION = '1.3'
 
     fields = {
         'consistencygroup_id': fields.UUIDField(nullable=True),
@@ -40,6 +43,8 @@ class RequestSpec(base.CinderObject, base.CinderObjectDictCompat,
                                                 nullable=True),
         'CG_backend': fields.StringField(nullable=True),
         'group_backend': fields.StringField(nullable=True),
+        'resource_backend': fields.StringField(nullable=True),
+        'backup_id': fields.UUIDField(nullable=True),
     }
 
     obj_extra_fields = ['resource_properties']
@@ -85,6 +90,17 @@ class RequestSpec(base.CinderObject, base.CinderObjectDictCompat,
             setattr(spec_obj, k, v)
 
         return spec_obj
+
+    def obj_make_compatible(self, primitive, target_version):
+        """Make an object representation compatible with target version."""
+        super(RequestSpec, self).obj_make_compatible(primitive, target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        added_fields = (((1, 1), ('group_id', 'group_backend')),
+                        ((1, 2), ('resource_backend')))
+        for version, remove_fields in added_fields:
+            if target_version < version:
+                for obj_field in remove_fields:
+                    primitive.pop(obj_field, None)
 
 
 @base.CinderObjectRegistry.register

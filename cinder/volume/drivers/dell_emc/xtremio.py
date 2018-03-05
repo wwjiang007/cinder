@@ -28,6 +28,8 @@ supported XtremIO version 2.4 and up
           R/O snapshots, CHAP discovery authentication
   1.0.7 - cache glance images on the array
   1.0.8 - support for volume retype, CG fixes
+  1.0.9 - performance improvements, support force detach, support for X2
+  1.0.10 - option to clean unused IGs
 """
 
 import json
@@ -41,6 +43,7 @@ from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import units
 import six
+from six.moves import http_client
 
 from cinder import context
 from cinder import exception
@@ -48,8 +51,10 @@ from cinder.i18n import _
 from cinder import interface
 from cinder.objects import fields
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.san import san
+from cinder.volume import utils as vutils
 from cinder.zonemanager import utils as fczm_utils
 
 
@@ -69,9 +74,18 @@ XTREMIO_OPTS = [
                help='Interval between retries in case array is busy'),
     cfg.IntOpt('xtremio_volumes_per_glance_cache',
                default=100,
-               help='Number of volumes created from each cached glance image')]
+               help='Number of volumes created from each cached glance image'),
+    cfg.BoolOpt('xtremio_clean_unused_ig',
+                default=False,
+                help='Should the driver remove initiator groups with no '
+                     'volumes after the last connection was terminated. '
+                     'Since the behavior till now was to leave '
+                     'the IG be, we default to False (not deleting IGs '
+                     'without connected volumes); setting this parameter '
+                     'to True will remove any IG after terminating its '
+                     'connection to the last volume.')]
 
-CONF.register_opts(XTREMIO_OPTS)
+CONF.register_opts(XTREMIO_OPTS, group=configuration.SHARED_CONF_GROUP)
 
 RANDOM = random.Random()
 OBJ_NOT_FOUND_ERR = 'obj_not_found'
@@ -132,7 +146,8 @@ class XtremIOClient(object):
                 self.update_url(params, self.cluster_id)
             if method != 'GET':
                 self.update_data(data, self.cluster_id)
-                LOG.debug('data: %s', data)
+                # data may include chap password
+                LOG.debug('data: %s', strutils.mask_password(data))
             LOG.debug('%(type)s %(url)s', {'type': method, 'url': url})
             try:
                 response = requests.request(
@@ -143,7 +158,8 @@ class XtremIOClient(object):
                 msg = (_('Exception: %s') % six.text_type(exc))
                 raise exception.VolumeDriverException(message=msg)
 
-            if 200 <= response.status_code < 300:
+            if (http_client.OK <= response.status_code <
+                    http_client.MULTIPLE_CHOICES):
                 if method in ('GET', 'POST'):
                     return response.json()
                 else:
@@ -153,7 +169,7 @@ class XtremIOClient(object):
         return _do_req(object_type, method, data, name, idx, ver)
 
     def handle_errors(self, response, key, object_type):
-        if response.status_code == 400:
+        if response.status_code == http_client.BAD_REQUEST:
             error = response.json()
             err_msg = error.get('message')
             if err_msg.endswith(OBJ_NOT_FOUND_ERR):
@@ -209,6 +225,21 @@ class XtremIOClient(object):
 
     def add_vol_to_cg(self, vol_id, cg_id):
         pass
+
+    def get_initiators_igs(self, port_addresses):
+        ig_indexes = set()
+        for port_address in port_addresses:
+            initiator = self.get_initiator(port_address)
+            ig_indexes.add(initiator['ig-id'][XTREMIO_OID_INDEX])
+
+        return list(ig_indexes)
+
+    def get_fc_up_ports(self):
+        targets = [self.req('targets', name=target['name'])['content']
+                   for target in self.req('targets')['targets']]
+        return [target for target in targets
+                if target['port-type'] == 'fc' and
+                target["port-state"] == 'up']
 
 
 class XtremIOClient3(XtremIOClient):
@@ -356,11 +387,29 @@ class XtremIOClient4(XtremIOClient):
         else:
             pass
 
+    def get_fc_up_ports(self):
+        return self.req('targets',
+                        data={'full': 1,
+                              'filter': ['port-type:eq:fc',
+                                         'port-state:eq:up'],
+                              'prop': 'port-address'})["targets"]
+
+
+class XtremIOClient42(XtremIOClient4):
+    def get_initiators_igs(self, port_addresses):
+        init_filter = ','.join('port-address:eq:{}'.format(port_address) for
+                               port_address in port_addresses)
+        initiators = self.req('initiators',
+                              data={'filter': init_filter,
+                                    'full': 1, 'prop': 'ig-id'})['initiators']
+        return list(set(ig_id['ig-id'][XTREMIO_OID_INDEX]
+                        for ig_id in initiators))
+
 
 class XtremIOVolumeDriver(san.SanDriver):
     """Executes commands relating to Volumes."""
 
-    VERSION = '1.0.8'
+    VERSION = '1.0.10'
 
     # ThirdPartySystems wiki
     CI_WIKI_NAME = "EMC_XIO_CI"
@@ -376,9 +425,12 @@ class XtremIOVolumeDriver(san.SanDriver):
                              or self.driver_name)
         self.cluster_id = (self.configuration.safe_get('xtremio_cluster_name')
                            or '')
-        self.provisioning_factor = (self.configuration.
-                                    safe_get('max_over_subscription_ratio')
-                                    or DEFAULT_PROVISIONING_FACTOR)
+        self.provisioning_factor = vutils.get_max_over_subscription_ratio(
+            self.configuration.max_over_subscription_ratio,
+            supports_auto=False)
+
+        self.clean_ig = (self.configuration.safe_get('xtremio_clean_unused_ig')
+                         or False)
         self._stats = {}
         self.client = XtremIOClient3(self.configuration, self.cluster_id)
 
@@ -404,9 +456,23 @@ class XtremIOVolumeDriver(san.SanDriver):
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
         else:
-            LOG.info('XtremIO SW version %s', version_text)
+            LOG.info('XtremIO Cluster version %s', version_text)
+        client_ver = '3'
         if ver[0] >= 4:
-            self.client = XtremIOClient4(self.configuration, self.cluster_id)
+            # get XMS version
+            xms = self.client.req('xms', idx=1)['content']
+            xms_version = tuple([int(i) for i in
+                                 xms['sw-version'].split('-')[0].split('.')])
+            LOG.info('XtremIO XMS version %s', version_text)
+            if xms_version >= (4, 2):
+                self.client = XtremIOClient42(self.configuration,
+                                              self.cluster_id)
+                client_ver = '4.2'
+            else:
+                self.client = XtremIOClient4(self.configuration,
+                                             self.cluster_id)
+                client_ver = '4'
+        LOG.info('Using XtremIO Client %s', client_ver)
 
     def create_volume(self, volume):
         """Creates a volume."""
@@ -438,7 +504,22 @@ class XtremIOVolumeDriver(san.SanDriver):
         else:
             snapshot_id = snapshot['id']
 
-        self.client.create_snapshot(snapshot_id, volume['id'])
+        try:
+            self.client.create_snapshot(snapshot_id, volume['id'])
+        except exception.XtremIOSnapshotsLimitExceeded as e:
+            raise exception.CinderException(e.message)
+
+        # extend the snapped volume if requested size is larger then original
+        if volume['size'] > snapshot['volume_size']:
+            try:
+                self.extend_volume(volume, volume['size'])
+            except Exception:
+                LOG.error('failed to extend volume %s, '
+                          'reverting volume from snapshot operation',
+                          volume['id'])
+                # remove the volume in case resize failed
+                self.delete_volume(volume)
+                raise
 
         # add new volume to consistency group
         if (volume.get('consistencygroup_id') and
@@ -466,7 +547,7 @@ class XtremIOVolumeDriver(san.SanDriver):
             try:
                 self.extend_volume(volume, volume['size'])
             except Exception:
-                LOG.error('failes to extend volume %s, '
+                LOG.error('failed to extend volume %s, '
                           'reverting clone operation', volume['id'])
                 # remove the volume in case resize failed
                 self.delete_volume(volume)
@@ -633,18 +714,42 @@ class XtremIOVolumeDriver(san.SanDriver):
 
     def terminate_connection(self, volume, connector, **kwargs):
         """Disallow connection from connector"""
-        tg = self.client.req('target-groups', name='Default')['content']
-        vol = self.client.req('volumes', name=volume['id'])['content']
+        tg_index = '1'
 
-        for ig_idx in self._get_ig_indexes_from_initiators(connector):
+        if not connector:
+            vol = self.client.req('volumes', name=volume.id)['content']
+            # foce detach, unmap all IGs from volume
+            IG_OID = 0
+            ig_indexes = [lun_map[IG_OID][XTREMIO_OID_INDEX] for
+                          lun_map in vol['lun-mapping-list']]
+            LOG.info('Force detach volume %(vol)s from luns %(luns)s.',
+                     {'vol': vol['name'], 'luns': ig_indexes})
+        else:
+            vol = self.client.req('volumes', name=volume.id,
+                                  data={'prop': 'index'})['content']
+            ig_indexes = self._get_ig_indexes_from_initiators(connector)
+
+        for ig_idx in ig_indexes:
             lm_name = '%s_%s_%s' % (six.text_type(vol['index']),
                                     six.text_type(ig_idx),
-                                    six.text_type(tg['index']))
+                                    tg_index)
             LOG.debug('Removing lun map %s.', lm_name)
             try:
                 self.client.req('lun-maps', 'DELETE', name=lm_name)
             except exception.NotFound:
                 LOG.warning("terminate_connection: lun map not found")
+
+        if self.clean_ig:
+            for idx in ig_indexes:
+                try:
+                    ig = self.client.req('initiator-groups', 'GET',
+                                         {'prop': 'num-of-vols'},
+                                         idx=idx)['content']
+                    if ig['num-of-vols'] == 0:
+                        self.client.req('initiator-groups', 'DELETE', idx=idx)
+                except (exception.NotFound,
+                        exception.VolumeBackendAPIException):
+                    LOG.warning('Failed to clean IG %d without mappings', idx)
 
     def _get_password(self):
         return ''.join(RANDOM.choice
@@ -671,14 +776,7 @@ class XtremIOVolumeDriver(san.SanDriver):
 
     def _get_ig_indexes_from_initiators(self, connector):
         initiator_names = self._get_initiator_names(connector)
-        ig_indexes = set()
-
-        for initiator_name in initiator_names:
-            initiator = self.client.get_initiator(initiator_name)
-
-            ig_indexes.add(initiator['ig-id'][XTREMIO_OID_INDEX])
-
-        return list(ig_indexes)
+        return self.client.get_initiators_igs(initiator_names)
 
     def _get_initiator_names(self, connector):
         raise NotImplementedError()
@@ -752,7 +850,10 @@ class XtremIOVolumeDriver(san.SanDriver):
             snap_by_anc = self._get_snapset_ancestors(snap_name)
             for volume, snapshot in zip(volumes, snapshots):
                 real_snap = snap_by_anc[snapshot['volume_id']]
-                self.create_volume_from_snapshot(volume, {'id': real_snap})
+                self.create_volume_from_snapshot(
+                    volume,
+                    {'id': real_snap,
+                     'volume_size': snapshot['volume_size']})
 
         elif source_cg:
             data = {'consistency-group-id': source_cg['id'],
@@ -1085,14 +1186,9 @@ class XtremIOFCDriver(XtremIOVolumeDriver,
     def get_targets(self):
         if not self._targets:
             try:
-                target_list = self.client.req('targets')["targets"]
-                targets = [self.client.req('targets',
-                                           name=target['name'])['content']
-                           for target in target_list
-                           if '-fc' in target['name']]
+                targets = self.client.get_fc_up_ports()
                 self._targets = [target['port-address'].replace(':', '')
-                                 for target in targets
-                                 if target['port-state'] == 'up']
+                                 for target in targets]
             except exception.NotFound:
                 raise (exception.VolumeBackendAPIException
                        (data=_("Failed to get targets")))
@@ -1155,9 +1251,11 @@ class XtremIOFCDriver(XtremIOVolumeDriver,
     def terminate_connection(self, volume, connector, **kwargs):
         (super(XtremIOFCDriver, self)
          .terminate_connection(volume, connector, **kwargs))
-        num_vols = (self.client
-                    .num_of_mapped_volumes(self._get_ig_name(connector)))
-        if num_vols > 0:
+        has_volumes = (not connector
+                       or self.client.
+                       num_of_mapped_volumes(self._get_ig_name(connector)) > 0)
+
+        if has_volumes:
             data = {}
         else:
             i_t_map = {}

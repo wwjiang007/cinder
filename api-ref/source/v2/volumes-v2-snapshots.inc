@@ -11,31 +11,38 @@ possible:
 
 **Snapshot statuses**
 
-+----------------+-------------------------------------+
-| Status         | Description                         |
-+----------------+-------------------------------------+
-| creating       | The snapshot is being created.      |
-+----------------+-------------------------------------+
-| available      | The snapshot is ready to use.       |
-+----------------+-------------------------------------+
-| deleting       | The snapshot is being deleted.      |
-+----------------+-------------------------------------+
-| error          | A snapshot creation error occurred. |
-+----------------+-------------------------------------+
-| error_deleting | A snapshot deletion error occurred. |
-+----------------+-------------------------------------+
++----------------+---------------------------------------------+
+| Status         | Description                                 |
++----------------+---------------------------------------------+
+| creating       | The snapshot is being created.              |
++----------------+---------------------------------------------+
+| available      | The snapshot is ready to use.               |
++----------------+---------------------------------------------+
+| backing-up     | The snapshot is being backed up.            |
++----------------+---------------------------------------------+
+| deleting       | The snapshot is being deleted.              |
++----------------+---------------------------------------------+
+| error          | A snapshot creation error occurred.         |
++----------------+---------------------------------------------+
+| deleted        | The snapshot has been deleted.              |
++----------------+---------------------------------------------+
+| unmanaging     | The snapshot is being unmanaged.            |
++----------------+---------------------------------------------+
+| restoring      | The snapshot is being restored to a volume. |
++----------------+---------------------------------------------+
+| error_deleting | A snapshot deletion error occurred.         |
++----------------+---------------------------------------------+
 
 
 List snapshots with details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/snapshots/detail
+.. rest_method::  GET /v2/{project_id}/snapshots/detail
 
-Lists all Block Storage snapshots, with details, that the tenant can access.
+Lists all Block Storage snapshots, with details, that the project can access.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -43,7 +50,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
 
 
 Response Parameters
@@ -72,11 +80,11 @@ Response Example
 Create snapshot
 ~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/snapshots
+.. rest_method::  POST /v2/{project_id}/snapshots
 
 Creates a volume snapshot, which is a point-in-time, complete copy of a volume. You can create a volume from a snapshot.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -89,7 +97,7 @@ Request
    - force: force
    - description: description
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -116,13 +124,12 @@ Response Parameters
 List snapshots
 ~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/snapshots
+.. rest_method::  GET /v2/{project_id}/snapshots
 
-Lists all Block Storage snapshots, with summary information, that the tenant can access.
+Lists all Block Storage snapshots, with summary information, that the project can access.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -130,10 +137,12 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
+   - offset: offset
    - marker: marker
 
 
@@ -161,13 +170,12 @@ Response Example
 Show snapshot metadata
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/snapshots/{snapshot_id}/metadata
+.. rest_method::  GET /v2/{project_id}/snapshots/{snapshot_id}/metadata
 
 Shows metadata for a snapshot.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -175,7 +183,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 
@@ -206,7 +214,7 @@ Response Example
 Create snapshot metadata
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/snapshots/{snapshot_id}/metadata
+.. rest_method::  POST /v2/{project_id}/snapshots/{snapshot_id}/metadata
 
 Updates metadata for a snapshot.
 
@@ -215,7 +223,6 @@ are not in the request.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -224,7 +231,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - metadata: metadata
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 Request Example
@@ -244,13 +251,12 @@ Response Example
 Update snapshot metadata
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{tenant_id}/snapshots/{snapshot_id}/metadata
+.. rest_method::  PUT /v2/{project_id}/snapshots/{snapshot_id}/metadata
 
 Replaces all the snapshot's metadata with the key-value pairs in the request.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -259,7 +265,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - metadata: metadata
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 Request Example
@@ -279,13 +285,12 @@ Response Example
 Show snapshot details
 ~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/snapshots/{snapshot_id}
+.. rest_method::  GET /v2/{project_id}/snapshots/{snapshot_id}
 
 Shows details for a snapshot.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -293,7 +298,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 
@@ -324,13 +329,12 @@ Response Example
 Update snapshot
 ~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{tenant_id}/snapshots/{snapshot_id}
+.. rest_method::  PUT /v2/{project_id}/snapshots/{snapshot_id}
 
 Updates a snapshot.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -341,7 +345,7 @@ Request
    - snapshot: snapshot
    - description: description
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id
 
 Request Example
@@ -377,11 +381,11 @@ Response Example
 Delete snapshot
 ~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v2/{tenant_id}/snapshots/{snapshot_id}
+.. rest_method::  DELETE /v2/{project_id}/snapshots/{snapshot_id}
 
 Deletes a snapshot.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -389,5 +393,5 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - snapshot_id: snapshot_id

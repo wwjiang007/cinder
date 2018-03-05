@@ -77,13 +77,17 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
             self.failed_over_backend_name or self.backend_name)
         self.vserver = self.zapi_client.vserver
 
-        # Performance monitoring library
-        self.perf_library = perf_cmode.PerformanceCmodeLibrary(
-            self.zapi_client)
-
         # Storage service catalog
         self.ssc_library = capabilities.CapabilitiesLibrary(
             'nfs', self.vserver, self.zapi_client, self.configuration)
+
+        self.ssc_library.check_api_permissions()
+        self.using_cluster_credentials = (
+            self.ssc_library.cluster_user_supported())
+
+        # Performance monitoring library
+        self.perf_library = perf_cmode.PerformanceCmodeLibrary(
+            self.zapi_client)
 
     def _update_zapi_client(self, backend_name):
         """Set cDOT API client for the specified config backend stanza name."""
@@ -98,7 +102,6 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
     @utils.trace_method
     def check_for_setup_error(self):
         """Check that the driver is working and can communicate."""
-        self.ssc_library.check_api_permissions()
         self._add_looping_tasks()
         super(NetAppCmodeNfsDriver, self).check_for_setup_error()
 
@@ -114,12 +117,6 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
                                    loopingcalls.ONE_HOUR,
                                    loopingcalls.ONE_HOUR)
 
-        # Add the task that harvests soft-deleted QoS policy groups.
-        self.loopingcalls.add_task(
-            self.zapi_client.remove_unused_qos_policy_groups,
-            loopingcalls.ONE_MINUTE,
-            loopingcalls.ONE_MINUTE)
-
         # Add the task that runs other housekeeping tasks, such as deletion
         # of previously soft-deleted storage artifacts.
         self.loopingcalls.add_task(
@@ -133,7 +130,7 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
         """Log autosupport messages."""
 
         base_ems_message = dot_utils.build_ems_log_message_0(
-            self.driver_name, self.app_version, self.driver_mode)
+            self.driver_name, self.app_version)
         self.zapi_client.send_ems_log_message(base_ems_message)
 
         pool_ems_message = dot_utils.build_ems_log_message_1(
@@ -143,11 +140,11 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
 
     def _handle_housekeeping_tasks(self):
         """Handle various cleanup activities."""
-
-        # Harvest soft-deleted QoS policy groups
-        self.zapi_client.remove_unused_qos_policy_groups()
-
         active_backend = self.failed_over_backend_name or self.backend_name
+
+        # Add the task that harvests soft-deleted QoS policy groups.
+        if self.using_cluster_credentials:
+            self.zapi_client.remove_unused_qos_policy_groups()
 
         LOG.debug("Current service state: Replication enabled: %("
                   "replication)s. Failed-Over: %(failed)s. Active Backend "
@@ -252,12 +249,18 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
         if not ssc:
             return pools
 
-        # Get up-to-date node utilization metrics just once
-        self.perf_library.update_performance_cache(ssc)
+        # Utilization and performance metrics require cluster-scoped
+        # credentials
+        if self.using_cluster_credentials:
+            # Get up-to-date node utilization metrics just once
+            self.perf_library.update_performance_cache(ssc)
 
-        # Get up-to-date aggregate capacities just once
-        aggregates = self.ssc_library.get_ssc_aggregates()
-        aggr_capacities = self.zapi_client.get_aggregate_capacities(aggregates)
+            # Get up-to-date aggregate capacities just once
+            aggregates = self.ssc_library.get_ssc_aggregates()
+            aggr_capacities = self.zapi_client.get_aggregate_capacities(
+                aggregates)
+        else:
+            aggr_capacities = {}
 
         for ssc_vol_name, ssc_vol_info in ssc.items():
 
@@ -267,8 +270,9 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
             pool.update(ssc_vol_info)
 
             # Add driver capabilities and config info
-            pool['QoS_support'] = True
+            pool['QoS_support'] = self.using_cluster_credentials
             pool['consistencygroup_support'] = True
+            pool['consistent_group_snapshot_enabled'] = True
             pool['multiattach'] = False
 
             # Add up-to-date capacity info
@@ -276,8 +280,11 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
             capacity = self._get_share_capacity_info(nfs_share)
             pool.update(capacity)
 
-            dedupe_used = self.zapi_client.get_flexvol_dedupe_used_percent(
-                ssc_vol_name)
+            if self.using_cluster_credentials:
+                dedupe_used = self.zapi_client.get_flexvol_dedupe_used_percent(
+                    ssc_vol_name)
+            else:
+                dedupe_used = 0.0
             pool['netapp_dedupe_used_percent'] = na_utils.round_down(
                 dedupe_used)
 
@@ -378,16 +385,7 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
     def _is_share_clone_compatible(self, volume, share):
         """Checks if share is compatible with volume to host its clone."""
         flexvol_name = self._get_flexvol_name_for_share(share)
-        thin = self._is_volume_thin_provisioned(flexvol_name)
-        return (
-            self._share_has_space_for_clone(share, volume['size'], thin) and
-            self._is_share_vol_type_match(volume, share, flexvol_name)
-        )
-
-    def _is_volume_thin_provisioned(self, flexvol_name):
-        """Checks if a flexvol is thin (sparse file or thin provisioned)."""
-        ssc_info = self.ssc_library.get_ssc_for_flexvol(flexvol_name)
-        return ssc_info.get('thin_provisioning_support') or False
+        return self._is_share_vol_type_match(volume, share, flexvol_name)
 
     def _is_share_vol_type_match(self, volume, share, flexvol_name):
         """Checks if share matches volume type."""
@@ -463,39 +461,6 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
                 LOG.exception('Exec of "rm" command on backing file for'
                               ' %s was unsuccessful.', snapshot['id'])
 
-    @utils.trace_method
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
-        """Fetch the image from image_service and write it to the volume."""
-        copy_success = False
-        try:
-            major, minor = self.zapi_client.get_ontapi_version()
-            col_path = self.configuration.netapp_copyoffload_tool_path
-            # Search the local image cache before attempting copy offload
-            cache_result = self._find_image_in_cache(image_id)
-            if cache_result:
-                copy_success = self._copy_from_cache(volume, image_id,
-                                                     cache_result)
-                if copy_success:
-                    LOG.info('Copied image %(img)s to volume %(vol)s '
-                             'using local image cache.',
-                             {'img': image_id, 'vol': volume['id']})
-            # Image cache was not present, attempt copy offload workflow
-            if (not copy_success and col_path and
-                    major == 1 and minor >= 20):
-                LOG.debug('No result found in image cache')
-                self._copy_from_img_service(context, volume, image_service,
-                                            image_id)
-                LOG.info('Copied image %(img)s to volume %(vol)s using'
-                         ' copy offload workflow.',
-                         {'img': image_id, 'vol': volume['id']})
-                copy_success = True
-        except Exception:
-            LOG.exception('Copy offload workflow unsuccessful.')
-        finally:
-            if not copy_success:
-                super(NetAppCmodeNfsDriver, self).copy_image_to_volume(
-                    context, volume, image_service, image_id)
-
     def _get_ip_verify_on_cluster(self, host):
         """Verifies if host on same cluster and returns ip."""
         ip = na_utils.resolve_hostname(host)
@@ -507,13 +472,13 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
 
     def _copy_from_cache(self, volume, image_id, cache_result):
         """Try copying image file_name from cached file_name."""
-        LOG.debug("Trying copy from cache using copy offload.")
         copied = False
         cache_copy, found_local = self._find_image_location(cache_result,
-                                                            volume['id'])
+                                                            volume)
 
         try:
             if found_local:
+                LOG.debug("Trying copy from cache using cloning.")
                 (nfs_share, file_name) = cache_copy
                 self._clone_file_dst_exists(
                     nfs_share, file_name, volume['name'], dest_exists=True)
@@ -522,17 +487,14 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
                 copied = True
             elif (cache_copy and
                   self.configuration.netapp_copyoffload_tool_path):
+                LOG.debug("Trying copy from cache using copy offload.")
                 self._copy_from_remote_cache(volume, image_id, cache_copy)
                 copied = True
-
-            if copied:
-                self._post_clone_image(volume)
-
         except Exception:
             LOG.exception('Error in workflow copy from cache.')
         return copied
 
-    def _find_image_location(self, cache_result, volume_id):
+    def _find_image_location(self, cache_result, volume):
         """Finds the location of a cached image.
 
         Returns image location local to the NFS share, that matches the
@@ -542,7 +504,10 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
 
         found_local_copy = False
         cache_copy = None
-        provider_location = self._get_provider_location(volume_id)
+
+        provider_location = volume_utils.extract_host(volume['host'],
+                                                      level='pool')
+
         for res in cache_result:
             (share, file_name) = res
             if share == provider_location:
@@ -580,10 +545,11 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
         return src_ip, src_path
 
     def _get_destination_ip_and_path(self, volume):
-        dest_ip = self._get_ip_verify_on_cluster(
-            self._get_host_ip(volume['id']))
-        dest_path = os.path.join(self._get_export_path(
-            volume['id']), volume['name'])
+        share = volume_utils.extract_host(volume['host'], level='pool')
+        share_ip_and_path = share.split(":")
+        dest_ip = self._get_ip_verify_on_cluster(share_ip_and_path[0])
+        dest_path = os.path.join(share_ip_and_path[1], volume['name'])
+
         return dest_ip, dest_path
 
     def _clone_file_dst_exists(self, share, src_name, dst_name,
@@ -596,11 +562,14 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
     def _copy_from_img_service(self, context, volume, image_service,
                                image_id):
         """Copies from the image service using copy offload."""
+
         LOG.debug("Trying copy from image service using copy offload.")
         image_loc = image_service.get_location(context, image_id)
         locations = self._construct_image_nfs_url(image_loc)
         src_ip = None
         selected_loc = None
+        cloned = False
+
         # this will match the first location that has a valid IP on cluster
         for location in locations:
             conn, dr = self._check_get_nfs_path_segs(location)
@@ -615,32 +584,31 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
             raise exception.NotFound(_("Source host details not found."))
         (__, ___, img_file) = selected_loc.rpartition('/')
         src_path = os.path.join(dr, img_file)
-        dst_ip = self._get_ip_verify_on_cluster(self._get_host_ip(
-            volume['id']))
+
+        dst_ip, vol_path = self._get_destination_ip_and_path(volume)
+        share_path = vol_path.rsplit("/", 1)[0]
+        dst_share = dst_ip + ':' + share_path
+
         # tmp file is required to deal with img formats
         tmp_img_file = six.text_type(uuid.uuid4())
         col_path = self.configuration.netapp_copyoffload_tool_path
         img_info = image_service.show(context, image_id)
-        dst_share = self._get_provider_location(volume['id'])
         self._check_share_can_hold_size(dst_share, img_info['size'])
         run_as_root = self._execute_as_root
 
         dst_dir = self._get_mount_point_for_share(dst_share)
         dst_img_local = os.path.join(dst_dir, tmp_img_file)
+
         try:
-            # If src and dst share not equal
-            if (('%s:%s' % (src_ip, dr)) !=
-                    ('%s:%s' % (dst_ip, self._get_export_path(volume['id'])))):
-                dst_img_serv_path = os.path.join(
-                    self._get_export_path(volume['id']), tmp_img_file)
-                # Always run copy offload as regular user, it's sufficient
-                # and rootwrap doesn't allow copy offload to run as root
-                # anyways.
-                self._execute(col_path, src_ip, dst_ip, src_path,
-                              dst_img_serv_path, run_as_root=False,
-                              check_exit_code=0)
-            else:
-                self._clone_file_dst_exists(dst_share, img_file, tmp_img_file)
+            dst_img_serv_path = os.path.join(
+                share_path, tmp_img_file)
+            # Always run copy offload as regular user, it's sufficient
+            # and rootwrap doesn't allow copy offload to run as root
+            # anyways.
+            self._execute(col_path, src_ip, dst_ip, src_path,
+                          dst_img_serv_path, run_as_root=False,
+                          check_exit_code=0)
+
             self._discover_file_till_timeout(dst_img_local, timeout=120)
             LOG.debug('Copied image %(img)s to tmp file %(tmp)s.',
                       {'img': image_id, 'tmp': tmp_img_file})
@@ -682,10 +650,12 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
                 finally:
                     if os.path.exists(dst_img_conv_local):
                         self._delete_file_at_path(dst_img_conv_local)
-            self._post_clone_image(volume)
+            cloned = True
         finally:
             if os.path.exists(dst_img_local):
                 self._delete_file_at_path(dst_img_local)
+
+        return cloned
 
     @utils.trace_method
     def unmanage(self, volume):
@@ -709,7 +679,7 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
 
         super(NetAppCmodeNfsDriver, self).unmanage(volume)
 
-    def failover_host(self, context, volumes, secondary_id=None):
+    def failover_host(self, context, volumes, secondary_id=None, groups=None):
         """Failover a backend to a secondary replication target."""
 
         return self._failover_host(volumes, secondary_id=secondary_id)
@@ -733,8 +703,8 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
         return flexvols
 
     @utils.trace_method
-    def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
-        """Delete files backing each snapshot in the cgsnapshot.
+    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+        """Delete files backing each snapshot in the group snapshot.
 
         :return: An implicit update of snapshot models that the manager will
                  interpret and subsequently set the model state to deleted.
@@ -744,3 +714,166 @@ class NetAppCmodeNfsDriver(nfs_base.NetAppNfsDriver,
             LOG.debug("Snapshot %s deletion successful", snapshot['name'])
 
         return None, None
+
+    @utils.trace_method
+    def create_group(self, context, group):
+        """Driver entry point for creating a generic volume group.
+
+        ONTAP does not maintain an actual group construct. As a result, no
+        communtication to the backend is necessary for generic volume group
+        creation.
+
+        :returns: Hard-coded model update for generic volume group model.
+        """
+        model_update = {'status': fields.GroupStatus.AVAILABLE}
+        return model_update
+
+    @utils.trace_method
+    def delete_group(self, context, group, volumes):
+        """Driver entry point for deleting a generic volume group.
+
+        :returns: Updated group model and list of volume models for the volumes
+                 that were deleted.
+        """
+        model_update = {'status': fields.GroupStatus.DELETED}
+        volumes_model_update = []
+        for volume in volumes:
+            try:
+                self._delete_file(volume['id'], volume['name'])
+                volumes_model_update.append(
+                    {'id': volume['id'], 'status': 'deleted'})
+            except Exception:
+                volumes_model_update.append(
+                    {'id': volume['id'],
+                     'status': fields.GroupStatus.ERROR_DELETING})
+                LOG.exception("Volume %(vol)s in the group could not be "
+                              "deleted.", {'vol': volume})
+        return model_update, volumes_model_update
+
+    @utils.trace_method
+    def update_group(self, context, group, add_volumes=None,
+                     remove_volumes=None):
+        """Driver entry point for updating a generic volume group.
+
+        Since no actual group construct is ever created in ONTAP, it is not
+        necessary to update any metadata on the backend. Since this is a NO-OP,
+        there is guaranteed to be no change in any of the volumes' statuses.
+        """
+
+        return None, None, None
+
+    @utils.trace_method
+    def create_group_snapshot(self, context, group_snapshot, snapshots):
+        """Creates a Cinder group snapshot object.
+
+        The Cinder group snapshot object is created by making use of an ONTAP
+        consistency group snapshot in order to provide write-order consistency
+        for a set of flexvols snapshots. First, a list of the flexvols backing
+        the given Cinder group must be gathered. An ONTAP group-snapshot of
+        these flexvols will create a snapshot copy of all the Cinder volumes in
+        the generic volume group. For each Cinder volume in the group, it is
+        then necessary to clone its backing file from the ONTAP cg-snapshot.
+        The naming convention used to for the clones is what indicates the
+        clone's role as a Cinder snapshot and its inclusion in a Cinder group.
+        The ONTAP cg-snapshot of the flexvols is deleted after the cloning
+        operation is completed.
+
+        :returns: An implicit update for the group snapshot and snapshot models
+                 that is then used by the manager to set the models to
+                 available.
+        """
+        try:
+            if volume_utils.is_group_a_cg_snapshot_type(group_snapshot):
+                self._create_consistent_group_snapshot(group_snapshot,
+                                                       snapshots)
+            else:
+                for snapshot in snapshots:
+                    self._clone_backing_file_for_volume(
+                        snapshot['volume_name'], snapshot['name'],
+                        snapshot['volume_id'], is_snapshot=True)
+        except Exception as ex:
+            err_msg = (_("Create group snapshot failed (%s).") % ex)
+            LOG.exception(err_msg, resource=group_snapshot)
+            raise exception.NetAppDriverException(err_msg)
+
+        return None, None
+
+    def _create_consistent_group_snapshot(self, group_snapshot, snapshots):
+        hosts = [snapshot['volume']['host'] for snapshot in snapshots]
+        flexvols = self._get_flexvol_names_from_hosts(hosts)
+
+        # Create snapshot for backing flexvol
+        self.zapi_client.create_cg_snapshot(flexvols, group_snapshot['id'])
+
+        # Start clone process for snapshot files
+        for snapshot in snapshots:
+            self._clone_backing_file_for_volume(
+                snapshot['volume']['name'], snapshot['name'],
+                snapshot['volume']['id'], source_snapshot=group_snapshot['id'])
+
+        # Delete backing flexvol snapshots
+        for flexvol_name in flexvols:
+            try:
+                self.zapi_client.wait_for_busy_snapshot(
+                    flexvol_name, group_snapshot['id'])
+                self.zapi_client.delete_snapshot(
+                    flexvol_name, group_snapshot['id'])
+            except exception.SnapshotIsBusy:
+                self.zapi_client.mark_snapshot_for_deletion(
+                    flexvol_name, group_snapshot['id'])
+
+    @utils.trace_method
+    def create_group_from_src(self, context, group, volumes,
+                              group_snapshot=None, sorted_snapshots=None,
+                              source_group=None, sorted_source_vols=None):
+        """Creates a group from a group snapshot or a group of cinder vols.
+
+        :returns: An implicit update for the volumes model that is
+                 interpreted by the manager as a successful operation.
+        """
+        LOG.debug("VOLUMES %s ", ', '.join([vol['id'] for vol in volumes]))
+        model_update = None
+        volumes_model_update = []
+
+        if group_snapshot:
+            vols = zip(volumes, sorted_snapshots)
+
+            for volume, snapshot in vols:
+                update = self.create_volume_from_snapshot(
+                    volume, snapshot)
+                update['id'] = volume['id']
+                volumes_model_update.append(update)
+
+        elif source_group and sorted_source_vols:
+            hosts = [source_vol['host'] for source_vol in sorted_source_vols]
+            flexvols = self._get_flexvol_names_from_hosts(hosts)
+
+            # Create snapshot for backing flexvol
+            snapshot_name = 'snapshot-temp-' + source_group['id']
+            self.zapi_client.create_cg_snapshot(flexvols, snapshot_name)
+
+            # Start clone process for new volumes
+            vols = zip(volumes, sorted_source_vols)
+            for volume, source_vol in vols:
+                self._clone_backing_file_for_volume(
+                    source_vol['name'], volume['name'],
+                    source_vol['id'], source_snapshot=snapshot_name)
+                volume_model_update = (
+                    self._get_volume_model_update(volume) or {})
+                volume_model_update.update({
+                    'id': volume['id'],
+                    'provider_location': source_vol['provider_location'],
+                })
+                volumes_model_update.append(volume_model_update)
+
+            # Delete backing flexvol snapshots
+            for flexvol_name in flexvols:
+                self.zapi_client.wait_for_busy_snapshot(
+                    flexvol_name, snapshot_name)
+                self.zapi_client.delete_snapshot(flexvol_name, snapshot_name)
+        else:
+            LOG.error("Unexpected set of parameters received when "
+                      "creating group from source.")
+            model_update = {'status': fields.GroupStatus.ERROR}
+
+        return model_update, volumes_model_update

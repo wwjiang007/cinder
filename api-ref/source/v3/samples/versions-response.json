@@ -1,35 +1,11 @@
 {
     "versions": [
         {
-            "status": "DEPRECATED",
-            "updated": "2014-06-28T12:20:21Z",
-            "links": [
-                {
-                    "href": "http://docs.openstack.org/",
-                    "type": "text/html",
-                    "rel": "describedby"
-                },
-                {
-                    "href": "http://10.0.2.15:8776/v1/",
-                    "rel": "self"
-                }
-            ],
-            "min_version": "",
-            "version": "",
-            "media-types": [
-                {
-                    "base": "application/json",
-                    "type": "application/vnd.openstack.volume+json;version=1"
-                }
-            ],
-            "id": "v1.0"
-        },
-        {
             "status": "SUPPORTED",
             "updated": "2014-06-28T12:20:21Z",
             "links": [
                 {
-                    "href": "http://docs.openstack.org/",
+                    "href": "https://docs.openstack.org/",
                     "type": "text/html",
                     "rel": "describedby"
                 },
@@ -53,7 +29,7 @@
             "updated": "2016-02-08T12:20:21Z",
             "links": [
                 {
-                    "href": "http://docs.openstack.org/",
+                    "href": "https://docs.openstack.org/",
                     "type": "text/html",
                     "rel": "describedby"
                 },

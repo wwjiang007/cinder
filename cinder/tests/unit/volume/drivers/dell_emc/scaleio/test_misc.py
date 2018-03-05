@@ -15,7 +15,6 @@
 
 import ddt
 import mock
-from six.moves import urllib
 
 from cinder import context
 from cinder import exception
@@ -23,13 +22,14 @@ from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import fake_volume
 from cinder.tests.unit.volume.drivers.dell_emc import scaleio
 from cinder.tests.unit.volume.drivers.dell_emc.scaleio import mocks
+from cinder.volume import configuration
 
 
 @ddt.ddt
 class TestMisc(scaleio.TestScaleIODriver):
-    DOMAIN_NAME = 'PD1'
-    POOL_NAME = 'SP1'
-    STORAGE_POOLS = ['{}:{}'.format(DOMAIN_NAME, POOL_NAME)]
+
+    DOMAIN_ID = '1'
+    POOL_ID = '1'
 
     def setUp(self):
         """Set up the test case environment.
@@ -37,8 +37,6 @@ class TestMisc(scaleio.TestScaleIODriver):
         Defines the mock HTTPS responses for the REST API calls.
         """
         super(TestMisc, self).setUp()
-        self.domain_name_enc = urllib.parse.quote(self.DOMAIN_NAME)
-        self.pool_name_enc = urllib.parse.quote(self.POOL_NAME)
         self.ctx = context.RequestContext('fake', 'fake', auth_token=True)
 
         self.volume = fake_volume.fake_volume_obj(
@@ -50,22 +48,21 @@ class TestMisc(scaleio.TestScaleIODriver):
 
         self.HTTPS_MOCK_RESPONSES = {
             self.RESPONSE_MODE.Valid: {
-                'types/Domain/instances/getByName::' +
-                self.domain_name_enc: '"{}"'.format(self.DOMAIN_NAME).encode(
-                    'ascii',
-                    'ignore'
-                ),
+                'types/Domain/instances/getByName::{}'.format(
+                    self.PROT_DOMAIN_NAME
+                ): '"{}"'.format(self.PROT_DOMAIN_ID),
                 'types/Pool/instances/getByName::{},{}'.format(
-                    self.DOMAIN_NAME,
-                    self.POOL_NAME
-                ): '"{}"'.format(self.POOL_NAME).encode('ascii', 'ignore'),
+                    self.PROT_DOMAIN_ID,
+                    self.STORAGE_POOL_NAME
+                ): '"{}"'.format(self.STORAGE_POOL_ID),
                 'types/StoragePool/instances/action/querySelectedStatistics': {
-                    '"{}"'.format(self.POOL_NAME): {
+                    '"{}"'.format(self.STORAGE_POOL_NAME): {
                         'capacityAvailableForVolumeAllocationInKb': 5000000,
                         'capacityLimitInKb': 16000000,
                         'spareCapacityInKb': 6000000,
                         'thickCapacityInUseInKb': 266,
                         'thinCapacityAllocatedInKm': 0,
+                        'snapCapacityInUseInKb': 266,
                     },
                 },
                 'instances/Volume::{}/action/setVolumeName'.format(
@@ -75,10 +72,24 @@ class TestMisc(scaleio.TestScaleIODriver):
                     self.new_volume['provider_id']):
                         self.volume['provider_id'],
                 'version': '"{}"'.format('2.0.1'),
+                'instances/StoragePool::{}'.format(
+                    self.STORAGE_POOL_ID
+                ): {
+                    'name': self.STORAGE_POOL_NAME,
+                    'id': self.STORAGE_POOL_ID,
+                    'protectionDomainId': self.PROT_DOMAIN_ID,
+                    'zeroPaddingEnabled': 'true',
+                },
+                'instances/ProtectionDomain::{}'.format(
+                    self.PROT_DOMAIN_ID
+                ): {
+                    'name': self.PROT_DOMAIN_NAME,
+                    'id': self.PROT_DOMAIN_ID
+                },
             },
             self.RESPONSE_MODE.BadStatus: {
                 'types/Domain/instances/getByName::' +
-                self.domain_name_enc: self.BAD_STATUS_RESPONSE,
+                self.PROT_DOMAIN_NAME: self.BAD_STATUS_RESPONSE,
                 'instances/Volume::{}/action/setVolumeName'.format(
                     self.volume['provider_id']): mocks.MockHTTPSResponse(
                     {
@@ -89,7 +100,7 @@ class TestMisc(scaleio.TestScaleIODriver):
             },
             self.RESPONSE_MODE.Invalid: {
                 'types/Domain/instances/getByName::' +
-                self.domain_name_enc: None,
+                self.PROT_DOMAIN_NAME: None,
                 'instances/Volume::{}/action/setVolumeName'.format(
                     self.volume['provider_id']): mocks.MockHTTPSResponse(
                     {
@@ -104,37 +115,52 @@ class TestMisc(scaleio.TestScaleIODriver):
         self.driver.check_for_setup_error()
 
     def test_both_storage_pool(self):
-        """Both storage name and ID provided."""
-        self.driver.storage_pool_id = "test_pool_id"
-        self.driver.storage_pool_name = "test_pool_name"
+        """Both storage name and ID provided.
+
+        INVALID
+        """
+        self.driver.configuration.sio_storage_pool_id = self.STORAGE_POOL_ID
+        self.driver.configuration.sio_storage_pool_name = (
+            self.STORAGE_POOL_NAME
+        )
         self.assertRaises(exception.InvalidInput,
                           self.driver.check_for_setup_error)
 
     def test_no_storage_pool(self):
-        """No storage name or ID provided."""
-        self.driver.storage_pool_name = None
-        self.driver.storage_pool_id = None
-        self.assertRaises(exception.InvalidInput,
-                          self.driver.check_for_setup_error)
+        """No storage name or ID provided.
+
+        VALID as storage_pools are defined
+        """
+        self.driver.configuration.sio_storage_pool_name = None
+        self.driver.configuration.sio_storage_pool_id = None
+        self.driver.check_for_setup_error()
 
     def test_both_domain(self):
-        self.driver.protection_domain_name = "test_domain_name"
-        self.driver.protection_domain_id = "test_domain_id"
+        """Both domain and ID are provided
+
+        INVALID
+        """
+        self.driver.configuration.sio_protection_domain_name = (
+            self.PROT_DOMAIN_NAME)
+        self.driver.configuration.sio_protection_domain_id = (
+            self.PROT_DOMAIN_ID)
         self.assertRaises(exception.InvalidInput,
                           self.driver.check_for_setup_error)
 
     def test_no_storage_pools(self):
-        """No storage pools."""
+        """No storage pools.
+
+        VALID as domain and storage pool names are provided
+        """
         self.driver.storage_pools = None
-        self.assertRaises(exception.InvalidInput,
-                          self.driver.check_for_setup_error)
+        self.driver.check_for_setup_error()
 
     def test_volume_size_round_true(self):
         self.driver._check_volume_size(1)
 
     def test_volume_size_round_false(self):
-        self.driver.configuration.set_override('sio_round_volume_capacity',
-                                               override=False)
+        self.override_config('sio_round_volume_capacity', False,
+                             configuration.SHARED_CONF_GROUP)
         self.assertRaises(exception.VolumeBackendAPIException,
                           self.driver._check_volume_size, 1)
 
@@ -152,6 +178,68 @@ class TestMisc(scaleio.TestScaleIODriver):
 
     def test_get_volume_stats(self):
         self.driver.storage_pools = self.STORAGE_POOLS
+        self.driver.get_volume_stats(True)
+
+    def _setup_valid_variant_property(self, property):
+        """Setup valid response that returns a variety of property name
+
+        """
+        self.HTTPS_MOCK_RESPONSES = {
+            self.RESPONSE_MODE.ValidVariant: {
+                'types/Domain/instances/getByName::{}'.format(
+                    self.PROT_DOMAIN_NAME
+                ): '"{}"'.format(self.PROT_DOMAIN_ID),
+                'types/Pool/instances/getByName::{},{}'.format(
+                    self.PROT_DOMAIN_ID,
+                    self.STORAGE_POOL_NAME
+                ): '"{}"'.format(self.STORAGE_POOL_ID),
+                'instances/ProtectionDomain::{}'.format(
+                    self.PROT_DOMAIN_ID
+                ): {
+                    'name': self.PROT_DOMAIN_NAME,
+                    'id': self.PROT_DOMAIN_ID
+                },
+                'instances/StoragePool::{}'.format(
+                    self.STORAGE_POOL_ID
+                ): {
+                    'name': self.STORAGE_POOL_NAME,
+                    'id': self.STORAGE_POOL_ID,
+                    'protectionDomainId': self.PROT_DOMAIN_ID,
+                    'zeroPaddingEnabled': 'true',
+                },
+                'types/StoragePool/instances/action/querySelectedStatistics': {
+                    '"{}"'.format(self.STORAGE_POOL_NAME): {
+                        'capacityAvailableForVolumeAllocationInKb': 5000000,
+                        'capacityLimitInKb': 16000000,
+                        'spareCapacityInKb': 6000000,
+                        'thickCapacityInUseInKb': 266,
+                        'snapCapacityInUseInKb': 266,
+                        property: 0,
+                    },
+                },
+                'instances/Volume::{}/action/setVolumeName'.format(
+                    self.volume['provider_id']):
+                        self.new_volume['provider_id'],
+                'instances/Volume::{}/action/setVolumeName'.format(
+                    self.new_volume['provider_id']):
+                        self.volume['provider_id'],
+                'version': '"{}"'.format('2.0.1'),
+            }
+        }
+
+    def test_get_volume_stats_with_varying_properties(self):
+        """Test getting volume stats with various property names
+
+        In SIO 3.0, a property was renamed.
+        The change is backwards compatible for now but this tests
+        ensures that the driver is tolerant of that change
+        """
+        self.driver.storage_pools = self.STORAGE_POOLS
+        self._setup_valid_variant_property("thinCapacityAllocatedInKb")
+        self.set_https_response_mode(self.RESPONSE_MODE.ValidVariant)
+        self.driver.get_volume_stats(True)
+        self._setup_valid_variant_property("nonexistentProperty")
+        self.set_https_response_mode(self.RESPONSE_MODE.ValidVariant)
         self.driver.get_volume_stats(True)
 
     @mock.patch(
@@ -219,8 +307,9 @@ class TestMisc(scaleio.TestScaleIODriver):
     @ddt.unpack
     def test_default_provisioning_type_thin(self, config_provisioning_type,
                                             expected_provisioning_type):
-        self.driver = mocks.ScaleIODriver(
-            san_thin_provision=config_provisioning_type)
+        self.override_config('san_thin_provision', config_provisioning_type,
+                             configuration.SHARED_CONF_GROUP)
+        self.driver = mocks.ScaleIODriver(configuration=self.configuration)
         empty_storage_type = {}
         self.assertEqual(
             expected_provisioning_type,

@@ -38,6 +38,7 @@ from cinder import context
 from cinder import exception
 from cinder.i18n import _
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.san import san
 from cinder.volume import utils as volume_utils
@@ -60,7 +61,7 @@ flashsystem_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(flashsystem_opts)
+CONF.register_opts(flashsystem_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 class FlashSystemDriver(san.SanDriver,
@@ -95,6 +96,8 @@ class FlashSystemDriver(san.SanDriver,
     """
 
     VERSION = "1.0.12"
+
+    MULTI_HOST_MAP_ERRORS = ['CMMVC6045E', 'CMMVC6071E']
 
     def __init__(self, *args, **kwargs):
         super(FlashSystemDriver, self).__init__(*args, **kwargs)
@@ -263,14 +266,17 @@ class FlashSystemDriver(san.SanDriver,
             {'src': src_vdisk_name, 'dest': dest_vdisk_name})
 
     def _create_and_copy_vdisk_data(self, src_vdisk_name, src_vdisk_id,
-                                    dest_vdisk_name, dest_vdisk_id):
-        vdisk_attr = self._get_vdisk_attributes(src_vdisk_name)
-        self._driver_assert(
-            vdisk_attr is not None,
-            (_('_create_and_copy_vdisk_data: Failed to get attributes for '
-               'vdisk %s.') % src_vdisk_name))
+                                    dest_vdisk_name, dest_vdisk_id,
+                                    dest_vdisk_size=None):
+        if dest_vdisk_size is None:
+            vdisk_attr = self._get_vdisk_attributes(src_vdisk_name)
+            self._driver_assert(
+                vdisk_attr is not None,
+                (_('_create_and_copy_vdisk_data: Failed to get attributes for '
+                   'vdisk %s.') % src_vdisk_name))
+            dest_vdisk_size = vdisk_attr['capacity']
 
-        self._create_vdisk(dest_vdisk_name, vdisk_attr['capacity'], 'b', None)
+        self._create_vdisk(dest_vdisk_name, dest_vdisk_size, 'b', None)
 
         # create a timer to lock vdisk that will be used to data copy
         timer = loopingcall.FixedIntervalLoopingCall(
@@ -296,14 +302,14 @@ class FlashSystemDriver(san.SanDriver,
         ssh_cmd = ['svctask', 'mkvdisk', '-name', name, '-mdiskgrp',
                    FLASHSYSTEM_VOLPOOL_NAME, '-iogrp',
                    six.text_type(FLASHSYSTEM_VOL_IOGRP),
-                   '-size', size, '-unit', unit]
+                   '-size', six.text_type(size), '-unit', unit]
         out, err = self._ssh(ssh_cmd)
         self._assert_ssh_return(out.strip(), '_create_vdisk',
                                 ssh_cmd, out, err)
 
         # Ensure that the output is as expected
         match_obj = re.search(
-            'Virtual Disk, id \[([0-9]+)\], successfully created', out)
+            r'Virtual Disk, id \[([0-9]+)\], successfully created', out)
 
         self._driver_assert(
             match_obj is not None,
@@ -722,6 +728,27 @@ class FlashSystemDriver(san.SanDriver,
                 existing_ref=existing_ref, reason=reason)
         return vdisk
 
+    def _cli_except(self, fun, cmd, out, err, exc_list):
+        """Raise if stderr contains an unexpected error code"""
+        if not err:
+            return None
+        if not isinstance(exc_list, (tuple, list)):
+            exc_list = [exc_list]
+
+        try:
+            err_type = [e for e in exc_list
+                        if err.startswith(e)].pop()
+        except IndexError:
+            msg = _(
+                '%(fun)s: encountered unexpected CLI error, '
+                'expected one of: %(errors)s'
+            ) % {'fun': fun,
+                 'errors': ', '.join(exc_list)}
+            LOG.error(msg)
+            raise exception.VolumeBackendAPIException(data=msg)
+
+        return {'code': err_type, 'message': err.strip(err_type).strip()}
+
     @utils.synchronized('flashsystem-map', external=True)
     def _map_vdisk_to_host(self, vdisk_name, connector):
         """Create a mapping between a vdisk to a host."""
@@ -748,13 +775,18 @@ class FlashSystemDriver(san.SanDriver,
             ssh_cmd = ['svctask', 'mkvdiskhostmap', '-host', host_name,
                        '-scsi', six.text_type(result_lun), vdisk_name]
             out, err = self._ssh(ssh_cmd, check_exit_code=False)
-            if err and err.startswith('CMMVC6071E'):
+            map_error = self._cli_except('_map_vdisk_to_host',
+                                         ssh_cmd,
+                                         out,
+                                         err,
+                                         self.MULTI_HOST_MAP_ERRORS)
+            if map_error:
                 if not self.configuration.flashsystem_multihostmap_enabled:
-                    msg = _('flashsystem_multihostmap_enabled is set '
-                            'to False, not allow multi host mapping. '
-                            'CMMVC6071E The VDisk-to-host mapping '
-                            'was not created because the VDisk is '
-                            'already mapped to a host.')
+                    msg = _(
+                        'flashsystem_multihostmap_enabled is set '
+                        'to False, failing requested multi-host map. '
+                        '(%(code)s %(message)s)'
+                    ) % map_error
                     LOG.error(msg)
                     raise exception.VolumeBackendAPIException(data=msg)
 
@@ -1100,9 +1132,9 @@ class FlashSystemDriver(san.SanDriver,
             'enter: create_volume_from_snapshot: create %(vol)s from '
             '%(snap)s.', {'vol': volume['name'], 'snap': snapshot['name']})
 
-        if volume['size'] != snapshot['volume_size']:
-            msg = _('create_volume_from_snapshot: Volume size is different '
-                    'from snapshot based volume.')
+        if volume['size'] < snapshot['volume_size']:
+            msg = _('create_volume_from_snapshot: Volume is smaller than '
+                    'snapshot.')
             LOG.error(msg)
             raise exception.VolumeDriverException(message=msg)
 
@@ -1113,10 +1145,13 @@ class FlashSystemDriver(san.SanDriver,
                      'The invalid status is: %s.') % status)
             raise exception.InvalidSnapshot(msg)
 
-        self._create_and_copy_vdisk_data(snapshot['name'],
-                                         snapshot['id'],
-                                         volume['name'],
-                                         volume['id'])
+        self._create_and_copy_vdisk_data(
+            snapshot['name'],
+            snapshot['id'],
+            volume['name'],
+            volume['id'],
+            dest_vdisk_size=volume['size'] * units.Gi
+        )
 
         LOG.debug(
             'leave: create_volume_from_snapshot: create %(vol)s from '
@@ -1128,16 +1163,19 @@ class FlashSystemDriver(san.SanDriver,
         LOG.debug('enter: create_cloned_volume: create %(vol)s from %(src)s.',
                   {'src': src_volume['name'], 'vol': volume['name']})
 
-        if src_volume['size'] != volume['size']:
-            msg = _('create_cloned_volume: Source and destination '
-                    'size differ.')
+        if src_volume['size'] > volume['size']:
+            msg = _('create_cloned_volume: Source volume larger than '
+                    'destination volume')
             LOG.error(msg)
             raise exception.VolumeDriverException(message=msg)
 
-        self._create_and_copy_vdisk_data(src_volume['name'],
-                                         src_volume['id'],
-                                         volume['name'],
-                                         volume['id'])
+        self._create_and_copy_vdisk_data(
+            src_volume['name'],
+            src_volume['id'],
+            volume['name'],
+            volume['id'],
+            dest_vdisk_size=volume['size'] * units.Gi
+        )
 
         LOG.debug('leave: create_cloned_volume: create %(vol)s from %(src)s.',
                   {'src': src_volume['name'], 'vol': volume['name']})

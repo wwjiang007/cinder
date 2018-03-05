@@ -62,13 +62,12 @@ status values are:
 List volumes with details
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/volumes/detail
+.. rest_method::  GET /v2/{project_id}/volumes/detail
 
-Lists all Block Storage volumes, with details, that the tenant can access.
+Lists all Block Storage volumes, with details, that the project can access.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -76,9 +75,11 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
    - sort: sort
    - limit: limit
+   - offset: offset
    - marker: marker
 
 
@@ -104,8 +105,9 @@ Response Parameters
    - os-vol-mig-status-attr:migstat: os-vol-mig-status-attr:migstat
    - metadata: metadata
    - status: status_3
+   - volume_image_metadata: volume_image_metadata
    - description: description
-   - multiattach: multiattach
+   - multiattach: multiattach_resp
    - source_volid: source_volid
    - consistencygroup_id: consistencygroup_id
    - os-vol-mig-status-attr:name_id: os-vol-mig-status-attr:name_id
@@ -130,7 +132,7 @@ Response Example
 Create volume
 ~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/volumes
+.. rest_method::  POST /v2/{project_id}/volumes
 
 Creates a volume.
 
@@ -163,7 +165,7 @@ Troubleshooting
 - The storage node needs enough free storage space to match the size
   of the volume creation request.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -174,7 +176,7 @@ Request
    - size: size
    - description: description_9
    - imageRef: imageRef
-   - multiattach: multiattach
+   - multiattach: multiattach_req
    - availability_zone: availability_zone
    - source_volid: source_volid
    - name: name_13
@@ -185,7 +187,7 @@ Request
    - OS-SCH-HNT:scheduler_hints: OS-SCH-HNT:scheduler_hints
    - source_replica: source_replica
    - metadata: metadata_2
-   - tenant_id: tenant_id
+   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -214,7 +216,7 @@ Response Parameters
    - metadata: metadata
    - status: status_3
    - description: description
-   - multiattach: multiattach
+   - multiattach: multiattach_resp
    - source_volid: source_volid
    - volume: volume
    - consistencygroup_id: consistencygroup_id
@@ -223,20 +225,21 @@ Response Parameters
    - created_at: created_at
    - volume_type: volume_type
 
+Response Example
+----------------
 
-
-
+.. literalinclude:: ./samples/volume-create-response.json
+   :language: javascript
 
 List volumes
 ~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/volumes
+.. rest_method::  GET /v2/{project_id}/volumes
 
-Lists summary information for all Block Storage volumes that the tenant can access.
+Lists summary information for all Block Storage volumes that the project can access.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -244,9 +247,11 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
    - sort: sort
    - limit: limit
+   - offset: offset
    - marker: marker
 
 
@@ -274,7 +279,7 @@ Response Example
 Show volume details
 ~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/volumes/{volume_id}
+.. rest_method::  GET /v2/{project_id}/volumes/{volume_id}
 
 Shows details for a volume.
 
@@ -284,7 +289,6 @@ Preconditions
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -292,8 +296,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
-   - volume_id: volume_id
+   - project_id: project_id_path
+   - volume_id: volume_id_path
 
 
 Response Parameters
@@ -318,8 +322,9 @@ Response Parameters
    - os-vol-mig-status-attr:migstat: os-vol-mig-status-attr:migstat
    - metadata: metadata
    - status: status_3
+   - volume_image_metadata: volume_image_metadata
    - description: description
-   - multiattach: multiattach
+   - multiattach: multiattach_resp
    - source_volid: source_volid
    - volume: volume
    - consistencygroup_id: consistencygroup_id
@@ -344,13 +349,12 @@ Response Example
 Update volume
 ~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{tenant_id}/volumes/{volume_id}
+.. rest_method::  PUT /v2/{project_id}/volumes/{volume_id}
 
 Updates a volume.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -362,8 +366,8 @@ Request
    - description: description
    - name: name
    - metadata: metadata_2
-   - tenant_id: tenant_id
-   - volume_id: volume_id
+   - project_id: project_id_path
+   - volume_id: volume_id_path
 
 Request Example
 ---------------
@@ -392,7 +396,7 @@ Response Parameters
    - metadata: metadata_3
    - status: status_3
    - description: description
-   - multiattach: multiattach
+   - multiattach: multiattach_resp
    - source_volid: source_volid
    - volume: volume
    - consistencygroup_id: consistencygroup_id
@@ -415,7 +419,7 @@ Response Example
 Delete volume
 ~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v2/{tenant_id}/volumes/{volume_id}
+.. rest_method::  DELETE /v2/{project_id}/volumes/{volume_id}
 
 Deletes a volume.
 
@@ -444,7 +448,7 @@ Troubleshooting
 - The volume managed by OpenStack Block Storage is not deleted from
   the storage system.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -452,8 +456,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
-   - volume_id: volume_id
+   - project_id: project_id_path
+   - volume_id: volume_id_path
    - cascade: cascade
 
 
@@ -464,12 +468,12 @@ Request
 Create volume metadata
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/volumes/{volume_id}/metadata
+.. rest_method::  POST /v2/{project_id}/volumes/{volume_id}/metadata
 
 Creates or replaces metadata for a volume. Does not modify items that are not
 in the request.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -478,8 +482,8 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - metadata: metadata_3
-   - tenant_id: tenant_id
-   - volume_id: volume_id
+   - project_id: project_id_path
+   - volume_id: volume_id_path
 
 Request Example
 ---------------
@@ -508,13 +512,12 @@ Response Example
 Show volume metadata
 ~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/volumes/{volume_id}/metadata
+.. rest_method::  GET /v2/{project_id}/volumes/{volume_id}/metadata
 
 Shows metadata for a volume.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -522,8 +525,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
-   - volume_id: volume_id
+   - project_id: project_id_path
+   - volume_id: volume_id_path
 
 
 Response Parameters
@@ -547,13 +550,12 @@ Response Example
 Update volume metadata
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{tenant_id}/volumes/{volume_id}/metadata
+.. rest_method::  PUT /v2/{project_id}/volumes/{volume_id}/metadata
 
 Replaces all the volume's metadata with the key-value pairs in the request.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -562,8 +564,8 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - metadata: metadata_3
-   - tenant_id: tenant_id
-   - volume_id: volume_id
+   - project_id: project_id_path
+   - volume_id: volume_id_path
 
 Request Example
 ---------------
@@ -593,7 +595,7 @@ Response Example
 Show volume metadata for a specific key
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/volumes/{volume_id}/metadata/{key}
+.. rest_method::  GET /v2/{project_id}/volumes/{volume_id}/metadata/{key}
 
 Shows metadata for a volume for a specific key.
 
@@ -605,7 +607,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - volume_id: volume_id_path
    - key: key_2
 
@@ -631,7 +633,7 @@ Response Example
 Delete volume metadata
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v2/{tenant_id}/volumes/{volume_id}/metadata/{key}
+.. rest_method::  DELETE /v2/{project_id}/volumes/{volume_id}/metadata/{key}
 
 Deletes metadata for a volume.
 
@@ -643,6 +645,48 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - volume_id: volume_id_path
    - key: key_1
+
+
+
+
+Update volume metadata for a specific key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. rest_method::  PUT /v2/{project_id}/volumes/{volume_id}/metadata/{key}
+
+Update metadata for a volume for a specific key.
+
+Normal response codes: 200
+
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - project_id: project_id_path
+   - volume_id: volume_id_path
+   - key: key_3
+   - meta: meta
+
+Request Example
+---------------
+
+.. literalinclude:: ./samples/volume-metadata-update-key-request.json
+   :language: javascript
+
+Response Parameters
+-------------------
+
+.. rest_parameters:: parameters.yaml
+
+   - meta: meta
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/volume-metadata-update-key-response.json
+   :language: javascript

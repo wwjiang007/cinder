@@ -136,6 +136,9 @@ def extract_fc_uids(connector):
 
 
 def convert_ip_to_portal(ip):
+    is_ipv6_without_brackets = ':' in ip and ip[-1] != ']'
+    if is_ipv6_without_brackets:
+        return '[%s]:3260' % ip
     return '%s:3260' % ip
 
 
@@ -144,13 +147,16 @@ def convert_to_itor_tgt_map(zone_mapping):
 
     :param zone_mapping: mapping is the data from the zone lookup service
          with below format
+
         {
              <San name>: {
                  'initiator_port_wwn_list':
                  ('200000051e55a100', '200000051e55a121'..)
                  'target_port_wwn_list':
                  ('100000051e55a100', '100000051e55a121'..)
+
              }
+
         }
     """
     target_wwns = []

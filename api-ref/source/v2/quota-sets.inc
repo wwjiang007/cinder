@@ -5,168 +5,17 @@ Quota sets extension (os-quota-sets)
 
 Administrators only, depending on policy settings.
 
-Shows, updates, and deletes quotas for a tenant.
-
-
-Show quotas for user
-~~~~~~~~~~~~~~~~~~~~
-
-.. rest_method::  GET /v2/{admin_tenant_id}/os-quota-sets/{tenant_id}/{user_id}
-
-Enables an admin user to show quotas for a tenant and user.
-
-
-Normal response codes: 200
-Error response codes:
-
-Request
--------
-
-.. rest_parameters:: parameters.yaml
-
-   - tenant_id: tenant_id
-   - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
-
-
-Response Parameters
--------------------
-
-.. rest_parameters:: parameters.yaml
-
-   - injected_file_content_bytes: injected_file_content_bytes
-   - metadata_items: metadata_items
-   - reserved: reserved
-   - in_use: in_use
-   - ram: ram
-   - floating_ips: floating_ips
-   - key_pairs: key_pairs
-   - injected_file_path_bytes: injected_file_path_bytes
-   - instances: instances
-   - security_group_rules: security_group_rules
-   - injected_files: injected_files
-   - quota_set: quota_set
-   - cores: cores
-   - fixed_ips: fixed_ips
-   - id: id
-   - security_groups: security_groups
-
-Response Example
-----------------
-
-.. literalinclude:: ./samples/quotas-update-response.json
-   :language: javascript
-
-
-Update quotas for user
-~~~~~~~~~~~~~~~~~~~~~~
-
-.. rest_method::  PUT /v2/{admin_tenant_id}/os-quota-sets/{tenant_id}/{user_id}
-
-Updates quotas for a tenant and user.
-
-
-Normal response codes: 200
-Error response codes:
-
-
-Request
--------
-
-.. rest_parameters:: parameters.yaml
-
-   - injected_file_content_bytes: injected_file_content_bytes
-   - metadata_items: metadata_items
-   - reserved: reserved
-   - in_use: in_use
-   - ram: ram
-   - floating_ips: floating_ips
-   - key_pairs: key_pairs
-   - injected_file_path_bytes: injected_file_path_bytes
-   - instances: instances
-   - security_group_rules: security_group_rules
-   - injected_files: injected_files
-   - quota_set: quota_set
-   - cores: cores
-   - fixed_ips: fixed_ips
-   - id: id
-   - security_groups: security_groups
-   - tenant_id: tenant_id
-   - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
-
-Request Example
----------------
-
-.. literalinclude:: ./samples/quotas-update-request.json
-   :language: javascript
-
-Response Parameters
--------------------
-
-.. rest_parameters:: parameters.yaml
-
-   - injected_file_content_bytes: injected_file_content_bytes
-   - metadata_items: metadata_items
-   - reserved: reserved
-   - in_use: in_use
-   - ram: ram
-   - floating_ips: floating_ips
-   - key_pairs: key_pairs
-   - injected_file_path_bytes: injected_file_path_bytes
-   - instances: instances
-   - security_group_rules: security_group_rules
-   - injected_files: injected_files
-   - quota_set: quota_set
-   - cores: cores
-   - fixed_ips: fixed_ips
-   - id: id
-   - security_groups: security_groups
-
-Response Example
-----------------
-
-.. literalinclude:: ./samples/quotas-update-response.json
-   :language: javascript
-
-Delete quotas for user
-~~~~~~~~~~~~~~~~~~~~~~
-
-.. rest_method::  DELETE /v2/{admin_tenant_id}/os-quota-sets/{tenant_id}/{user_id}
-
-Deletes quotas for a user so that the quotas revert to default values.
-
-
-Normal response codes: 200
-Error response codes:
-
-
-Request
--------
-
-.. rest_parameters:: parameters.yaml
-
-   - tenant_id: tenant_id
-   - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
-
-Response Example
-----------------
-
-.. literalinclude:: ./samples/quotas-delete-response.json
-   :language: javascript
-
+Shows, updates, and deletes quotas for a project.
 
 Show quotas
 ~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{admin_tenant_id}/os-quota-sets/{tenant_id}
+.. rest_method::  GET /v2/{admin_project_id}/os-quota-sets/{project_id}
 
-Shows quotas for a tenant.
+Shows quotas for a project.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -174,8 +23,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
-   - admin_tenant_id: admin_tenant_id
+   - project_id: quotas_project_id
+   - admin_project_id: admin_project_id
    - usage: usage
 
 
@@ -198,7 +47,7 @@ Response Parameters
    - quota_set: quota_set
    - cores: cores
    - fixed_ips: fixed_ips
-   - id: id
+   - id: project_id
    - security_groups: security_groups
 
 
@@ -211,13 +60,12 @@ Response Example
 Update quotas
 ~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{admin_tenant_id}/os-quota-sets/{tenant_id}
+.. rest_method::  PUT /v2/{admin_project_id}/os-quota-sets/{project_id}
 
-Updates quotas for a tenant.
+Updates quotas for a project.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -239,10 +87,9 @@ Request
    - quota_set: quota_set
    - cores: cores
    - fixed_ips: fixed_ips
-   - id: id
    - security_groups: security_groups
-   - tenant_id: tenant_id
-   - admin_tenant_id: admin_tenant_id
+   - project_id: quotas_project_id
+   - admin_project_id: admin_project_id
 
 Request Example
 ---------------
@@ -270,7 +117,7 @@ Response Parameters
    - quota_set: quota_set
    - cores: cores
    - fixed_ips: fixed_ips
-   - id: id
+   - id: project_id
    - security_groups: security_groups
 
 Response Example
@@ -282,13 +129,12 @@ Response Example
 Delete quotas
 ~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v2/{admin_tenant_id}/os-quota-sets/{tenant_id}
+.. rest_method::  DELETE /v2/{admin_project_id}/os-quota-sets/{project_id}
 
-Deletes quotas for a tenant so the quotas revert to default values.
+Deletes quotas for a project so the quotas revert to default values.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -296,8 +142,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
-   - admin_tenant_id: admin_tenant_id
+   - project_id: quotas_project_id
+   - admin_project_id: admin_project_id
 
 Response Example
 ----------------
@@ -305,67 +151,15 @@ Response Example
 .. literalinclude:: ./samples/quotas-delete-response.json
    :language: javascript
 
-Show quota details for user
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. rest_method::  GET /v2/{admin_tenant_id}/os-quota-sets/{tenant_id}/detail/{user_id}
-
-Shows details for quotas for a tenant and user.
-
-
-Normal response codes: 200
-Error response codes:
-
-
-Request
--------
-
-.. rest_parameters:: parameters.yaml
-
-   - tenant_id: tenant_id
-   - user_id: user_id
-   - admin_tenant_id: admin_tenant_id
-
-
-Response Parameters
--------------------
-
-.. rest_parameters:: parameters.yaml
-
-   - injected_file_content_bytes: injected_file_content_bytes
-   - metadata_items: metadata_items
-   - reserved: reserved
-   - in_use: in_use
-   - ram: ram
-   - floating_ips: floating_ips
-   - key_pairs: key_pairs
-   - injected_file_path_bytes: injected_file_path_bytes
-   - instances: instances
-   - security_group_rules: security_group_rules
-   - injected_files: injected_files
-   - quota_set: quota_set
-   - cores: cores
-   - fixed_ips: fixed_ips
-   - id: id
-   - security_groups: security_groups
-
-Response Example
-----------------
-
-.. literalinclude:: ./samples/quotas-update-response.json
-   :language: javascript
-
-
 Get default quotas
 ~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/os-quota-sets/defaults
+.. rest_method::  GET /v2/{admin_project_id}/os-quota-sets/{project_id}/defaults
 
-Gets default quotas for a tenant.
+Gets default quotas for a project.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -373,7 +167,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: quotas_project_id
+   - admin_project_id: admin_project_id
 
 
 Response Parameters
@@ -395,7 +190,7 @@ Response Parameters
    - quota_set: quota_set
    - cores: cores
    - fixed_ips: fixed_ips
-   - id: id
+   - id: project_id
    - security_groups: security_groups
 
 

@@ -1,0 +1,98 @@
+- project:
+    check:
+      jobs:
+        - cinder-tempest-dsvm-lvm-lio-barbican:
+            voting: false
+        - cinder-tox-compliance
+        - cinder-tox-bandit-baseline:
+            voting: false
+        - nova-multiattach
+        - openstack-tox-functional-py35:
+            branches: ^(?!driverfixes/).*$
+            irrelevant-files:
+              - ^.*\.rst$
+              - ^api-ref/.*$
+              - ^cinder/hacking/.*$
+              - ^cinder/locale/.*$
+              - ^cinder/tests/unit.*$
+              - ^contrib/block-box.*$
+              - ^doc/.*$
+              - ^releasenotes/.*$
+    gate:
+      jobs:
+        - cinder-tox-compliance
+        - nova-multiattach
+        - openstack-tox-functional-py35:
+            branches: ^(?!driverfixes/).*$
+            irrelevant-files:
+              - ^.*\.rst$
+              - ^api-ref/.*$
+              - ^cinder/hacking/.*$
+              - ^cinder/locale/.*$
+              - ^cinder/tests/unit.*$
+              - ^contrib/block-box.*$
+              - ^doc/.*$
+              - ^releasenotes/.*$
+
+- job:
+    # Previously named legacy-tempest-dsvm-full-lio
+    name: cinder-tempest-dsvm-lvm-lio-barbican
+    parent: legacy-dsvm-base
+    run: playbooks/legacy/cinder-tempest-dsvm-lvm-lio-barbican/run.yaml
+    post-run: playbooks/legacy/cinder-tempest-dsvm-lvm-lio-barbican/post.yaml
+    timeout: 10800
+    required-projects:
+      - openstack-infra/devstack-gate
+      - openstack/barbican
+      - openstack/python-barbicanclient
+      - openstack/tempest
+      - openstack/os-brick
+    irrelevant-files:
+      - ^.*\.rst$
+      - ^api-ref/.*$
+      - ^cinder/hacking/.*$
+      - ^cinder/locale/.*$
+      - ^cinder/tests/functional.*$
+      - ^cinder/tests/unit.*$
+      - ^contrib/block-box.*$
+      - ^doc/.*$
+      - ^releasenotes/.*$
+      - ^tools/.*$
+
+- job:
+    # Test that all drivers follow the defined interface
+    name: cinder-tox-compliance
+    parent: openstack-tox
+    timeout: 2400
+    vars:
+      tox_envlist: compliance
+    required-projects:
+      - openstack/requirements
+    files:
+      - ^cinder/volume/driver.py
+      - ^cinder/volume/drivers/.*$
+      - ^cinder/interface/.*$
+      - ^cinder/backup/.*$
+      - ^cinder/zonemanager/.*$
+
+- job:
+    # Security testing for known issues
+    name: cinder-tox-bandit-baseline
+    parent: openstack-tox
+    timeout: 2400
+    vars:
+      tox_envlist: bandit-baseline
+    required-projects:
+      - openstack/requirements
+    irrelevant-files:
+      - ^.*\.rst$
+      - ^api-ref/.*$
+      - ^cinder/hacking/.*$
+      - ^cinder/locale/.*$
+      - ^cinder/tests/functional.*$
+      - ^cinder/tests/unit.*$
+      - ^contrib/block-box.*$
+      - ^doc/.*$
+      - ^releasenotes/.*$
+      - ^setup.cfg$
+      - ^tools/.*$

@@ -96,7 +96,7 @@ class BackupDriver(base.CinderInterface):
         :param volume_file: The volume or file to read the data from.
         """
 
-    def delete(self, backup):
+    def delete_backup(self, backup):
         """Delete a backup from the backup store.
 
         :param backup: The backup to be deleted.
@@ -129,5 +129,16 @@ class BackupDriver(base.CinderInterface):
         :param backup: backup object to export
         :param driver_info: dictionary with driver specific backup record
                             information
+        :returns: None
+        """
+
+    def check_for_setup_error(self):
+        """Method for checking if backup backend is successfully installed.
+
+        Depends on storage backend limitations and driver implementation this
+        method could check if all needed config options are configurated well
+        or try to connect to the storage to verify driver can do it without
+        any issues.
+
         :returns: None
         """

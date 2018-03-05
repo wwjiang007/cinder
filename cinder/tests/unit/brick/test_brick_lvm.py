@@ -322,7 +322,7 @@ class BrickLvmTestCase(test.TestCase):
         self.assertEqual(
             "9.5g",
             self.vg.create_thin_pool(name=self.vg.vg_thin_pool))
-        self.assertEqual("9.50", self.vg.vg_thin_pool_size)
+        self.assertEqual(9.50, self.vg.vg_thin_pool_size)
         self.assertEqual(7.6, self.vg.vg_thin_pool_free_space)
         self.assertEqual(3.0, self.vg.vg_provisioned_capacity)
 
@@ -331,7 +331,7 @@ class BrickLvmTestCase(test.TestCase):
         self.assertEqual(
             "9.5g",
             self.vg.create_thin_pool(name=self.vg.vg_thin_pool))
-        self.assertEqual("9.50", self.vg.vg_thin_pool_size)
+        self.assertEqual(9.50, self.vg.vg_thin_pool_size)
         self.assertEqual(7.6, self.vg.vg_thin_pool_free_space)
         self.assertEqual(3.0, self.vg.vg_provisioned_capacity)
 
@@ -347,18 +347,23 @@ class BrickLvmTestCase(test.TestCase):
 
         See bug #1220286 for more info.
         """
-
         vg_name = "vg-name"
         pool_name = vg_name + "-pool"
-        pool_path = "%s/%s" % (vg_name, pool_name)
-
-        def executor(obj, *cmd, **kwargs):
-            self.assertEqual(pool_path, cmd[-1])
-
-        self.vg._executor = executor
         self.vg.create_thin_pool(pool_name, "1G")
-        self.vg.create_volume("test", "1G", lv_type='thin')
 
+        with mock.patch.object(self.vg, '_execute'):
+            self.vg.create_volume("test", "1G", lv_type='thin')
+            if self.configuration.lvm_suppress_fd_warnings is False:
+                self.vg._execute.assert_called_once_with(
+                    'env', 'LC_ALL=C', 'lvcreate', '-T', '-V',
+                    '1G', '-n', 'test', 'fake-vg/vg-name-pool',
+                    root_helper='sudo', run_as_root=True)
+            else:
+                self.vg._execute.assert_called_once_with(
+                    'env', 'LC_ALL=C', 'LVM_SUPPRESS_FD_WARNINGS=1',
+                    'lvcreate', '-T', '-V', '1G', '-n', 'test',
+                    'fake-vg/vg-name-pool', root_helper='sudo',
+                    run_as_root=True)
         self.assertEqual(pool_name, self.vg.vg_thin_pool)
 
     def test_volume_create_when_executor_failed(self):
@@ -388,7 +393,7 @@ class BrickLvmTestCase(test.TestCase):
     def test_lv_get_origin(self):
         self.assertEqual('fake-volume-1',
                          self.vg.lv_get_origin('fake-snapshot'))
-        self.assertFalse(None, self.vg.lv_get_origin('test-volumes'))
+        self.assertIsNone(self.vg.lv_get_origin('test-volumes'))
 
     def test_activate_lv(self):
         with mock.patch.object(self.vg, '_execute'):
@@ -429,7 +434,8 @@ class BrickLvmTestCase(test.TestCase):
             self.vg.create_volume('test', '1G')
             self.vg.deactivate_lv('test')
 
-    def test_lv_deactivate_timeout(self):
+    @mock.patch('time.sleep')
+    def test_lv_deactivate_timeout(self, _mock_sleep):
         with mock.patch.object(self.vg, '_execute'):
             is_active_mock = mock.Mock()
             is_active_mock.return_value = True

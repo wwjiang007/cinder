@@ -25,14 +25,15 @@ from oslo_log import log as logging
 from oslo_utils import units
 import six
 
+from cinder import coordination
 from cinder import exception
 from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
 from cinder import utils
-from cinder.volume import driver
+from cinder.volume import configuration
 from cinder.volume.drivers import remotefs
-from cinder.volume.drivers.remotefs import locked_volume_id_operation
+from cinder.volume import utils as vutils
 
 VERSION = '1.4.0'
 
@@ -71,11 +72,11 @@ nfs_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(nfs_opts)
+CONF.register_opts(nfs_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 @interface.volumedriver
-class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
+class NfsDriver(remotefs.RemoteFSSnapDriverDistributed):
     """NFS based cinder driver.
 
     Creates file on NFS share for using it as block device on hypervisor.
@@ -96,12 +97,10 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
         root_helper = utils.get_root_helper()
         # base bound to instance is used in RemoteFsConnector.
         self.base = getattr(self.configuration,
-                            'nfs_mount_point_base',
-                            CONF.nfs_mount_point_base)
+                            'nfs_mount_point_base')
         self.base = os.path.realpath(self.base)
         opts = getattr(self.configuration,
-                       'nfs_mount_options',
-                       CONF.nfs_mount_options)
+                       'nfs_mount_options')
 
         nas_mount_options = getattr(self.configuration,
                                     'nas_mount_options',
@@ -115,10 +114,13 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
             nfs_mount_point_base=self.base,
             nfs_mount_options=opts)
 
+        supports_auto_mosr = kwargs.get('supports_auto_mosr', False)
         self._sparse_copy_volume_data = True
         self.reserved_percentage = self.configuration.reserved_percentage
         self.max_over_subscription_ratio = (
-            self.configuration.max_over_subscription_ratio)
+            vutils.get_max_over_subscription_ratio(
+                self.configuration.max_over_subscription_ratio,
+                supports_auto=supports_auto_mosr))
 
     def initialize_connection(self, volume, connector):
 
@@ -128,7 +130,8 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
         active_vol = self.get_active_image_from_info(volume)
         volume_dir = self._local_volume_dir(volume)
         path_to_vol = os.path.join(volume_dir, active_vol)
-        info = self._qemu_img_info(path_to_vol, volume['name'])
+        info = self._qemu_img_info(path_to_vol,
+                                   volume['name'])
 
         data = {'export': volume.provider_location,
                 'name': active_vol}
@@ -219,13 +222,13 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
                           {'attempt': attempt, 'exc': e})
                 time.sleep(1)
 
-    def _find_share(self, volume_size_in_gib):
+    def _find_share(self, volume):
         """Choose NFS share among available ones for given volume size.
 
         For instances with more than one share that meets the criteria, the
         share with the least "allocated" space will be selected.
 
-        :param volume_size_in_gib: int size in GB
+        :param volume: the volume to be created.
         """
 
         if not self._mounted_shares:
@@ -241,7 +244,8 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
                           'total_available': total_available,
                           'total_allocated': total_allocated,
                           }
-            if not self._is_share_eligible(nfs_share, volume_size_in_gib,
+            if not self._is_share_eligible(nfs_share,
+                                           volume.size,
                                            share_info):
                 continue
             if target_share is not None:
@@ -254,7 +258,7 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
 
         if target_share is None:
             raise exception.NfsNoSuitableShareFound(
-                volume_size=volume_size_in_gib)
+                volume_size=volume.size)
 
         LOG.debug('Selected %s as target NFS share.', target_share)
 
@@ -387,8 +391,8 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
 
         :param is_new_cinder_install: bool indication of new Cinder install
         """
-        doc_html = "http://docs.openstack.org/admin-guide" \
-                   "/blockstorage_nfs_backend.html"
+        doc_html = "https://docs.openstack.org/cinder/latest" \
+                   "/admin/blockstorage-nfs-backend.html"
 
         self._ensure_shares_mounted()
         if not self._mounted_shares:
@@ -499,13 +503,13 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
 
         self._stats = data
 
-    @locked_volume_id_operation
+    @coordination.synchronized('{self.driver_prefix}-{volume[id]}')
     def create_volume(self, volume):
         """Apply locking to the create volume operation."""
 
         return super(NfsDriver, self).create_volume(volume)
 
-    @locked_volume_id_operation
+    @coordination.synchronized('{self.driver_prefix}-{volume[id]}')
     def delete_volume(self, volume):
         """Deletes a logical volume."""
 
@@ -534,6 +538,7 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
             path,
             volume_name,
             self.configuration.nfs_mount_point_base,
+            force_share=True,
             run_as_root=True)
 
     def _check_snapshot_support(self, setup_checking=False):
@@ -553,14 +558,14 @@ class NfsDriver(remotefs.RemoteFSSnapDriver, driver.ExtendVD):
             LOG.error(msg)
             raise exception.VolumeDriverException(message=msg)
 
-    @locked_volume_id_operation
+    @coordination.synchronized('{self.driver_prefix}-{snapshot.volume.id}')
     def create_snapshot(self, snapshot):
         """Apply locking to the create snapshot operation."""
 
         self._check_snapshot_support()
         return self._create_snapshot(snapshot)
 
-    @locked_volume_id_operation
+    @coordination.synchronized('{self.driver_prefix}-{snapshot.volume.id}')
     def delete_snapshot(self, snapshot):
         """Apply locking to the delete snapshot operation."""
 

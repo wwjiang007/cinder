@@ -21,7 +21,7 @@ from six.moves import http_client
 import webob
 
 from cinder.api import extensions
-from cinder.api.v1 import router
+from cinder.api.v3 import router
 from cinder.tests.functional import functional_helpers
 
 
@@ -32,8 +32,8 @@ CONF = cfg.CONF
 class ExtensionTestCase(functional_helpers._FunctionalTestBase):
     def _get_flags(self):
         f = super(ExtensionTestCase, self)._get_flags()
-        f['osapi_volume_extension'] = CONF.osapi_volume_extension[:]
-        f['osapi_volume_extension'].append(
+        f['osapi_volume_extension'] = {'v': CONF.osapi_volume_extension[:]}
+        f['osapi_volume_extension']['v'].append(
             'cinder.tests.functional.api.foxinsocks.Foxinsocks')
         return f
 

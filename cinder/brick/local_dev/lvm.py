@@ -73,6 +73,9 @@ class LVM(executor.Executor):
         self._supports_lvchange_ignoreskipactivation = None
         self.vg_provisioned_capacity = 0.0
 
+        if lvm_type not in ['default', 'thin']:
+            raise exception.Invalid('lvm_type must be "default" or "thin"')
+
         # Ensure LVM_SYSTEM_DIR has been added to LVM.LVM_CMD_PREFIX
         # before the first LVM command is executed, and use the directory
         # where the specified lvm_conf file is located as the value.
@@ -91,8 +94,6 @@ class LVM(executor.Executor):
         LVM.LVM_CMD_PREFIX = _lvm_cmd_prefix
 
         if create_vg and physical_volumes is not None:
-            self.pv_list = physical_volumes
-
             try:
                 self._create_vg(physical_volumes)
             except putils.ProcessExecutionError as err:
@@ -458,7 +459,7 @@ class LVM(executor.Executor):
                 if not lv['size'][-1].isdigit():
                     lvsize = lvsize[:-1]
                 if lv['name'] == self.vg_thin_pool:
-                    self.vg_thin_pool_size = lvsize
+                    self.vg_thin_pool_size = float(lvsize)
                     tpfs = self._get_thin_pool_free_space(self.vg_name,
                                                           self.vg_thin_pool)
                     self.vg_thin_pool_free_space = tpfs
@@ -548,7 +549,7 @@ class LVM(executor.Executor):
                                         '-L', size_str]
 
         if mirror_count > 0:
-            cmd.extend(['-m', mirror_count, '--nosync',
+            cmd.extend(['--type=mirror', '-m', mirror_count, '--nosync',
                         '--mirrorlog', 'mirrored'])
             terras = int(size_str[:-1]) / 1024.0
             if terras >= 1.5:
@@ -650,6 +651,7 @@ class LVM(executor.Executor):
         else:
             LOG.debug("Volume %s has been deactivated.", name)
 
+    @utils.retry(putils.ProcessExecutionError, retries=5, backoff_rate=2)
     def activate_lv(self, name, is_snapshot=False, permanent=False):
         """Ensure that logical volume/snapshot logical volume is activated.
 
@@ -673,11 +675,12 @@ class LVM(executor.Executor):
         cmd = ['lvchange', '-a', 'y', '--yes']
 
         if self.supports_lvchange_ignoreskipactivation:
-            cmd.append('-K')
             # If permanent=True is specified, drop the skipactivation flag in
             # order to make this LV automatically activated after next reboot.
             if permanent:
                 cmd += ['-k', 'n']
+            else:
+                cmd.append('-K')
 
         cmd.append(lv_path)
 
@@ -740,14 +743,21 @@ class LVM(executor.Executor):
                       'udev settle.', name)
 
     def revert(self, snapshot_name):
-        """Revert an LV from snapshot.
+        """Revert an LV to snapshot.
 
         :param snapshot_name: Name of snapshot to revert
-
         """
-        self._execute('lvconvert', '--merge',
-                      snapshot_name, root_helper=self._root_helper,
-                      run_as_root=True)
+
+        cmd = ['lvconvert', '--merge', '%s/%s' % (self.vg_name, snapshot_name)]
+        try:
+            self._execute(*cmd, root_helper=self._root_helper,
+                          run_as_root=True)
+        except putils.ProcessExecutionError as err:
+            LOG.exception('Error Revert Volume')
+            LOG.error('Cmd     :%s', err.cmd)
+            LOG.error('StdOut  :%s', err.stdout)
+            LOG.error('StdErr  :%s', err.stderr)
+            raise
 
     def lv_has_snapshot(self, name):
         cmd = LVM.LVM_CMD_PREFIX + ['lvdisplay', '--noheading', '-C', '-o',

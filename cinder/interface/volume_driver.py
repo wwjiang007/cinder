@@ -148,7 +148,7 @@ class VolumeDriverCore(base.CinderInterface):
         It should not export a LUN or actually make this storage available for
         use, this is done in a later call.
 
-        .. todo:: Add example data structure of volume object (smcginnis).
+        TODO(smcginnis): Add example data structure of volume object.
 
         :param volume: Volume object containing specifics to create.
         :returns: (Optional) dict of database updates for the new volume.
@@ -206,7 +206,8 @@ class VolumeDriverCore(base.CinderInterface):
 
         :param volume: The volume to remove.
         :param connector: The Dictionary containing information about the
-                          connection.
+                          connection. This is optional when doing a
+                          force-detach and can be None.
         """
 
     def detach_volume(self, context, volume, attachment=None):

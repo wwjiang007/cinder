@@ -32,9 +32,11 @@ from cinder.image import image_utils
 from cinder import interface
 from cinder.objects.volume import Volume
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume.drivers import nfs
 from cinder.volume.drivers.san import san
 from cinder.volume.drivers.zfssa import zfssarest
+from cinder.volume import utils as vutils
 
 
 ZFSSA_OPTS = [
@@ -71,7 +73,7 @@ ZFSSA_OPTS = [
 LOG = log.getLogger(__name__)
 
 CONF = cfg.CONF
-CONF.register_opts(ZFSSA_OPTS)
+CONF.register_opts(ZFSSA_OPTS, group=configuration.SHARED_CONF_GROUP)
 
 
 def factory_zfssa():
@@ -107,6 +109,11 @@ class ZFSSANFSDriver(nfs.NfsDriver):
         self._stats = None
 
     def do_setup(self, context):
+        self.configuration.max_over_subscription_ratio = (
+            vutils.get_max_over_subscription_ratio(
+                self.configuration.max_over_subscription_ratio,
+                supports_auto=False))
+
         if not self.configuration.max_over_subscription_ratio > 0:
             msg = _("Config 'max_over_subscription_ratio' invalid. Must be > "
                     "0: %s") % self.configuration.max_over_subscription_ratio

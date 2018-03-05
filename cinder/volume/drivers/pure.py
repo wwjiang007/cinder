@@ -36,6 +36,7 @@ from cinder.i18n import _
 from cinder import interface
 from cinder.objects import fields
 from cinder import utils
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.san import san
 from cinder.volume import utils as volume_utils
@@ -60,7 +61,7 @@ PURE_OPTS = [
                      "max_over_subscription_ratio config option."),
     # These are used as default settings.  In future these can be overridden
     # by settings in volume-type.
-    cfg.IntOpt("pure_replica_interval_default", default=900,
+    cfg.IntOpt("pure_replica_interval_default", default=3600,
                help="Snapshot replication interval in seconds."),
     cfg.IntOpt("pure_replica_retention_short_term_default", default=14400,
                help="Retain all snapshots on target for this "
@@ -82,7 +83,7 @@ PURE_OPTS = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(PURE_OPTS)
+CONF.register_opts(PURE_OPTS, group=configuration.SHARED_CONF_GROUP)
 
 INVALID_CHARACTERS = re.compile(r"[^-a-zA-Z0-9]")
 GENERATED_NAME = re.compile(r".*-[a-f0-9]{32}-cinder$")
@@ -131,10 +132,10 @@ def pure_driver_debug_trace(f):
         method_name = "%(cls_name)s.%(method)s" % {"cls_name": cls_name,
                                                    "method": f.__name__}
         backend_name = driver._get_current_array()._backend_id
-        LOG.debug("[%(backend_name)s] Enter %(method_name)s" %
+        LOG.debug("[%(backend_name)s] Enter %(method_name)s",
                   {"method_name": method_name, "backend_name": backend_name})
         result = f(*args, **kwargs)
-        LOG.debug("[%(backend_name)s] Leave %(method_name)s" %
+        LOG.debug("[%(backend_name)s] Leave %(method_name)s",
                   {"method_name": method_name, "backend_name": backend_name})
         return result
 
@@ -428,17 +429,33 @@ class PureBaseVolumeDriver(san.SanDriver):
         raise NotImplementedError
 
     def _disconnect(self, array, volume, connector, **kwargs):
-        vol_name = self._get_vol_name(volume)
-        host = self._get_host(array, connector)
-        if host:
-            host_name = host["name"]
-            result = self._disconnect_host(array, host_name, vol_name)
-        else:
-            LOG.error("Unable to disconnect host from volume, could not "
-                      "determine Purity host")
-            result = False
+        """Disconnect the volume from the host described by the connector.
 
-        return result
+        If no connector is specified it will remove *all* attachments for
+        the volume.
+
+        Returns True if it was the hosts last connection.
+        """
+        vol_name = self._get_vol_name(volume)
+        if connector is None:
+            # If no connector was provided it is a force-detach, remove all
+            # host connections for the volume
+            LOG.warning("Removing ALL host connections for volume %s",
+                        vol_name)
+            connections = array.list_volume_private_connections(vol_name)
+            for connection in connections:
+                self._disconnect_host(array, connection['host'], vol_name)
+            return False
+        else:
+            # Normal case with a specific initiator to detach it from
+            host = self._get_host(array, connector)
+            if host:
+                host_name = host["name"]
+                return self._disconnect_host(array, host_name, vol_name)
+            else:
+                LOG.error("Unable to disconnect host from volume, could not "
+                          "determine Purity host")
+                return False
 
     @pure_driver_debug_trace
     def terminate_connection(self, volume, connector, **kwargs):
@@ -596,6 +613,7 @@ class PureBaseVolumeDriver(san.SanDriver):
         a value, if not we will respect the configuration option for the
         max_over_subscription_ratio.
         """
+
         if (self.configuration.pure_automatic_max_oversubscription_ratio and
                 used_space != 0 and provisioned_space != 0):
             # If array is empty we can not calculate a max oversubscription
@@ -605,7 +623,9 @@ class PureBaseVolumeDriver(san.SanDriver):
             # presented based on current usage.
             thin_provisioning = provisioned_space / used_space
         else:
-            thin_provisioning = self.configuration.max_over_subscription_ratio
+            thin_provisioning = volume_utils.get_max_over_subscription_ratio(
+                self.configuration.max_over_subscription_ratio,
+                supports_auto=True)
 
         return thin_provisioning
 
@@ -815,7 +835,7 @@ class PureBaseVolumeDriver(san.SanDriver):
                     ctxt.reraise = False
 
         # If volume information was unable to be retrieved we need
-        # to throw a Invalid Reference exception.
+        # to throw an Invalid Reference exception.
         raise exception.ManageExistingInvalidReference(
             existing_ref=existing_ref,
             reason=_("Unable to find Purity ref with name=%s") % ref_vol_name)
@@ -1329,7 +1349,7 @@ class PureBaseVolumeDriver(san.SanDriver):
 
         current_array = self._get_current_array()
         LOG.debug("Disabling replication for volume %(id)s residing on "
-                  "array %(backend_id)s." %
+                  "array %(backend_id)s.",
                   {"id": volume["id"],
                    "backend_id": current_array._backend_id})
         try:
@@ -1347,7 +1367,7 @@ class PureBaseVolumeDriver(san.SanDriver):
                               "message: %s", err.text)
 
     @pure_driver_debug_trace
-    def failover_host(self, context, volumes, secondary_id=None):
+    def failover_host(self, context, volumes, secondary_id=None, groups=None):
         """Failover backend to a secondary array
 
         This action will not affect the original volumes in any
@@ -1360,7 +1380,7 @@ class PureBaseVolumeDriver(san.SanDriver):
             # our current array back to the primary.
             if self._failed_over_primary_array:
                 self._set_current_array(self._failed_over_primary_array)
-                return secondary_id, []
+                return secondary_id, [], []
             else:
                 msg = _('Unable to failback to "default", this can only be '
                         'done after a failover has completed.')
@@ -1368,10 +1388,9 @@ class PureBaseVolumeDriver(san.SanDriver):
 
         current_array = self._get_current_array()
         LOG.debug("Failover replication for array %(primary)s to "
-                  "%(secondary)s." % {
-                      "primary": current_array._backend_id,
-                      "secondary": secondary_id
-                  })
+                  "%(secondary)s.",
+                  {"primary": current_array._backend_id,
+                   "secondary": secondary_id})
 
         if secondary_id == current_array._backend_id:
             raise exception.InvalidReplicationTarget(
@@ -1439,7 +1458,7 @@ class PureBaseVolumeDriver(san.SanDriver):
         # secondary array we just failed over to.
         self._failed_over_primary_array = self._get_current_array()
         self._set_current_array(secondary_array)
-        return secondary_array._backend_id, model_updates
+        return secondary_array._backend_id, model_updates, []
 
     def _does_pgroup_exist(self, array, pgroup_name):
         """Return True/False"""
@@ -1703,7 +1722,7 @@ class PureISCSIDriver(PureBaseVolumeDriver, san.SanISCSIDriver):
     the underlying storage connectivity with the FlashArray.
     """
 
-    VERSION = "6.0.0"
+    VERSION = "7.0.0"
 
     def __init__(self, *args, **kwargs):
         execute = kwargs.pop("execute", utils.execute)
@@ -1891,7 +1910,7 @@ class PureFCDriver(PureBaseVolumeDriver, driver.FibreChannelDriver):
     supports the Cinder Fibre Channel Zone Manager.
     """
 
-    VERSION = "4.0.0"
+    VERSION = "5.0.0"
 
     def __init__(self, *args, **kwargs):
         execute = kwargs.pop("execute", utils.execute)

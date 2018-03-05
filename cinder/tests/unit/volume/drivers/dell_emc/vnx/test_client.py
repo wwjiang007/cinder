@@ -12,7 +12,6 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-
 import unittest
 
 from cinder import exception
@@ -50,10 +49,12 @@ class TestClient(test.TestCase):
         super(TestClient, self).setUp()
         self.origin_timeout = vnx_common.DEFAULT_TIMEOUT
         vnx_common.DEFAULT_TIMEOUT = 0
+        vnx_common.INTERVAL_30_SEC = 0
 
     def tearDown(self):
         super(TestClient, self).tearDown()
         vnx_common.DEFAULT_TIMEOUT = self.origin_timeout
+        vnx_common.INTERVAL_30_SEC = 30
 
     @res_mock.patch_client
     def test_create_lun(self, client, mocked):
@@ -116,7 +117,6 @@ class TestClient(test.TestCase):
                           src_id=4,
                           dst_id=5)
         lun.migrate.assert_called_with(5, storops.VNXMigrationRate.HIGH)
-        mock_sleep.assert_called_with(15)
 
     @res_mock.patch_client
     def test_session_finished_faulted(self, client, mocked):
@@ -256,10 +256,8 @@ class TestClient(test.TestCase):
     def test_expand_lun_already_expanded(self, client, _ignore):
         client.expand_lun('lun', 10)
 
-    @unittest.skip("Skip until bug #1578986 is fixed")
-    @utils.patch_sleep
     @res_mock.patch_client
-    def test_expand_lun_not_ops_ready(self, client, _ignore, sleep_mock):
+    def test_expand_lun_not_ops_ready(self, client, _ignore):
         self.assertRaises(storops_ex.VNXLunPreparingError,
                           client.expand_lun, 'lun', 10)
         lun = client.vnx.get_lun()
@@ -463,6 +461,72 @@ class TestClient(test.TestCase):
     def test_promote_image(self, client, mocked):
         client.promote_image('mirror_promote')
 
+    @res_mock.patch_client
+    def test_create_mirror_group(self, client, mocked):
+        group_name = 'test_mg'
+        mg = client.create_mirror_group(group_name)
+        self.assertIsNotNone(mg)
+
+    @res_mock.patch_client
+    def test_create_mirror_group_name_in_use(self, client, mocked):
+        group_name = 'test_mg_name_in_use'
+        mg = client.create_mirror_group(group_name)
+        self.assertIsNotNone(mg)
+
+    @res_mock.patch_client
+    def test_delete_mirror_group(self, client, mocked):
+        group_name = 'delete_name'
+        client.delete_mirror_group(group_name)
+
+    @res_mock.patch_client
+    def test_delete_mirror_group_not_found(self, client, mocked):
+        group_name = 'group_not_found'
+        client.delete_mirror_group(group_name)
+
+    @res_mock.patch_client
+    def test_add_mirror(self, client, mocked):
+        group_name = 'group_add_mirror'
+        mirror_name = 'mirror_name'
+        client.add_mirror(group_name, mirror_name)
+
+    @res_mock.patch_client
+    def test_add_mirror_already_added(self, client, mocked):
+        group_name = 'group_already_added'
+        mirror_name = 'mirror_name'
+        client.add_mirror(group_name, mirror_name)
+
+    @res_mock.patch_client
+    def test_remove_mirror(self, client, mocked):
+        group_name = 'group_mirror'
+        mirror_name = 'mirror_name'
+        client.remove_mirror(group_name, mirror_name)
+
+    @res_mock.patch_client
+    def test_remove_mirror_not_member(self, client, mocked):
+        group_name = 'group_mirror'
+        mirror_name = 'mirror_name_not_member'
+        client.remove_mirror(group_name, mirror_name)
+
+    @res_mock.patch_client
+    def test_promote_mirror_group(self, client, mocked):
+        group_name = 'group_promote'
+        client.promote_mirror_group(group_name)
+
+    @res_mock.patch_client
+    def test_promote_mirror_group_already_promoted(self, client, mocked):
+        group_name = 'group_promote'
+        client.promote_mirror_group(group_name)
+
+    @res_mock.patch_client
+    def test_sync_mirror_group(self, client, mocked):
+        group_name = 'group_sync'
+        client.sync_mirror_group(group_name)
+
+    @res_mock.patch_client
+    def test_fracture_mirror_group(self, client, mocked):
+        group_name = 'group_fracture'
+        client.fracture_mirror_group(group_name)
+
     @res_mock.mock_driver_input
     @res_mock.patch_client
     def test_get_lun_id(self, client, mocked, cinder_input):
@@ -476,3 +540,35 @@ class TestClient(test.TestCase):
         lun_id = client.get_lun_id(cinder_input['volume'])
         self.assertIsInstance(lun_id, int)
         self.assertEqual(mocked['lun'].lun_id, lun_id)
+
+    @res_mock.patch_client
+    def test_get_ioclass(self, client, mocked):
+        qos_specs = {'id': 'qos', vnx_common.QOS_MAX_IOPS: 10,
+                     vnx_common.QOS_MAX_BWS: 100}
+        ioclasses = client.get_ioclass(qos_specs)
+        self.assertEqual(2, len(ioclasses))
+
+    @res_mock.patch_client
+    def test_create_ioclass_iops(self, client, mocked):
+        ioclass = client.create_ioclass_iops('test', 1000)
+        self.assertIsNotNone(ioclass)
+
+    @res_mock.patch_client
+    def test_create_ioclass_bws(self, client, mocked):
+        ioclass = client.create_ioclass_bws('test', 100)
+        self.assertIsNotNone(ioclass)
+
+    @res_mock.patch_client
+    def test_create_policy(self, client, mocked):
+        policy = client.create_policy('policy_name')
+        self.assertIsNotNone(policy)
+
+    @res_mock.patch_client
+    def test_get_running_policy(self, client, mocked):
+        policy, is_new = client.get_running_policy()
+        self.assertEqual(policy.state in ['Running', 'Measuring'], True)
+        self.assertFalse(is_new)
+
+    @res_mock.patch_client
+    def test_add_lun_to_ioclass(self, client, mocked):
+        client.add_lun_to_ioclass('test_ioclass', 1)

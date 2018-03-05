@@ -17,11 +17,12 @@
 Implements operations on volumes residing on VMware datastores.
 """
 
-
 from oslo_log import log as logging
 from oslo_utils import units
 from oslo_vmware import exceptions
+from oslo_vmware.objects import datastore as ds_obj
 from oslo_vmware import vim_util
+import six
 from six.moves import urllib
 
 from cinder.i18n import _
@@ -278,33 +279,87 @@ class ControllerType(object):
 class VMwareVolumeOps(object):
     """Manages volume operations."""
 
-    def __init__(self, session, max_objects):
+    def __init__(self, session, max_objects, extension_key, extension_type):
         self._session = session
         self._max_objects = max_objects
+        self._extension_key = extension_key
+        self._extension_type = extension_type
         self._folder_cache = {}
+        self._backing_ref_cache = {}
+        self._vmx_version = None
 
-    def get_backing(self, name):
-        """Get the backing based on name.
+    def set_vmx_version(self, vmx_version):
+        self._vmx_version = vmx_version
+
+    def get_backing(self, name, backing_uuid):
+        """Get the backing based on name or uuid.
 
         :param name: Name of the backing
+        :param backing_uuid: UUID of the backing
         :return: Managed object reference to the backing
         """
 
-        retrieve_result = self._session.invoke_api(vim_util, 'get_objects',
-                                                   self._session.vim,
-                                                   'VirtualMachine',
-                                                   self._max_objects)
-        while retrieve_result:
-            vms = retrieve_result.objects
-            for vm in vms:
-                if vm.propSet[0].val == name:
-                    # We got the result, so cancel further retrieval.
-                    self.cancel_retrieval(retrieve_result)
-                    return vm.obj
-            # Result not obtained, continue retrieving results.
-            retrieve_result = self.continue_retrieval(retrieve_result)
+        ref = self.get_backing_by_uuid(backing_uuid)
+        if not ref:
+            # old version of the driver might have created this backing and
+            # hence cannot be queried by uuid
+            LOG.debug("Returning cached ref for %s.", name)
+            ref = self._backing_ref_cache.get(name)
 
-        LOG.debug("Did not find any backing with name: %s", name)
+        LOG.debug("Backing (%(name)s, %(uuid)s) ref: %(ref)s.",
+                  {'name': name, 'uuid': backing_uuid, 'ref': ref})
+        return ref
+
+    def get_backing_by_uuid(self, uuid):
+        LOG.debug("Get ref by UUID: %s.", uuid)
+        result = self._session.invoke_api(
+            self._session.vim,
+            'FindAllByUuid',
+            self._session.vim.service_content.searchIndex,
+            uuid=uuid,
+            vmSearch=True,
+            instanceUuid=True)
+        if result:
+            return result[0]
+
+    def build_backing_ref_cache(self, name_regex=None):
+
+        LOG.debug("Building backing ref cache.")
+        result = self._session.invoke_api(
+            vim_util,
+            'get_objects',
+            self._session.vim,
+            'VirtualMachine',
+            self._max_objects,
+            properties_to_collect=[
+                'name',
+                'config.instanceUuid',
+                'config.extraConfig["cinder.volume.id"]'])
+
+        while result:
+            for backing in result.objects:
+                instance_uuid = None
+                vol_id = None
+
+                for prop in backing.propSet:
+                    if prop.name == 'name':
+                        name = prop.val
+                    elif prop.name == 'config.instanceUuid':
+                        instance_uuid = prop.val
+                    else:
+                        vol_id = prop.val.value
+
+                if name_regex and not name_regex.match(name):
+                    continue
+
+                if instance_uuid and instance_uuid == vol_id:
+                    # no need to cache backing with UUID set to volume ID
+                    continue
+
+                self._backing_ref_cache[name] = backing.obj
+
+            result = self.continue_retrieval(result)
+        LOG.debug("Backing ref cache size: %d.", len(self._backing_ref_cache))
 
     def delete_backing(self, backing):
         """Delete the backing.
@@ -672,6 +727,13 @@ class VMwareVolumeOps(object):
 
         return option_values
 
+    def _create_managed_by_info(self):
+        managed_by = self._session.vim.client.factory.create(
+            'ns0:ManagedByInfo')
+        managed_by.extensionKey = self._extension_key
+        managed_by.type = self._extension_type
+        return managed_by
+
     def _get_create_spec_disk_less(self, name, ds_name, profileId=None,
                                    extra_config=None):
         """Return spec for creating disk-less backing.
@@ -693,11 +755,11 @@ class VMwareVolumeOps(object):
         create_spec.numCPUs = 1
         create_spec.memoryMB = 128
         create_spec.files = vm_file_info
-        # Set the hardware version to a compatible version supported by
+        # Set the default hardware version to a compatible version supported by
         # vSphere 5.0. This will ensure that the backing VM can be migrated
         # without any incompatibility issues in a mixed cluster of ESX hosts
         # with versions 5.0 or above.
-        create_spec.version = "vmx-08"
+        create_spec.version = self._vmx_version or "vmx-08"
 
         if profileId:
             vmProfile = cf.create('ns0:VirtualMachineDefinedProfileSpec')
@@ -710,6 +772,7 @@ class VMwareVolumeOps(object):
             create_spec.extraConfig = self._get_extra_config_option_values(
                 extra_config)
 
+        create_spec.managedBy = self._create_managed_by_info()
         return create_spec
 
     def get_create_spec(self, name, size_kb, disk_type, ds_name,
@@ -1025,6 +1088,20 @@ class VMwareVolumeOps(object):
         LOG.info("Successfully deleted snapshot: %(name)s of backing: "
                  "%(backing)s.", {'backing': backing, 'name': name})
 
+    def revert_to_snapshot(self, backing, name):
+        LOG.debug("Revert to snapshot: %(name)s of backing: %(backing)s.",
+                  {'name': name, 'backing': backing})
+
+        snapshot = self.get_snapshot(backing, name)
+        if not snapshot:
+            raise vmdk_exceptions.SnapshotNotFoundException(
+                name=name)
+
+        task = self._session.invoke_api(self._session.vim,
+                                        'RevertToSnapshot_Task',
+                                        snapshot)
+        self._session.wait_for_task(task)
+
     def _get_folder(self, backing):
         """Get parent folder of the backing.
 
@@ -1035,7 +1112,7 @@ class VMwareVolumeOps(object):
 
     def _get_clone_spec(self, datastore, disk_move_type, snapshot, backing,
                         disk_type, host=None, resource_pool=None,
-                        extra_config=None):
+                        extra_config=None, disks_to_clone=None):
         """Get the clone spec.
 
         :param datastore: Reference to datastore
@@ -1047,6 +1124,7 @@ class VMwareVolumeOps(object):
         :param resource_pool: Target resource pool
         :param extra_config: Key-value pairs to be written to backing's
                              extra-config
+        :param disks_to_clone: UUIDs of disks to clone
         :return: Clone spec
         """
         if disk_type is not None:
@@ -1064,20 +1142,37 @@ class VMwareVolumeOps(object):
         clone_spec.template = False
         clone_spec.snapshot = snapshot
 
+        config_spec = cf.create('ns0:VirtualMachineConfigSpec')
+        config_spec.managedBy = self._create_managed_by_info()
+        clone_spec.config = config_spec
+
         if extra_config:
-            config_spec = cf.create('ns0:VirtualMachineConfigSpec')
             if BACKING_UUID_KEY in extra_config:
                 config_spec.instanceUuid = extra_config.pop(BACKING_UUID_KEY)
             config_spec.extraConfig = self._get_extra_config_option_values(
                 extra_config)
-            clone_spec.config = config_spec
+
+        if disks_to_clone:
+            config_spec.deviceChange = (
+                self._create_device_change_for_disk_removal(
+                    backing, disks_to_clone))
 
         LOG.debug("Spec for cloning the backing: %s.", clone_spec)
         return clone_spec
 
+    def _create_device_change_for_disk_removal(self, backing, disks_to_clone):
+        disk_devices = self._get_disk_devices(backing)
+
+        device_change = []
+        for device in disk_devices:
+            if device.backing.uuid not in disks_to_clone:
+                device_change.append(self._create_spec_for_disk_remove(device))
+
+        return device_change
+
     def clone_backing(self, name, backing, snapshot, clone_type, datastore,
                       disk_type=None, host=None, resource_pool=None,
-                      extra_config=None, folder=None):
+                      extra_config=None, folder=None, disks_to_clone=None):
         """Clone backing.
 
         If the clone_type is 'full', then a full clone of the source volume
@@ -1095,6 +1190,7 @@ class VMwareVolumeOps(object):
         :param extra_config: Key-value pairs to be written to backing's
                              extra-config
         :param folder: The location of the clone
+        :param disks_to_clone: UUIDs of disks to clone
         """
         LOG.debug("Creating a clone of backing: %(back)s, named: %(name)s, "
                   "clone type: %(type)s from snapshot: %(snap)s on "
@@ -1114,7 +1210,9 @@ class VMwareVolumeOps(object):
             disk_move_type = 'moveAllDiskBackingsAndDisallowSharing'
         clone_spec = self._get_clone_spec(
             datastore, disk_move_type, snapshot, backing, disk_type, host=host,
-            resource_pool=resource_pool, extra_config=extra_config)
+            resource_pool=resource_pool, extra_config=extra_config,
+            disks_to_clone=disks_to_clone)
+
         task = self._session.invoke_api(self._session.vim, 'CloneVM_Task',
                                         backing, folder=folder, name=name,
                                         spec=clone_spec)
@@ -1137,6 +1235,18 @@ class VMwareVolumeOps(object):
                   reconfig_task)
         self._session.wait_for_task(reconfig_task)
 
+    def _get_controller(self, backing, adapter_type):
+        devices = self._session.invoke_api(vim_util,
+                                           'get_object_property',
+                                           self._session.vim,
+                                           backing,
+                                           'config.hardware.device')
+
+        controller_type = ControllerType.get_controller_type(adapter_type)
+        for device in devices:
+            if device.__class__.__name__ == controller_type:
+                return device
+
     def attach_disk_to_backing(self, backing, size_in_kb, disk_type,
                                adapter_type, profile_id, vmdk_ds_file_path):
         """Attach an existing virtual disk to the backing VM.
@@ -1158,12 +1268,23 @@ class VMwareVolumeOps(object):
                    'adapter_type': adapter_type})
         cf = self._session.vim.client.factory
         reconfig_spec = cf.create('ns0:VirtualMachineConfigSpec')
-        specs = self._create_specs_for_disk_add(
-            size_in_kb,
-            disk_type,
-            adapter_type,
-            profile_id,
-            vmdk_ds_file_path=vmdk_ds_file_path)
+
+        controller = self._get_controller(backing, adapter_type)
+        if controller:
+            disk_spec = self._create_virtual_disk_config_spec(
+                size_in_kb,
+                disk_type,
+                controller.key,
+                profile_id,
+                vmdk_ds_file_path)
+            specs = [disk_spec]
+        else:
+            specs = self._create_specs_for_disk_add(
+                size_in_kb,
+                disk_type,
+                adapter_type,
+                profile_id,
+                vmdk_ds_file_path=vmdk_ds_file_path)
         reconfig_spec.deviceChange = specs
         self._reconfigure_backing(backing, reconfig_spec)
         LOG.debug("Backing VM: %s reconfigured with new disk.", backing)
@@ -1217,16 +1338,23 @@ class VMwareVolumeOps(object):
                   {'backing': backing,
                    'profile': profile_id})
         cf = self._session.vim.client.factory
-        reconfig_spec = cf.create('ns0:VirtualMachineConfigSpec')
 
         if profile_id is None:
             vm_profile = cf.create('ns0:VirtualMachineEmptyProfileSpec')
-            vm_profile.dynamicType = 'profile'
         else:
             vm_profile = cf.create('ns0:VirtualMachineDefinedProfileSpec')
             vm_profile.profileId = profile_id.uniqueId
 
+        reconfig_spec = cf.create('ns0:VirtualMachineConfigSpec')
         reconfig_spec.vmProfile = [vm_profile]
+
+        disk_device = self._get_disk_device(backing)
+        disk_spec = cf.create('ns0:VirtualDeviceConfigSpec')
+        disk_spec.device = disk_device
+        disk_spec.operation = 'edit'
+        disk_spec.profile = [vm_profile]
+        reconfig_spec.deviceChange = [disk_spec]
+
         self._reconfigure_backing(backing, reconfig_spec)
         LOG.debug("Backing VM: %(backing)s reconfigured with new profile: "
                   "%(profile)s.",
@@ -1499,7 +1627,32 @@ class VMwareVolumeOps(object):
                                         destName=dest_vmdk_file_path,
                                         destDatacenter=dest_dc_ref,
                                         force=True)
+        self._session.wait_for_task(task)
 
+    def copy_datastore_file(self, vsphere_url, dest_dc_ref, dest_ds_file_path):
+        """Copy file to datastore location.
+
+        :param vsphere_url: vsphere URL of the file
+        :param dest_dc_ref: Reference to destination datacenter
+        :param dest_file_path: Destination datastore file path
+        """
+        LOG.debug("Copying file: %(vsphere_url)s to %(path)s.",
+                  {'vsphere_url': vsphere_url,
+                   'path': dest_ds_file_path})
+        location_url = ds_obj.DatastoreURL.urlparse(vsphere_url)
+        src_path = ds_obj.DatastorePath(location_url.datastore_name,
+                                        location_url.path)
+        src_dc_ref = self.get_entity_by_inventory_path(
+            location_url.datacenter_path)
+
+        task = self._session.invoke_api(
+            self._session.vim,
+            'CopyDatastoreFile_Task',
+            self._session.vim.service_content.fileManager,
+            sourceName=six.text_type(src_path),
+            sourceDatacenter=src_dc_ref,
+            destinationName=dest_ds_file_path,
+            destinationDatacenter=dest_dc_ref)
         self._session.wait_for_task(task)
 
     def delete_vmdk_file(self, vmdk_file_path, dc_ref):
@@ -1579,6 +1732,10 @@ class VMwareVolumeOps(object):
             self._session.vim.service_content.searchIndex,
             inventoryPath=path)
 
+    def get_inventory_path(self, entity):
+        return self._session.invoke_api(
+            vim_util, 'get_inventory_path', self._session.vim, entity)
+
     def _get_disk_devices(self, vm):
         disk_devices = []
         hardware_devices = self._session.invoke_api(vim_util,
@@ -1610,3 +1767,153 @@ class VMwareVolumeOps(object):
             if (backing.__class__.__name__ == "VirtualDiskFlatVer2BackingInfo"
                     and backing.fileName == vmdk_path):
                 return disk_device
+
+    def mark_backing_as_template(self, backing):
+        LOG.debug("Marking backing: %s as template.", backing)
+        self._session.invoke_api(self._session.vim, 'MarkAsTemplate', backing)
+
+    def _create_fcd_backing_spec(self, disk_type, ds_ref):
+        backing_spec = self._session.vim.client.factory.create(
+            'ns0:VslmCreateSpecDiskFileBackingSpec')
+        if disk_type == VirtualDiskType.PREALLOCATED:
+            disk_type = 'lazyZeroedThick'
+        backing_spec.provisioningType = disk_type
+        backing_spec.datastore = ds_ref
+        return backing_spec
+
+    def create_fcd(self, name, size_mb, ds_ref, disk_type):
+        spec = self._session.vim.client.factory.create('ns0:VslmCreateSpec')
+        spec.capacityInMB = size_mb
+        spec.name = name
+        spec.backingSpec = self._create_fcd_backing_spec(disk_type, ds_ref)
+
+        LOG.debug("Creating fcd with spec: %(spec)s on datastore: %(ds_ref)s.",
+                  {'spec': spec, 'ds_ref': ds_ref})
+        vstorage_mgr = self._session.vim.service_content.vStorageObjectManager
+        task = self._session.invoke_api(self._session.vim,
+                                        'CreateDisk_Task',
+                                        vstorage_mgr,
+                                        spec=spec)
+        task_info = self._session.wait_for_task(task)
+        fcd_loc = FcdLocation.create(task_info.result.config.id, ds_ref)
+        LOG.debug("Created fcd: %s.", fcd_loc)
+        return fcd_loc
+
+    def delete_fcd(self, fcd_location):
+        cf = self._session.vim.client.factory
+        vstorage_mgr = self._session.vim.service_content.vStorageObjectManager
+        LOG.debug("Deleting fcd: %s.", fcd_location)
+        task = self._session.invoke_api(self._session.vim,
+                                        'DeleteVStorageObject_Task',
+                                        vstorage_mgr,
+                                        id=fcd_location.id(cf),
+                                        datastore=fcd_location.ds_ref())
+        self._session.wait_for_task(task)
+
+    def clone_fcd(self, name, fcd_location, dest_ds_ref, disk_type):
+        cf = self._session.vim.client.factory
+        spec = cf.create('ns0:VslmCloneSpec')
+        spec.name = name
+        spec.backingSpec = self._create_fcd_backing_spec(disk_type,
+                                                         dest_ds_ref)
+
+        LOG.debug("Copying fcd: %(fcd_loc)s to datastore: %(ds_ref)s with "
+                  "spec: %(spec)s.",
+                  {'fcd_loc': fcd_location,
+                   'spec': spec,
+                   'ds_ref': dest_ds_ref})
+        vstorage_mgr = self._session.vim.service_content.vStorageObjectManager
+        task = self._session.invoke_api(self._session.vim,
+                                        'CloneVStorageObject_Task',
+                                        vstorage_mgr,
+                                        id=fcd_location.id(cf),
+                                        datastore=fcd_location.ds_ref(),
+                                        spec=spec)
+        task_info = self._session.wait_for_task(task)
+        dest_fcd_loc = FcdLocation.create(task_info.result.config.id,
+                                          dest_ds_ref)
+        LOG.debug("Clone fcd: %s.", dest_fcd_loc)
+        return dest_fcd_loc
+
+    def extend_fcd(self, fcd_location, new_size_mb):
+        cf = self._session.vim.client.factory
+        vstorage_mgr = self._session.vim.service_content.vStorageObjectManager
+        LOG.debug("Extending fcd: %(fcd_loc)s to %(size)s.",
+                  {'fcd_loc': fcd_location, 'size': new_size_mb})
+        task = self._session.invoke_api(self._session.vim,
+                                        'ExtendDisk_Task',
+                                        vstorage_mgr,
+                                        id=fcd_location.id(cf),
+                                        datastore=fcd_location.ds_ref(),
+                                        newCapacityInMB=new_size_mb)
+        self._session.wait_for_task(task)
+
+    def register_disk(self, vmdk_url, name, ds_ref):
+        vstorage_mgr = self._session.vim.service_content.vStorageObjectManager
+        LOG.debug("Registering disk: %s as fcd.", vmdk_url)
+        fcd = self._session.invoke_api(self._session.vim,
+                                       'RegisterDisk',
+                                       vstorage_mgr,
+                                       path=vmdk_url,
+                                       name=name)
+        fcd_loc = FcdLocation.create(fcd.config.id, ds_ref)
+        LOG.debug("Created fcd: %s.", fcd_loc)
+        return fcd_loc
+
+    def attach_fcd(self, backing, fcd_location):
+        cf = self._session.vim.client.factory
+
+        reconfig_spec = cf.create('ns0:VirtualMachineConfigSpec')
+        spec = self._create_controller_config_spec(
+            VirtualDiskAdapterType.LSI_LOGIC)
+        reconfig_spec.deviceChange = [spec]
+        self._reconfigure_backing(backing, reconfig_spec)
+
+        LOG.debug("Attaching fcd: %(fcd_loc)s to %(backing)s.",
+                  {'fcd_loc': fcd_location, 'backing': backing})
+        task = self._session.invoke_api(self._session.vim,
+                                        "AttachDisk_Task",
+                                        backing,
+                                        diskId=fcd_location.id(cf),
+                                        datastore=fcd_location.ds_ref())
+        self._session.wait_for_task(task)
+
+    def detach_fcd(self, backing, fcd_location):
+        cf = self._session.vim.client.factory
+        LOG.debug("Detaching fcd: %(fcd_loc)s from %(backing)s.",
+                  {'fcd_loc': fcd_location, 'backing': backing})
+        task = self._session.invoke_api(self._session.vim,
+                                        "DetachDisk_Task",
+                                        backing,
+                                        diskId=fcd_location.id(cf))
+        self._session.wait_for_task(task)
+
+
+class FcdLocation(object):
+
+    def __init__(self, fcd_id, ds_ref_val):
+        self.fcd_id = fcd_id
+        self.ds_ref_val = ds_ref_val
+
+    @classmethod
+    def create(cls, fcd_id_obj, ds_ref):
+        return cls(fcd_id_obj.id, ds_ref.value)
+
+    def provider_location(self):
+        return "%s@%s" % (self.fcd_id, self.ds_ref_val)
+
+    def ds_ref(self):
+        return vim_util.get_moref(self.ds_ref_val, 'Datastore')
+
+    def id(self, cf):
+        id_obj = cf.create('ns0:ID')
+        id_obj.id = self.fcd_id
+        return id_obj
+
+    @classmethod
+    def from_provider_location(cls, provider_location):
+        fcd_id, ds_ref_val = provider_location.split('@')
+        return cls(fcd_id, ds_ref_val)
+
+    def __str__(self):
+        return self.provider_location()

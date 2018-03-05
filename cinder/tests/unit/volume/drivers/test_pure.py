@@ -27,6 +27,7 @@ from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import fake_group
 from cinder.tests.unit import fake_snapshot
 from cinder.tests.unit import fake_volume
+from cinder.volume import utils as volume_utis
 
 
 def fake_retry(exceptions, interval=1, retries=3, backoff_rate=2):
@@ -60,7 +61,7 @@ GET_ARRAY_SECONDARY = {"version": "99.9.9",
 
 REPLICATION_TARGET_TOKEN = "12345678-abcd-1234-abcd-1234567890ab"
 REPLICATION_PROTECTION_GROUP = "cinder-group"
-REPLICATION_INTERVAL_IN_SEC = 900
+REPLICATION_INTERVAL_IN_SEC = 3600
 REPLICATION_RETENTION_SHORT_TERM = 14400
 REPLICATION_RETENTION_LONG_TERM = 6
 REPLICATION_RETENTION_LONG_TERM_PER_DAY = 3
@@ -514,9 +515,6 @@ class PureBaseSharedDriverTestCase(PureDriverTestCase):
         self.purestorage_module.FlashArray.side_effect = None
         self.array2.get_rest_version.return_value = '1.4'
 
-    def tearDown(self):
-        super(PureBaseSharedDriverTestCase, self).tearDown()
-
 
 @ddt.ddt
 class PureBaseVolumeDriverTestCase(PureBaseSharedDriverTestCase):
@@ -626,12 +624,12 @@ class PureBaseVolumeDriverTestCase(PureBaseSharedDriverTestCase):
         self.assertTrue(result.startswith("really-long-string-that-"))
         self.assertTrue(result.endswith("-cinder"))
         self.assertEqual(63, len(result))
-        self.assertTrue(pure.GENERATED_NAME.match(result))
+        self.assertTrue(bool(pure.GENERATED_NAME.match(result)))
         result = self.driver._generate_purity_host_name("!@#$%^-invalid&*")
         self.assertTrue(result.startswith("invalid---"))
         self.assertTrue(result.endswith("-cinder"))
         self.assertEqual(49, len(result))
-        self.assertTrue(pure.GENERATED_NAME.match(result))
+        self.assertIsNotNone(pure.GENERATED_NAME.match(result))
 
     @mock.patch(BASE_DRIVER_OBJ + "._add_to_group_if_needed")
     @mock.patch(BASE_DRIVER_OBJ + "._is_volume_replicated_type", autospec=True)
@@ -966,6 +964,27 @@ class PureBaseVolumeDriverTestCase(PureBaseSharedDriverTestCase):
             mock_host,
             'Host cannot be deleted due to existing connections.'
         )
+
+    def test_terminate_connection_no_connector_with_host(self):
+        # Show the volume having a connection
+        self.array.list_volume_private_connections.return_value = \
+            [VOLUME_CONNECTIONS[0]]
+
+        self.driver.terminate_connection(VOLUME, None)
+        self.array.disconnect_host.assert_called_with(
+            VOLUME_CONNECTIONS[0]["host"],
+            VOLUME_CONNECTIONS[0]["name"]
+        )
+
+    def test_terminate_connection_no_connector_no_host(self):
+        vol = fake_volume.fake_volume_obj(None, name=VOLUME["name"])
+
+        # Show the volume having a connection
+        self.array.list_volume_private_connections.return_value = []
+
+        # Make sure
+        self.driver.terminate_connection(vol, None)
+        self.array.disconnect_host.assert_not_called()
 
     def test_extend_volume(self):
         vol_name = VOLUME["name"] + "-cinder"
@@ -2090,10 +2109,11 @@ class PureBaseVolumeDriverTestCase(PureBaseSharedDriverTestCase):
         array2_v1_3.get_volume.return_value = REPLICATED_VOLUME_SNAPS
 
         context = mock.MagicMock()
-        new_active_id, volume_updates = self.driver.failover_host(
+        new_active_id, volume_updates, __ = self.driver.failover_host(
             context,
             REPLICATED_VOLUME_OBJS,
-            None
+            None,
+            []
         )
 
         self.assertEqual(secondary_device_id, new_active_id)
@@ -2383,7 +2403,7 @@ class PureISCSIDriverTestCase(PureDriverTestCase):
         actual = self.driver._connect(VOLUME, ISCSI_CONNECTOR)
         self.assertEqual(expected, actual)
         self.assertTrue(self.array.connect_host.called)
-        self.assertTrue(self.array.list_volume_private_connections)
+        self.assertTrue(bool(self.array.list_volume_private_connections))
 
     @mock.patch(ISCSI_DRIVER_OBJ + "._get_host", autospec=True)
     def test_connect_already_connected_list_hosts_empty(self, mock_host):
@@ -2397,7 +2417,7 @@ class PureISCSIDriverTestCase(PureDriverTestCase):
         self.assertRaises(exception.PureDriverException, self.driver._connect,
                           VOLUME, ISCSI_CONNECTOR)
         self.assertTrue(self.array.connect_host.called)
-        self.assertTrue(self.array.list_volume_private_connections)
+        self.assertTrue(bool(self.array.list_volume_private_connections))
 
     @mock.patch(ISCSI_DRIVER_OBJ + "._get_host", autospec=True)
     def test_connect_already_connected_list_hosts_exception(self, mock_host):
@@ -2414,7 +2434,7 @@ class PureISCSIDriverTestCase(PureDriverTestCase):
                           self.driver._connect, VOLUME,
                           ISCSI_CONNECTOR)
         self.assertTrue(self.array.connect_host.called)
-        self.assertTrue(self.array.list_volume_private_connections)
+        self.assertTrue(bool(self.array.list_volume_private_connections))
 
     @mock.patch(ISCSI_DRIVER_OBJ + "._get_chap_secret_from_init_data")
     @mock.patch(ISCSI_DRIVER_OBJ + "._get_host", autospec=True)
@@ -2588,7 +2608,7 @@ class PureFCDriverTestCase(PureDriverTestCase):
         actual = self.driver._connect(VOLUME, FC_CONNECTOR)
         self.assertEqual(expected, actual)
         self.assertTrue(self.array.connect_host.called)
-        self.assertTrue(self.array.list_volume_private_connections)
+        self.assertTrue(bool(self.array.list_volume_private_connections))
 
     @mock.patch(FC_DRIVER_OBJ + "._get_host", autospec=True)
     def test_connect_already_connected_list_hosts_empty(self, mock_host):
@@ -2602,7 +2622,7 @@ class PureFCDriverTestCase(PureDriverTestCase):
         self.assertRaises(exception.PureDriverException, self.driver._connect,
                           VOLUME, FC_CONNECTOR)
         self.assertTrue(self.array.connect_host.called)
-        self.assertTrue(self.array.list_volume_private_connections)
+        self.assertTrue(bool(self.array.list_volume_private_connections))
 
     @mock.patch(FC_DRIVER_OBJ + "._get_host", autospec=True)
     def test_connect_already_connected_list_hosts_exception(self, mock_host):
@@ -2618,7 +2638,7 @@ class PureFCDriverTestCase(PureDriverTestCase):
         self.assertRaises(self.purestorage_module.PureHTTPError,
                           self.driver._connect, VOLUME, FC_CONNECTOR)
         self.assertTrue(self.array.connect_host.called)
-        self.assertTrue(self.array.list_volume_private_connections)
+        self.assertTrue(bool(self.array.list_volume_private_connections))
 
     @mock.patch(FC_DRIVER_OBJ + "._get_host", autospec=True)
     def test_connect_wwn_already_in_use(self, mock_host):
@@ -2669,6 +2689,8 @@ class PureVolumeUpdateStatsTestCase(PureBaseSharedDriverTestCase):
                                    config_ratio,
                                    expected_ratio,
                                    auto):
+        volume_utis.get_max_over_subscription_ratio = mock.Mock(
+            return_value=expected_ratio)
         self.mock_config.pure_automatic_max_oversubscription_ratio = auto
         self.mock_config.max_over_subscription_ratio = config_ratio
         actual_ratio = self.driver._get_thin_provisioning(provisioned, used)

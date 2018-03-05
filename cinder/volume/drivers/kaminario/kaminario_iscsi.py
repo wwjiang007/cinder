@@ -13,8 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 """Volume driver for Kaminario K2 all-flash arrays."""
-import six
-
 from oslo_log import log as logging
 
 from cinder import coordination
@@ -22,12 +20,13 @@ from cinder import exception
 from cinder.i18n import _
 from cinder import interface
 from cinder.objects import fields
+from cinder import utils
 from cinder.volume.drivers.kaminario import kaminario_common as common
 
 ISCSI_TCP_PORT = "3260"
 K2_REP_FAILED_OVER = fields.ReplicationStatus.FAILED_OVER
 LOG = logging.getLogger(__name__)
-kaminario_logger = common.kaminario_logger
+utils.trace = common.utils.trace
 
 
 @interface.volumedriver
@@ -47,12 +46,12 @@ class KaminarioISCSIDriver(common.KaminarioCinderDriver):
     # ThirdPartySystems wiki page name
     CI_WIKI_NAME = "Kaminario_K2_CI"
 
-    @kaminario_logger
+    @utils.trace
     def __init__(self, *args, **kwargs):
         super(KaminarioISCSIDriver, self).__init__(*args, **kwargs)
         self._protocol = 'iSCSI'
 
-    @kaminario_logger
+    @utils.trace
     @coordination.synchronized('{self.k2_lock_name}')
     def initialize_connection(self, volume, connector):
         """Attach K2 volume to host."""
@@ -63,20 +62,26 @@ class KaminarioISCSIDriver(common.KaminarioCinderDriver):
             temp_client = self.client
             self.client = self.target
         # Get target_portal and target iqn.
-        iscsi_portal, target_iqn = self.get_target_info(volume)
+        iscsi_portals, target_iqns = self.get_target_info(volume)
         # Map volume.
         lun = self.k2_initialize_connection(volume, connector)
         # To support replication failback
         if temp_client:
             self.client = temp_client
         # Return target volume information.
-        return {"driver_volume_type": "iscsi",
-                "data": {"target_iqn": target_iqn,
-                         "target_portal": iscsi_portal,
-                         "target_lun": lun,
-                         "target_discovered": True}}
+        result = {"driver_volume_type": "iscsi",
+                  "data": {"target_iqn": target_iqns[0],
+                           "target_portal": iscsi_portals[0],
+                           "target_lun": lun,
+                           "target_discovered": True}}
 
-    @kaminario_logger
+        if self.configuration.disable_discovery and connector.get('multipath'):
+            result['data'].update(target_iqns=target_iqns,
+                                  target_portals=iscsi_portals,
+                                  target_luns=[lun] * len(target_iqns))
+        return result
+
+    @utils.trace
     @coordination.synchronized('{self.k2_lock_name}')
     def terminate_connection(self, volume, connector, **kwargs):
         # To support replication failback
@@ -94,30 +99,28 @@ class KaminarioISCSIDriver(common.KaminarioCinderDriver):
     def get_target_info(self, volume):
         LOG.debug("Searching first iscsi port ip without wan in K2.")
         iscsi_ip_rs = self.client.search("system/net_ips")
-        iscsi_ip = target_iqn = None
+        iscsi_portals = target_iqns = None
         if hasattr(iscsi_ip_rs, 'hits') and iscsi_ip_rs.total != 0:
-            for ip in iscsi_ip_rs.hits:
-                if not ip.wan_port:
-                    iscsi_ip = ip.ip_address
-                    break
-        if not iscsi_ip:
+            iscsi_portals = ['%s:%s' % (ip.ip_address, ISCSI_TCP_PORT)
+                             for ip in iscsi_ip_rs.hits if not ip.wan_port]
+        if not iscsi_portals:
             msg = _("Unable to get ISCSI IP address from K2.")
             LOG.error(msg)
             raise exception.KaminarioCinderDriverException(reason=msg)
-        iscsi_portal = "{0}:{1}".format(iscsi_ip, ISCSI_TCP_PORT)
         LOG.debug("Searching system state for target iqn in K2.")
         sys_state_rs = self.client.search("system/state")
 
         if hasattr(sys_state_rs, 'hits') and sys_state_rs.total != 0:
-            target_iqn = sys_state_rs.hits[0].iscsi_qualified_target_name
+            iqn = sys_state_rs.hits[0].iscsi_qualified_target_name
+            target_iqns = [iqn] * len(iscsi_portals)
 
-        if not target_iqn:
+        if not target_iqns:
             msg = _("Unable to get target iqn from K2.")
             LOG.error(msg)
             raise exception.KaminarioCinderDriverException(reason=msg)
-        return iscsi_portal, target_iqn
+        return iscsi_portals, target_iqns
 
-    @kaminario_logger
+    @utils.trace
     def _get_host_object(self, connector):
         host_name = self.get_initiator_host_name(connector)
         LOG.debug("Searching initiator hostname: %s in K2.", host_name)
@@ -137,8 +140,7 @@ class KaminarioISCSIDriver(common.KaminarioCinderDriver):
                 self._delete_host_by_name(host_name)
                 LOG.exception("Unable to create host: %s in K2.",
                               host_name)
-                raise exception.KaminarioCinderDriverException(
-                    reason=six.text_type(ex.message))
+                raise exception.KaminarioCinderDriverException(reason=ex)
         else:
             LOG.debug("Use existing initiator hostname: %s in K2.", host_name)
             host = host_rs.hits[0]

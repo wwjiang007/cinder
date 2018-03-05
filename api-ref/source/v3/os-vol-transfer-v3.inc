@@ -21,17 +21,15 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - auth_key: auth_key
-   - transfer_id: transfer_id
    - project_id: project_id_path
+   - transfer_id: transfer_id
+   - auth_key: auth_key
 
 Request Example
 ---------------
 
 .. literalinclude:: ./samples/volume-transfer-accept-request.json
    :language: javascript
-
-
 
 Response Parameters
 -------------------
@@ -42,6 +40,12 @@ Response Parameters
    - id: id
    - links: links
    - name: name
+
+Response Example
+----------------
+
+.. literalinclude:: ./samples/volume-transfer-accept-response.json
+   :language: javascript
 
 
 Create a volume transfer
@@ -59,9 +63,10 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
+   - project_id: project_id_path
+   - transfer: transfer
    - name: name
    - volume_id: volume_id
-   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -82,6 +87,12 @@ Response Parameters
    - id: id
    - name: name
 
+Response Example
+----------------
+
+.. literalinclude:: ./samples/volume-transfer-create-response.json
+   :language: javascript
+
 
 List volume transfers for a project
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -92,7 +103,6 @@ Lists volume transfers.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -101,6 +111,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
+   - all_tenants: all-tenants
 
 
 Response Parameters
@@ -130,7 +141,6 @@ Shows details for a volume transfer.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -138,8 +148,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - transfer_id: transfer_id
    - project_id: project_id_path
+   - transfer_id: transfer_id
 
 
 Response Parameters
@@ -176,8 +186,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - transfer_id: transfer_id
    - project_id: project_id_path
+   - transfer_id: transfer_id
 
 
 List volume transfers and details
@@ -189,7 +199,6 @@ Lists volume transfers, with details.
 
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
@@ -197,12 +206,14 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
+   - all_tenants: all-tenants
 
 Response Parameters
 -------------------
 
 .. rest_parameters:: parameters.yaml
 
+   - transfers: transfers
    - created_at: created_at
    - volume_id: volume_id
    - id: id

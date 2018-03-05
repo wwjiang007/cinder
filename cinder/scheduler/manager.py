@@ -41,6 +41,7 @@ from cinder.i18n import _
 from cinder import manager
 from cinder.message import api as mess_api
 from cinder import objects
+from cinder.objects import fields
 from cinder import quota
 from cinder import rpc
 from cinder.scheduler.flows import create_volume
@@ -99,6 +100,11 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
     def _clean_expired_messages(self, context):
         self.message_api.cleanup_expired_messages(context)
 
+    @periodic_task.periodic_task(spacing=CONF.reservation_clean_interval,
+                                 run_immediately=True)
+    def _clean_expired_reservation(self, context):
+        QUOTAS.expire(context)
+
     def update_service_capabilities(self, context, service_name=None,
                                     host=None, capabilities=None,
                                     cluster_name=None, timestamp=None,
@@ -155,19 +161,20 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
             LOG.error("Could not find a backend for group "
                       "%(group_id)s.",
                       {'group_id': group.id})
-            group.status = 'error'
+            group.status = fields.GroupStatus.ERROR
             group.save()
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.exception("Failed to create generic group "
                               "%(group_id)s.",
                               {'group_id': group.id})
-                group.status = 'error'
+                group.status = fields.GroupStatus.ERROR
                 group.save()
 
     @objects.Volume.set_workers
     def create_volume(self, context, volume, snapshot_id=None, image_id=None,
-                      request_spec=None, filter_properties=None):
+                      request_spec=None, filter_properties=None,
+                      backup_id=None):
         self._wait_for_scheduler()
 
         try:
@@ -177,7 +184,8 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
                                                  filter_properties,
                                                  volume,
                                                  snapshot_id,
-                                                 image_id)
+                                                 image_id,
+                                                 backup_id)
         except Exception:
             msg = _("Failed to create scheduler manager volume flow")
             LOG.exception(msg)
@@ -185,6 +193,30 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
 
         with flow_utils.DynamicLogListener(flow_engine, logger=LOG):
             flow_engine.run()
+
+    def create_snapshot(self, ctxt, volume, snapshot, backend,
+                        request_spec=None, filter_properties=None):
+        """Create snapshot for a volume.
+
+        The main purpose of this method is to check if target
+        backend (of volume and snapshot) has sufficient capacity
+        to host to-be-created snapshot.
+        """
+        self._wait_for_scheduler()
+
+        try:
+            tgt_backend = self.driver.backend_passes_filters(
+                ctxt, backend, request_spec, filter_properties)
+            tgt_backend.consume_from_volume(
+                {'size': request_spec['volume_properties']['size']})
+        except exception.NoValidBackend as ex:
+            self._set_snapshot_state_and_notify('create_snapshot',
+                                                snapshot,
+                                                fields.SnapshotStatus.ERROR,
+                                                ctxt, ex, request_spec)
+        else:
+            volume_rpcapi.VolumeAPI().create_snapshot(ctxt, volume,
+                                                      snapshot)
 
     def _do_cleanup(self, ctxt, vo_resource):
         # We can only receive cleanup requests for volumes, but we check anyway
@@ -320,6 +352,28 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
             volume_rpcapi.VolumeAPI().manage_existing(context, volume,
                                                       request_spec.get('ref'))
 
+    def manage_existing_snapshot(self, context, volume, snapshot, ref,
+                                 request_spec, filter_properties=None):
+        """Ensure that the host exists and can accept the snapshot."""
+
+        self._wait_for_scheduler()
+
+        try:
+            backend = self.driver.backend_passes_filters(
+                context, volume.service_topic_queue, request_spec,
+                filter_properties)
+            backend.consume_from_volume({'size': volume.size})
+
+        except exception.NoValidBackend as ex:
+            self._set_snapshot_state_and_notify('manage_existing_snapshot',
+                                                snapshot,
+                                                fields.SnapshotStatus.ERROR,
+                                                context, ex, request_spec)
+        else:
+            volume_rpcapi.VolumeAPI().manage_existing_snapshot(
+                context, snapshot, ref,
+                volume.service_topic_queue)
+
     def get_pools(self, context, filters=None):
         """Get active pools from scheduler's cache.
 
@@ -329,11 +383,27 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
         """
         return self.driver.get_pools(context, filters)
 
+    def validate_host_capacity(self, context, backend, request_spec,
+                               filter_properties):
+        try:
+            backend_state = self.driver.backend_passes_filters(
+                context,
+                backend,
+                request_spec, filter_properties)
+            backend_state.consume_from_volume(
+                {'size': request_spec['volume_properties']['size']})
+        except exception.NoValidBackend:
+            LOG.error("Desired host %(host)s does not have enough "
+                      "capacity.", {'host': backend})
+            return False
+        return True
+
     def extend_volume(self, context, volume, new_size, reservations,
                       request_spec=None, filter_properties=None):
 
         def _extend_volume_set_error(self, context, ex, request_spec):
-            volume_state = {'volume_state': {'status': 'available'}}
+            volume_state = {'volume_state': {'status': volume.previous_status,
+                                             'previous_status': None}}
             self._set_volume_state_and_notify('extend_volume', volume_state,
                                               context, ex, request_spec)
 
@@ -342,9 +412,12 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
 
         filter_properties['new_size'] = new_size
         try:
-            self.driver.backend_passes_filters(context,
-                                               volume.service_topic_queue,
-                                               request_spec, filter_properties)
+            backend_state = self.driver.backend_passes_filters(
+                context,
+                volume.service_topic_queue,
+                request_spec, filter_properties)
+            backend_state.consume_from_volume(
+                {'size': new_size - volume.size})
             volume_rpcapi.VolumeAPI().extend_volume(context, volume, new_size,
                                                     reservations)
         except exception.NoValidBackend as ex:
@@ -375,6 +448,28 @@ class SchedulerManager(manager.CleanableManager, manager.Manager):
                        volume_properties=properties,
                        volume_id=volume_id,
                        state=volume_state,
+                       method=method,
+                       reason=ex)
+
+        rpc.get_notifier("scheduler").error(context,
+                                            'scheduler.' + method,
+                                            payload)
+
+    def _set_snapshot_state_and_notify(self, method, snapshot, state,
+                                       context, ex, request_spec,
+                                       msg=None):
+        if not msg:
+            msg = ("Failed to schedule_%(method)s: %(ex)s" %
+                   {'method': method, 'ex': six.text_type(ex)})
+        LOG.error(msg)
+
+        model_update = dict(status=state)
+        snapshot.update(model_update)
+        snapshot.save()
+
+        payload = dict(request_spec=request_spec,
+                       snapshot_id=snapshot.id,
+                       state=state,
                        method=method,
                        reason=ex)
 

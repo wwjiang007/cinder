@@ -25,6 +25,7 @@ import abc
 import hashlib
 import json
 import os
+import sys
 
 import eventlet
 from oslo_config import cfg
@@ -41,6 +42,9 @@ from cinder import objects
 from cinder.objects import fields
 from cinder.volume import utils as volume_utils
 
+if sys.platform == 'win32':
+    from os_win import utilsfactory as os_win_utilsfactory
+
 LOG = logging.getLogger(__name__)
 
 chunkedbackup_service_opts = [
@@ -55,6 +59,11 @@ chunkedbackup_service_opts = [
 CONF = cfg.CONF
 CONF.register_opts(chunkedbackup_service_opts)
 
+
+# Object writer and reader returned by inheriting classes must not have any
+# logging calls, as well as the compression libraries, as eventlet has a bug
+# (https://github.com/eventlet/eventlet/issues/432) that would result in
+# failures.
 
 @six.add_metaclass(abc.ABCMeta)
 class ChunkedBackupDriver(driver.BackupDriver):
@@ -76,12 +85,18 @@ class ChunkedBackupDriver(driver.BackupDriver):
         try:
             if algorithm.lower() in ('none', 'off', 'no'):
                 return None
-            elif algorithm.lower() in ('zlib', 'gzip'):
+            if algorithm.lower() in ('zlib', 'gzip'):
                 import zlib as compressor
-                return compressor
+                result = compressor
             elif algorithm.lower() in ('bz2', 'bzip2'):
                 import bz2 as compressor
-                return compressor
+                result = compressor
+            else:
+                result = None
+            if result:
+                # NOTE(geguileo): Compression/Decompression starves
+                # greenthreads so we use a native thread instead.
+                return eventlet.tpool.Proxy(result)
         except ImportError:
             pass
 
@@ -90,8 +105,8 @@ class ChunkedBackupDriver(driver.BackupDriver):
 
     def __init__(self, context, chunk_size_bytes, sha_block_size_bytes,
                  backup_default_container, enable_progress_timer,
-                 db_driver=None):
-        super(ChunkedBackupDriver, self).__init__(context, db_driver)
+                 db=None):
+        super(ChunkedBackupDriver, self).__init__(context, db)
         self.chunk_size_bytes = chunk_size_bytes
         self.sha_block_size_bytes = sha_block_size_bytes
         self.backup_default_container = backup_default_container
@@ -104,6 +119,23 @@ class ChunkedBackupDriver(driver.BackupDriver):
         self.compressor = \
             self._get_compressor(CONF.backup_compression_algorithm)
         self.support_force_delete = True
+
+        if sys.platform == 'win32' and self.chunk_size_bytes % 4096:
+            # The chunk size must be a multiple of the sector size. In order
+            # to fail out early and avoid attaching the disks, we'll just
+            # enforce the chunk size to be a multiple of 4096.
+            err = _("Invalid chunk size. It must be a multiple of 4096.")
+            raise exception.InvalidConfigurationValue(message=err)
+
+    def _get_object_writer(self, container, object_name, extra_metadata=None):
+        """Return writer proxy-wrapped to execute methods in native thread."""
+        writer = self.get_object_writer(container, object_name, extra_metadata)
+        return eventlet.tpool.Proxy(writer)
+
+    def _get_object_reader(self, container, object_name, extra_metadata=None):
+        """Return reader proxy-wrapped to execute methods in native thread."""
+        reader = self.get_object_reader(container, object_name, extra_metadata)
+        return eventlet.tpool.Proxy(reader)
 
     # To create your own "chunked" backup driver, implement the following
     # abstract methods.
@@ -122,14 +154,23 @@ class ChunkedBackupDriver(driver.BackupDriver):
     def get_object_writer(self, container, object_name, extra_metadata=None):
         """Returns a writer object which stores the chunk data in backup repository.
 
-           The object returned should be a context handler that can be used
-           in a "with" context.
+        The object returned should be a context handler that can be used in a
+        "with" context.
+
+        The object writer methods must not have any logging calls, as eventlet
+        has a bug (https://github.com/eventlet/eventlet/issues/432) that would
+        result in failures.
         """
         return
 
     @abc.abstractmethod
     def get_object_reader(self, container, object_name, extra_metadata=None):
-        """Returns a reader object for the backed up chunk."""
+        """Returns a reader object for the backed up chunk.
+
+        The object reader methods must not have any logging calls, as eventlet
+        has a bug (https://github.com/eventlet/eventlet/issues/432) that would
+        result in failures.
+        """
         return
 
     @abc.abstractmethod
@@ -222,7 +263,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
         metadata_json = json.dumps(metadata, sort_keys=True, indent=2)
         if six.PY3:
             metadata_json = metadata_json.encode('utf-8')
-        with self.get_object_writer(container, filename) as writer:
+        with self._get_object_writer(container, filename) as writer:
             writer.write(metadata_json)
         LOG.debug('_write_metadata finished. Metadata: %s.', metadata_json)
 
@@ -243,7 +284,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
         sha256file_json = json.dumps(sha256file, sort_keys=True, indent=2)
         if six.PY3:
             sha256file_json = sha256file_json.encode('utf-8')
-        with self.get_object_writer(container, filename) as writer:
+        with self._get_object_writer(container, filename) as writer:
             writer.write(sha256file_json)
         LOG.debug('_write_sha256file finished.')
 
@@ -253,7 +294,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
         LOG.debug('_read_metadata started, container name: %(container)s, '
                   'metadata filename: %(filename)s.',
                   {'container': container, 'filename': filename})
-        with self.get_object_reader(container, filename) as reader:
+        with self._get_object_reader(container, filename) as reader:
             metadata_json = reader.read()
         if six.PY3:
             metadata_json = metadata_json.decode('utf-8')
@@ -267,7 +308,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
         LOG.debug('_read_sha256file started, container name: %(container)s, '
                   'sha256 filename: %(filename)s.',
                   {'container': container, 'filename': filename})
-        with self.get_object_reader(container, filename) as reader:
+        with self._get_object_reader(container, filename) as reader:
             sha256file_json = reader.read()
         if six.PY3:
             sha256file_json = sha256file_json.decode('utf-8')
@@ -327,7 +368,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
         algorithm, output_data = self._prepare_output_data(data)
         obj[object_name]['compression'] = algorithm
         LOG.debug('About to put_object')
-        with self.get_object_writer(
+        with self._get_object_writer(
                 container, object_name, extra_metadata=extra_metadata
         ) as writer:
             writer.write(output_data)
@@ -347,6 +388,8 @@ class ChunkedBackupDriver(driver.BackupDriver):
         if self.compressor is None:
             return 'none', data
         data_size_bytes = len(data)
+        # Execute compression in native thread so it doesn't prevent
+        # cooperative greenthread switching.
         compressed_data = self.compressor.compress(data)
         comp_size_bytes = len(compressed_data)
         algorithm = CONF.backup_compression_algorithm.lower()
@@ -421,6 +464,12 @@ class ChunkedBackupDriver(driver.BackupDriver):
                                                extra_usage_info=
                                                object_meta)
 
+    def _get_win32_phys_disk_size(self, disk_path):
+        win32_diskutils = os_win_utilsfactory.get_diskutils()
+        disk_number = win32_diskutils.get_device_number_from_device_name(
+            disk_path)
+        return win32_diskutils.get_disk_size(disk_number)
+
     def backup(self, backup, volume_file, backup_metadata=True):
         """Backup the given volume.
 
@@ -456,6 +505,13 @@ class ChunkedBackupDriver(driver.BackupDriver):
                         'backup. Do a full backup.')
                 raise exception.InvalidBackup(reason=err)
 
+        if sys.platform == 'win32':
+            # When dealing with Windows physical disks, we need the exact
+            # size of the disk. Attempting to read passed this boundary will
+            # lead to an IOError exception. At the same time, we cannot
+            # seek to the end of file.
+            win32_disk_size = self._get_win32_phys_disk_size(volume_file.name)
+
         (object_meta, object_sha256, extra_metadata, container,
          volume_size_bytes) = self._prepare_backup(backup)
 
@@ -484,17 +540,24 @@ class ChunkedBackupDriver(driver.BackupDriver):
             # First of all, we check the status of this backup. If it
             # has been changed to delete or has been deleted, we cancel the
             # backup process to do forcing delete.
-            backup = objects.Backup.get_by_id(self.context, backup.id)
+            backup.refresh()
             if backup.status in (fields.BackupStatus.DELETING,
                                  fields.BackupStatus.DELETED):
                 is_backup_canceled = True
                 # To avoid the chunk left when deletion complete, need to
                 # clean up the object of chunk again.
-                self.delete(backup)
+                self.delete_backup(backup)
                 LOG.debug('Cancel the backup process of %s.', backup.id)
                 break
             data_offset = volume_file.tell()
-            data = volume_file.read(self.chunk_size_bytes)
+
+            if sys.platform == 'win32':
+                read_bytes = min(self.chunk_size_bytes,
+                                 win32_disk_size - data_offset)
+            else:
+                read_bytes = self.chunk_size_bytes
+            data = volume_file.read(read_bytes)
+
             if data == b'':
                 break
 
@@ -578,7 +641,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
             except Exception:
                 with excutils.save_and_reraise_exception():
                     LOG.exception("Backup volume metadata failed.")
-                    self.delete(backup)
+                    self.delete_backup(backup)
 
         self._finalize_backup(backup, container, object_meta, object_sha256)
 
@@ -615,7 +678,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
                           'volume_id': volume_id,
                       })
 
-            with self.get_object_reader(
+            with self._get_object_reader(
                     container, object_name,
                     extra_metadata=extra_metadata) as reader:
                 body = reader.read()
@@ -708,7 +771,7 @@ class ChunkedBackupDriver(driver.BackupDriver):
         LOG.debug('restore %(backup_id)s to %(volume_id)s finished.',
                   {'backup_id': backup_id, 'volume_id': volume_id})
 
-    def delete(self, backup):
+    def delete_backup(self, backup):
         """Delete the given backup."""
         container = backup['container']
         object_prefix = backup['service_metadata']

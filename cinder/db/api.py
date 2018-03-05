@@ -93,6 +93,18 @@ def dispose_engine():
 ###################
 
 
+def service_uuids_online_data_migration(context, max_count):
+    return IMPL.service_uuids_online_data_migration(context, max_count)
+
+
+def backup_service_online_migration(context, max_count):
+    return IMPL.backup_service_online_migration(context, max_count)
+
+
+def volume_service_uuids_online_data_migration(context, max_count):
+    return IMPL.volume_service_uuids_online_data_migration(context, max_count)
+
+
 def service_destroy(context, service_id):
     """Destroy the service or raise if it does not exist."""
     return IMPL.service_destroy(context, service_id)
@@ -140,6 +152,14 @@ def service_update(context, service_id, values):
     Raises NotFound if service does not exist.
     """
     return IMPL.service_update(context, service_id, values)
+
+
+def service_get_by_uuid(context, service_uuid):
+    """Get a service by it's uuid.
+
+    Return Service ref or raise if it does not exist.
+    """
+    return IMPL.service_get_by_uuid(context, service_uuid)
 
 
 ###############
@@ -223,10 +243,10 @@ def volume_attach(context, values):
 
 
 def volume_attached(context, volume_id, instance_id, host_name, mountpoint,
-                    attach_mode='rw'):
+                    attach_mode='rw', mark_attached=True):
     """Ensure that a volume is set as attached."""
     return IMPL.volume_attached(context, volume_id, instance_id, host_name,
-                                mountpoint, attach_mode)
+                                mountpoint, attach_mode, mark_attached)
 
 
 def volume_create(context, values):
@@ -241,9 +261,9 @@ def volume_data_get_for_host(context, host, count_only=False):
                                          count_only)
 
 
-def volume_data_get_for_project(context, project_id):
+def volume_data_get_for_project(context, project_id, host=None):
     """Get (volume_count, gigabytes) for project."""
-    return IMPL.volume_data_get_for_project(context, project_id)
+    return IMPL.volume_data_get_for_project(context, project_id, host=host)
 
 
 def volume_destroy(context, volume_id):
@@ -267,6 +287,10 @@ def volume_get_all(context, marker=None, limit=None, sort_keys=None,
     return IMPL.volume_get_all(context, marker, limit, sort_keys=sort_keys,
                                sort_dirs=sort_dirs, filters=filters,
                                offset=offset)
+
+
+def calculate_resource_count(context, resource_type, filters):
+    return IMPL.calculate_resource_count(context, resource_type, filters)
 
 
 def volume_get_all_by_host(context, host, filters=None):
@@ -409,6 +433,10 @@ def volume_qos_allows_retype(new_vol_type):
     return IMPL.volume_qos_allows_retype(new_vol_type)
 
 
+def volume_has_other_project_snp_filter():
+    return IMPL.volume_has_other_project_snp_filter()
+
+
 ####################
 
 
@@ -467,6 +495,11 @@ def snapshot_get_all_for_volume(context, volume_id):
     return IMPL.snapshot_get_all_for_volume(context, volume_id)
 
 
+def snapshot_get_latest_for_volume(context, volume_id):
+    """Get latest snapshot for a volume"""
+    return IMPL.snapshot_get_latest_for_volume(context, volume_id)
+
+
 def snapshot_update(context, snapshot_id, values):
     """Set the given properties on an snapshot and update it.
 
@@ -476,11 +509,13 @@ def snapshot_update(context, snapshot_id, values):
     return IMPL.snapshot_update(context, snapshot_id, values)
 
 
-def snapshot_data_get_for_project(context, project_id, volume_type_id=None):
+def snapshot_data_get_for_project(context, project_id, volume_type_id=None,
+                                  host=None):
     """Get count and gigabytes used for snapshots for specified project."""
     return IMPL.snapshot_data_get_for_project(context,
                                               project_id,
-                                              volume_type_id)
+                                              volume_type_id,
+                                              host=host)
 
 
 def snapshot_get_all_active_by_window(context, begin, end=None,
@@ -1174,6 +1209,14 @@ def backup_create(context, values):
     return IMPL.backup_create(context, values)
 
 
+def backup_metadata_get(context, backup_id):
+    return IMPL.backup_metadata_get(context, backup_id)
+
+
+def backup_metadata_update(context, backup_id, metadata, delete):
+    return IMPL.backup_metadata_update(context, backup_id, metadata, delete)
+
+
 def backup_get_all_by_project(context, project_id, filters=None, marker=None,
                               limit=None, offset=None, sort_keys=None,
                               sort_dirs=None):
@@ -1342,6 +1385,23 @@ def consistencygroup_include_in_cluster(context, cluster, partial_rename=True,
                                                     partial_rename,
                                                     **filters)
 
+
+def group_include_in_cluster(context, cluster, partial_rename=True, **filters):
+    """Include all generic groups matching the filters into a cluster.
+
+    When partial_rename is set we will not set the cluster_name with cluster
+    parameter value directly, we'll replace provided cluster_name or host
+    filter value with cluster instead.
+
+    This is useful when we want to replace just the cluster name but leave
+    the backend and pool information as it is.  If we are using cluster_name
+    to filter, we'll use that same DB field to replace the cluster value and
+    leave the rest as it is.  Likewise if we use the host to filter.
+
+    Returns the number of generic groups that have been changed.
+    """
+    return IMPL.group_include_in_cluster(context, cluster, partial_rename,
+                                         **filters)
 
 ###################
 
@@ -1739,19 +1799,19 @@ class Condition(object):
 
 
 def attachment_specs_get(context, attachment_id):
-    """Get all specs for an attachment."""
+    """DEPRECATED: Get all specs for an attachment."""
     return IMPL.attachment_specs_get(context, attachment_id)
 
 
 def attachment_specs_delete(context, attachment_id, key):
-    """Delete the given attachment specs item."""
+    """DEPRECATED: Delete the given attachment specs item."""
     return IMPL.attachment_specs_delete(context, attachment_id, key)
 
 
 def attachment_specs_update_or_create(context,
                                       attachment_id,
                                       specs):
-    """Create or update attachment specs.
+    """DEPRECATED: Create or update attachment specs.
 
     This adds or modifies the key/value pairs specified in the attachment
     specs dict argument.
@@ -1759,6 +1819,10 @@ def attachment_specs_update_or_create(context,
     return IMPL.attachment_specs_update_or_create(context,
                                                   attachment_id,
                                                   specs)
+
+
+def attachment_specs_online_data_migration(context, max_count):
+    return IMPL.attachment_specs_online_data_migration(context, max_count)
 
 ###################
 
@@ -1849,7 +1913,7 @@ def conditional_update(context, model, values, expected_values, filters=(),
                             equivalent to read_deleted.
     :param project_only: Should the query be limited to context's project.
     :param order: Specific order of fields in which to update the values
-    :returns number of db rows that were updated.
+    :returns: Number of db rows that were updated.
     """
     return IMPL.conditional_update(context, model, values, expected_values,
                                    filters, include_deleted, project_only,

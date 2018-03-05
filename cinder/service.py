@@ -21,6 +21,9 @@
 import inspect
 import os
 import random
+import subprocess
+import sys
+import time
 
 from oslo_concurrency import processutils
 from oslo_config import cfg
@@ -36,7 +39,6 @@ profiler = importutils.try_import('osprofiler.profiler')
 profiler_opts = importutils.try_import('osprofiler.opts')
 
 
-from cinder.backup import rpcapi as backup_rpcapi
 from cinder.common import constants
 from cinder import context
 from cinder import coordination
@@ -46,10 +48,13 @@ from cinder import objects
 from cinder.objects import base as objects_base
 from cinder.objects import fields
 from cinder import rpc
-from cinder.scheduler import rpcapi as scheduler_rpcapi
 from cinder import version
-from cinder.volume import rpcapi as volume_rpcapi
 from cinder.volume import utils as vol_utils
+
+if os.name == 'nt':
+    from os_win import utilsfactory as os_win_utilsfactory
+else:
+    os_win_utilsfactory = None
 
 
 LOG = logging.getLogger(__name__)
@@ -67,10 +72,9 @@ service_opts = [
                help='Range, in seconds, to randomly delay when starting the'
                     ' periodic task scheduler to reduce stampeding.'
                     ' (Disable by setting to 0)'),
-    cfg.HostAddressOpt('osapi_volume_listen',
-                       default="0.0.0.0",
-                       help='IP address on which OpenStack Volume API '
-                            'listens'),
+    cfg.StrOpt('osapi_volume_listen',
+               default="0.0.0.0",
+               help='IP address on which OpenStack Volume API listens'),
     cfg.PortOpt('osapi_volume_listen_port',
                 default=8776,
                 help='Port on which OpenStack Volume API listens'),
@@ -158,18 +162,11 @@ class Service(service.Service):
         # result in us using None (if it's the first time the service is run)
         # or an old version (if this is a normal upgrade of a single service).
         ctxt = context.get_admin_context()
-        self.is_upgrading_to_n = self.is_svc_upgrading_to_n(binary)
         try:
             service_ref = objects.Service.get_by_args(ctxt, host, binary)
             service_ref.rpc_current_version = manager_class.RPC_API_VERSION
             obj_version = objects_base.OBJ_VERSIONS.get_current()
             service_ref.object_current_version = obj_version
-            # TODO(geguileo): In O we can remove the service upgrading part on
-            # the next equation, because by then all our services will be
-            # properly setting the cluster during volume migrations since
-            # they'll have the new Volume ORM model.  But until then we can
-            # only set the cluster in the DB and pass added_to_cluster to
-            # init_host when we have completed the rolling upgrade from M to N.
 
             # added_to_cluster attribute marks when we consider that we have
             # just added a host to a cluster so we can include resources into
@@ -178,12 +175,9 @@ class Service(service.Service):
             # configuration has a cluster value.  We don't want to do anything
             # automatic if the cluster is changed, in those cases we'll want
             # to use cinder manage command and to it manually.
-            self.added_to_cluster = (not service_ref.cluster_name and cluster
-                                     and not self.is_upgrading_to_n)
+            self.added_to_cluster = (not service_ref.cluster_name and cluster)
 
-            # TODO(geguileo): In O - Remove self.is_upgrading_to_n part
-            if (service_ref.cluster_name != cluster and
-                    not self.is_upgrading_to_n):
+            if service_ref.cluster_name != cluster:
                 LOG.info('This service has been moved from cluster '
                          '%(cluster_svc)s to %(cluster_cfg)s. Resources '
                          'will %(opt_no)sbe moved to the new cluster',
@@ -202,10 +196,9 @@ class Service(service.Service):
             # We don't want to include cluster information on the service or
             # create the cluster entry if we are upgrading.
             self._create_service_ref(ctxt, manager_class.RPC_API_VERSION)
-            # TODO(geguileo): In O set added_to_cluster to True
             # We don't want to include resources in the cluster during the
             # start while we are still doing the rolling upgrade.
-            self.added_to_cluster = not self.is_upgrading_to_n
+            self.added_to_cluster = True
 
         self.report_interval = report_interval
         self.periodic_interval = periodic_interval
@@ -218,17 +211,6 @@ class Service(service.Service):
         self.rpcserver = None
         self.backend_rpcserver = None
         self.cluster_rpcserver = None
-
-    # TODO(geguileo): Remove method in O since it will no longer be used.
-    @staticmethod
-    def is_svc_upgrading_to_n(binary):
-        """Given an RPC API class determine if the service is upgrading."""
-        rpcapis = {'cinder-scheduler': scheduler_rpcapi.SchedulerAPI,
-                   'cinder-volume': volume_rpcapi.VolumeAPI,
-                   'cinder-backup': backup_rpcapi.BackupAPI}
-        rpc_api = rpcapis[binary]
-        # If we are pinned to 1.3, then we are upgrading from M to N
-        return rpc_api.determine_obj_version_cap() == '1.3'
 
     def start(self):
         version_string = version.version_string()
@@ -269,8 +251,7 @@ class Service(service.Service):
                                                     serializer)
             self.backend_rpcserver.start()
 
-        # TODO(geguileo): In O - Remove the is_svc_upgrading_to_n part
-        if self.cluster and not self.is_svc_upgrading_to_n(self.binary):
+        if self.cluster:
             LOG.info('Starting %(topic)s cluster %(cluster)s (version '
                      '%(version)s)',
                      {'topic': self.topic, 'version': version_string,
@@ -367,19 +348,15 @@ class Service(service.Service):
             'rpc_current_version': rpc_version or self.manager.RPC_API_VERSION,
             'object_current_version': objects_base.OBJ_VERSIONS.get_current(),
         }
-        # TODO(geguileo): In O unconditionally set cluster_name like above
         # If we are upgrading we have to ignore the cluster value
-        if not self.is_upgrading_to_n:
-            kwargs['cluster_name'] = self.cluster
+        kwargs['cluster_name'] = self.cluster
         service_ref = objects.Service(context=context, **kwargs)
         service_ref.create()
         Service.service_id = service_ref.id
-        # TODO(geguileo): In O unconditionally ensure that the cluster exists
-        if not self.is_upgrading_to_n:
-            self._ensure_cluster_exists(context, service_ref)
-            # If we have updated the service_ref with replication data from
-            # the cluster it will be saved.
-            service_ref.save()
+        self._ensure_cluster_exists(context, service_ref)
+        # If we have updated the service_ref with replication data from
+        # the cluster it will be saved.
+        service_ref.save()
 
     def __getattr__(self, key):
         manager = self.__dict__.get('manager', None)
@@ -472,7 +449,7 @@ class Service(service.Service):
     def periodic_tasks(self, raise_on_error=False):
         """Tasks to be run at a periodic interval."""
         ctxt = context.get_admin_context()
-        self.manager.periodic_tasks(ctxt, raise_on_error=raise_on_error)
+        self.manager.run_periodic_tasks(ctxt, raise_on_error=raise_on_error)
 
     def report_state(self):
         """Update the state of this service in the datastore."""
@@ -628,7 +605,7 @@ class WSGIService(service.ServiceBase):
 
 
 def process_launcher():
-    return service.ProcessLauncher(CONF)
+    return service.ProcessLauncher(CONF, restart_method='mutate')
 
 
 # NOTE(vish): the global launcher is to maintain the existing
@@ -646,18 +623,8 @@ def serve(server, workers=None):
 
 
 def wait():
-    LOG.debug('Full set of CONF:')
-    for flag in CONF:
-        flag_get = CONF.get(flag, None)
-        # hide flag contents from log if contains a password
-        # should use secret flag when switch over to openstack-common
-        if ("_password" in flag or "_key" in flag or
-                (flag == "sql_connection" and
-                    ("mysql:" in flag_get or "postgresql:" in flag_get))):
-            LOG.debug('%s : FLAG SET ', flag)
-        else:
-            LOG.debug('%(flag)s : %(flag_get)s',
-                      {'flag': flag, 'flag_get': flag_get})
+    CONF.log_opt_values(LOG, logging.DEBUG)
+
     try:
         _launcher.wait()
     except KeyboardInterrupt:
@@ -680,3 +647,48 @@ def get_launcher():
         return Launcher()
     else:
         return process_launcher()
+
+
+class WindowsProcessLauncher(object):
+    def __init__(self):
+        self._processutils = os_win_utilsfactory.get_processutils()
+
+        self._workers = []
+        self._worker_job_handles = []
+        self._signal_handler = service.SignalHandler()
+        self._add_signal_handlers()
+
+    def add_process(self, cmd):
+        LOG.info("Starting subprocess: %s", cmd)
+
+        worker = subprocess.Popen(cmd)
+        try:
+            job_handle = self._processutils.kill_process_on_job_close(
+                worker.pid)
+        except Exception:
+            LOG.exception("Could not associate child process "
+                          "with a job, killing it.")
+            worker.kill()
+            raise
+
+        self._worker_job_handles.append(job_handle)
+        self._workers.append(worker)
+
+    def _add_signal_handlers(self):
+        self._signal_handler.add_handler('SIGINT', self._terminate)
+        self._signal_handler.add_handler('SIGTERM', self._terminate)
+
+    def _terminate(self, *args):
+        # We've already assigned win32 job objects to child processes,
+        # requesting them to stop once all the job handles are closed.
+        # When this process dies, so will the child processes.
+        LOG.info("Received request to terminate.")
+        sys.exit(1)
+
+    def wait(self):
+        pids = [worker.pid for worker in self._workers]
+        if pids:
+            self._processutils.wait_for_multiple_processes(pids,
+                                                           wait_all=True)
+        # By sleeping here, we allow signal handlers to be executed.
+        time.sleep(0)

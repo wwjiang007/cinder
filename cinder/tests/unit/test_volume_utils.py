@@ -21,6 +21,7 @@ import io
 import mock
 import six
 
+from castellan import key_manager
 import ddt
 from oslo_concurrency import processutils
 from oslo_config import cfg
@@ -30,7 +31,6 @@ from cinder import context
 from cinder import db
 from cinder.db.sqlalchemy import models
 from cinder import exception
-from cinder import keymgr
 from cinder.objects import fields
 from cinder import test
 from cinder.tests.unit.backup import fake_backup
@@ -162,7 +162,7 @@ class NotifyUsageTestCase(test.TestCase):
             'volume_size': 1,
             'snapshot_id': fake.SNAPSHOT_ID,
             'display_name': '11',
-            'created_at': mock.ANY,
+            'created_at': '2014-12-11T10:10:00+00:00',
             'status': fields.SnapshotStatus.ERROR,
             'deleted': '',
             'metadata': six.text_type({'fake_snap_meta_key':
@@ -371,8 +371,7 @@ class NotifyUsageTestCase(test.TestCase):
         expected_backup = raw_backup.copy()
         expected_backup['tenant_id'] = expected_backup.pop('project_id')
         expected_backup['backup_id'] = expected_backup.pop('id')
-        expected_backup['created_at'] = (
-            six.text_type(expected_backup['created_at']) + '+00:00')
+        expected_backup['created_at'] = '2015-01-01T01:01:01+00:00'
 
         usage_info = volume_utils._usage_from_backup(backup_obj)
         self.assertDictEqual(expected_backup, usage_info)
@@ -911,7 +910,8 @@ class VolumeUtilsTestCase(test.TestCase):
         result = volume_utils.extract_id_from_snapshot_name(snap_name)
         self.assertIsNone(result)
 
-    def test_paginate_entries_list_with_marker(self):
+    @ddt.data({"name": "vol02"}, '{"name": "vol02"}')
+    def test_paginate_entries_list_with_marker(self, marker):
         entries = [{'reference': {'name': 'vol03'}, 'size': 1},
                    {'reference': {'name': 'vol01'}, 'size': 3},
                    {'reference': {'name': 'vol02'}, 'size': 3},
@@ -922,7 +922,7 @@ class VolumeUtilsTestCase(test.TestCase):
         expected = [{'reference': {'name': 'vol04'}, 'size': 2},
                     {'reference': {'name': 'vol03'}, 'size': 1},
                     {'reference': {'name': 'vol05'}, 'size': 1}]
-        res = volume_utils.paginate_entries_list(entries, {'name': 'vol02'}, 3,
+        res = volume_utils.paginate_entries_list(entries, marker, 3,
                                                  1, ['size', 'reference'],
                                                  ['desc', 'asc'])
         self.assertEqual(expected, res)
@@ -941,6 +941,14 @@ class VolumeUtilsTestCase(test.TestCase):
         res = volume_utils.paginate_entries_list(entries, None, 3, None,
                                                  ['reference'], ['desc'])
         self.assertEqual(expected, res)
+
+    def test_paginate_entries_list_marker_invalid_format(self):
+        entries = [{'reference': {'name': 'vol03'}, 'size': 1},
+                   {'reference': {'name': 'vol01'}, 'size': 3}]
+        self.assertRaises(exception.InvalidInput,
+                          volume_utils.paginate_entries_list,
+                          entries, "invalid_format", 3, None,
+                          ['size', 'reference'], ['desc', 'asc'])
 
     def test_paginate_entries_list_marker_not_found(self):
         entries = [{'reference': {'name': 'vol03'}, 'size': 1},
@@ -982,12 +990,12 @@ class VolumeUtilsTestCase(test.TestCase):
             ctxt, type_ref1['id'], enc_key)
         get_volume_type_encryption.return_value = encryption
         CONF.set_override(
-            'api_class',
+            'backend',
             'cinder.keymgr.conf_key_mgr.ConfKeyManager',
             group='key_manager')
-        key_manager = keymgr.API()
+        km = key_manager.API()
         volume_utils.create_encryption_key(ctxt,
-                                           key_manager,
+                                           km,
                                            fake.VOLUME_TYPE_ID)
         is_encryption.assert_called_once_with(ctxt,
                                               fake.VOLUME_TYPE_ID)
@@ -1006,7 +1014,7 @@ class VolumeUtilsTestCase(test.TestCase):
     @ddt.data({}, None, {'key': 'value'})
     def test_is_replicated_no_specs(self, extra_specs):
         res = volume_utils.is_replicated_spec(extra_specs)
-        self.assertFalse(res)
+        self.assertFalse(bool(res))
 
     @ddt.data('<is> False', '<is> false', '<is> f', 'baddata', 'bad data')
     def test_is_replicated_spec_false(self, enabled):
@@ -1047,3 +1055,28 @@ class VolumeUtilsTestCase(test.TestCase):
         group = fake_group.fake_group_obj(
             None, group_type_id=fake.GROUP_TYPE_ID)
         self.assertTrue(volume_utils.is_group_a_cg_snapshot_type(group))
+
+    @ddt.data({'max_over_subscription_ratio': '10', 'supports_auto': True},
+              {'max_over_subscription_ratio': 'auto', 'supports_auto': True},
+              {'max_over_subscription_ratio': 'auto', 'supports_auto': False},
+              {'max_over_subscription_ratio': '1.2', 'supports_auto': False},)
+    @ddt.unpack
+    def test_get_max_over_subscription_ratio(self,
+                                             max_over_subscription_ratio,
+                                             supports_auto):
+
+        if not supports_auto and max_over_subscription_ratio == 'auto':
+            self.assertRaises(exception.VolumeDriverException,
+                              volume_utils.get_max_over_subscription_ratio,
+                              max_over_subscription_ratio, supports_auto)
+        elif not supports_auto:
+            mosr = volume_utils.get_max_over_subscription_ratio(
+                max_over_subscription_ratio, supports_auto)
+            self.assertEqual(float(max_over_subscription_ratio), mosr)
+        else:  # supports_auto
+            mosr = volume_utils.get_max_over_subscription_ratio(
+                max_over_subscription_ratio, supports_auto)
+            if max_over_subscription_ratio == 'auto':
+                self.assertEqual(max_over_subscription_ratio, mosr)
+            else:
+                self.assertEqual(float(max_over_subscription_ratio), mosr)

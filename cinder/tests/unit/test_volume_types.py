@@ -94,7 +94,7 @@ class VolumeTypeTestCase(test.TestCase):
         # on destroying the volume type
         vol_type_access = db_api._volume_type_access_query(
             self.ctxt).filter_by(volume_type_id=type_ref['id']).all()
-        self.assertFalse(vol_type_access)
+        self.assertEqual([], vol_type_access)
 
     @mock.patch('cinder.quota.VolumeTypeQuotaEngine.'
                 'update_quota_resource')
@@ -361,6 +361,8 @@ class VolumeTypeTestCase(test.TestCase):
                                       'k2': 'v2',
                                       'k3': 'v3'}}}
         res = volume_types.get_volume_type_qos_specs(type_ref['id'])
+        specs = db.qos_specs_get(self.ctxt, qos_ref['id'])
+        expected['qos_specs']['created_at'] = specs['created_at']
         self.assertDictEqual(expected, res)
 
     def test_volume_types_diff(self):
@@ -382,7 +384,7 @@ class VolumeTypeTestCase(test.TestCase):
         self.assertEqual(('val1', 'val0'), diff['extra_specs']['key1'])
 
         # qos_ref 1 and 2 have the same specs, while 3 has different
-        qos_keyvals1 = {'k1': 'v1', 'k2': 'v2', 'k3': 'v3'}
+        qos_keyvals1 = {'k1': 'v1', 'k2': 'v2', 'k3': 'v3', 'created_at': 'v4'}
         qos_keyvals2 = {'k1': 'v0', 'k2': 'v2', 'k3': 'v3'}
         qos_ref1 = qos_specs.create(self.ctxt, 'qos-specs-1', qos_keyvals1)
         qos_ref2 = qos_specs.create(self.ctxt, 'qos-specs-2', qos_keyvals1)
@@ -414,11 +416,9 @@ class VolumeTypeTestCase(test.TestCase):
 
         # And add encryption for good measure
         enc_keyvals1 = {'cipher': 'c1', 'key_size': 256, 'provider': 'p1',
-                        'control_location': 'front-end',
-                        'encryption_id': 'uuid1'}
+                        'control_location': 'front-end'}
         enc_keyvals2 = {'cipher': 'c1', 'key_size': 128, 'provider': 'p1',
-                        'control_location': 'front-end',
-                        'encryption_id': 'uuid2'}
+                        'control_location': 'front-end'}
         db.volume_type_encryption_create(self.ctxt, type_ref1['id'],
                                          enc_keyvals1)
         db.volume_type_encryption_create(self.ctxt, type_ref2['id'],
@@ -439,13 +439,13 @@ class VolumeTypeTestCase(test.TestCase):
         self.assertEqual({'consumer': (None, 'back-end'),
                           'k1': (None, 'v1'),
                           'k2': (None, 'v2'),
-                          'k3': (None, 'v3')}, diff['qos_specs'])
+                          'k3': (None, 'v3'),
+                          'created_at': (None, 'v4')}, diff['qos_specs'])
         self.assertEqual({'cipher': (None, 'c1'),
                           'control_location': (None, 'front-end'),
                           'deleted': (None, False),
                           'key_size': (None, 256),
-                          'provider': (None, 'p1'),
-                          'encryption_id': (None, 'uuid1')},
+                          'provider': (None, 'p1')},
                          diff['encryption'])
 
     def test_encryption_create(self):

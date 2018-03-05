@@ -123,6 +123,24 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
                                        'service': service})
         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
 
+    def test_filter_with_size_0(self, _mock_serv_is_up):
+        _mock_serv_is_up.return_value = True
+        filt_cls = self.class_map['CapacityFilter']()
+        filter_properties = {'size': 0,
+                             'request_spec': {'volume_id': fake.VOLUME_ID}}
+        service = {'disabled': False}
+        host = fakes.FakeBackendState('host1',
+                                      {'total_capacity_gb': 500,
+                                       'free_capacity_gb': 200,
+                                       'provisioned_capacity_gb': 1500,
+                                       'max_over_subscription_ratio': 2.0,
+                                       'reserved_percentage': 5,
+                                       'thin_provisioning_support': True,
+                                       'thick_provisioning_support': False,
+                                       'updated_at': None,
+                                       'service': service})
+        self.assertTrue(filt_cls.backend_passes(host, filter_properties))
+
     def test_filter_passes_infinite(self, _mock_serv_is_up):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
@@ -713,7 +731,7 @@ class AffinityFilterTestCase(BackendFiltersTestCase):
                              'scheduler_hints': {
             'same_host': vol_id}}
 
-        self.assertTrue(filt_cls.backend_passes(host, filter_properties))
+        self.assertTrue(bool(filt_cls.backend_passes(host, filter_properties)))
 
     def test_same_filter_passes(self):
         filt_cls = self.class_map['SameBackendFilter']()
@@ -725,7 +743,7 @@ class AffinityFilterTestCase(BackendFiltersTestCase):
                              'scheduler_hints': {
             'same_host': [vol_id], }}
 
-        self.assertTrue(filt_cls.backend_passes(host, filter_properties))
+        self.assertTrue(bool(filt_cls.backend_passes(host, filter_properties)))
 
     def test_same_filter_legacy_vol_fails(self):
         filt_cls = self.class_map['SameBackendFilter']()
@@ -737,7 +755,8 @@ class AffinityFilterTestCase(BackendFiltersTestCase):
                              'scheduler_hints': {
             'same_host': [vol_id], }}
 
-        self.assertFalse(filt_cls.backend_passes(host, filter_properties))
+        result = filt_cls.backend_passes(host, filter_properties)
+        self.assertEqual([], result.objects)
 
     def test_same_filter_fails(self):
         filt_cls = self.class_map['SameBackendFilter']()
@@ -749,7 +768,8 @@ class AffinityFilterTestCase(BackendFiltersTestCase):
                              'scheduler_hints': {
             'same_host': [vol_id], }}
 
-        self.assertFalse(filt_cls.backend_passes(host, filter_properties))
+        result = filt_cls.backend_passes(host, filter_properties)
+        self.assertEqual([], result.objects)
 
     def test_same_filter_vol_list_pass(self):
         filt_cls = self.class_map['SameBackendFilter']()
@@ -763,7 +783,7 @@ class AffinityFilterTestCase(BackendFiltersTestCase):
                              'scheduler_hints': {
             'same_host': [vol_id1, vol_id2], }}
 
-        self.assertTrue(filt_cls.backend_passes(host, filter_properties))
+        self.assertTrue(bool(filt_cls.backend_passes(host, filter_properties)))
 
     def test_same_filter_handles_none(self):
         filt_cls = self.class_map['SameBackendFilter']()
@@ -785,7 +805,8 @@ class AffinityFilterTestCase(BackendFiltersTestCase):
                              'scheduler_hints': {
             'same_host': [vol_id], }}
 
-        self.assertFalse(filt_cls.backend_passes(host, filter_properties))
+        result = filt_cls.backend_passes(host, filter_properties)
+        self.assertEqual([], result.objects)
 
     def test_same_filter_fail_nonuuid_hint(self):
         filt_cls = self.class_map['SameBackendFilter']()
@@ -991,8 +1012,6 @@ class DriverFilterTestCase(BackendFiltersTestCase):
 class InstanceLocalityFilterTestCase(BackendFiltersTestCase):
     def setUp(self):
         super(InstanceLocalityFilterTestCase, self).setUp()
-        self.override_config('nova_endpoint_template',
-                             'http://novahost:8774/v2/%(project_id)s')
         self.context.service_catalog = \
             [{'type': 'compute', 'name': 'nova', 'endpoints':
               [{'publicURL': 'http://novahost:8774/v2/e3f0833dc08b4cea'}]},

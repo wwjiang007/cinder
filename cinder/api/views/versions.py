@@ -68,11 +68,12 @@ class ViewBuilder(object):
     def _generate_href(self, version='v3', path=None):
         """Create a URL that refers to a specific version_number."""
         base_url = self._get_base_url_without_version()
-        href = urllib.parse.urljoin(base_url, version).rstrip('/') + '/'
+        rel_version = version.lstrip('/')
+        href = urllib.parse.urljoin(base_url, rel_version).rstrip('/') + '/'
         if path:
             href += path.lstrip('/')
         return href
 
     def _get_base_url_without_version(self):
-        """Get the base URL with out the /v1 suffix."""
+        """Get the base URL with out the /v3 suffix."""
         return re.sub('v[1-9]+/?$', '', self.base_url)

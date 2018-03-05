@@ -18,11 +18,13 @@ import socket
 import sys
 import uuid
 
+import mock
 from oslo_config import cfg
 from oslo_service import loopingcall
 from oslo_utils import timeutils
 import oslo_versionedobjects
 
+from cinder.common import constants
 from cinder import context
 from cinder import db
 from cinder import exception
@@ -38,55 +40,61 @@ def get_test_admin_context():
     return context.get_admin_context()
 
 
+def obj_attr_is_set(obj_class):
+    """Method to allow setting the ID on an OVO on creation."""
+    original_method = obj_class.obj_attr_is_set
+
+    def wrapped(self, attr):
+        if attr == 'id' and not hasattr(self, 'id_first_call'):
+            self.id_first_call = False
+            return False
+        else:
+            original_method(self, attr)
+    return wrapped
+
+
 def create_volume(ctxt,
                   host='test_host',
                   display_name='test_volume',
                   display_description='this is a test volume',
                   status='available',
-                  migration_status=None,
                   size=1,
                   availability_zone='fake_az',
-                  volume_type_id=None,
                   replication_status='disabled',
-                  replication_extended_status=None,
-                  replication_driver_data=None,
-                  consistencygroup_id=None,
-                  group_id=None,
-                  previous_status=None,
                   testcase_instance=None,
+                  id=None,
+                  metadata=None,
+                  admin_metadata=None,
                   **kwargs):
     """Create a volume object in the DB."""
-    vol = {}
-    vol['size'] = size
-    vol['host'] = host
-    vol['user_id'] = ctxt.user_id
-    vol['project_id'] = ctxt.project_id
-    vol['status'] = status
-    if migration_status:
-        vol['migration_status'] = migration_status
-    vol['display_name'] = display_name
-    vol['display_description'] = display_description
-    vol['attach_status'] = fields.VolumeAttachStatus.DETACHED
-    vol['availability_zone'] = availability_zone
-    if consistencygroup_id:
-        vol['consistencygroup_id'] = consistencygroup_id
-    if group_id:
-        vol['group_id'] = group_id
-    if volume_type_id:
-        vol['volume_type_id'] = volume_type_id
+    vol = {'size': size,
+           'host': host,
+           'user_id': ctxt.user_id,
+           'project_id': ctxt.project_id,
+           'status': status,
+           'display_name': display_name,
+           'display_description': display_description,
+           'attach_status': fields.VolumeAttachStatus.DETACHED,
+           'availability_zone': availability_zone,
+           }
+
+    if metadata:
+        vol['metadata'] = metadata
+    if admin_metadata:
+        vol['admin_metadata'] = admin_metadata
+        ctxt = ctxt.elevated()
     for key in kwargs:
         vol[key] = kwargs[key]
     vol['replication_status'] = replication_status
 
-    if replication_extended_status:
-        vol['replication_extended_status'] = replication_extended_status
-    if replication_driver_data:
-        vol['replication_driver_data'] = replication_driver_data
-    if previous_status:
-        vol['previous_status'] = previous_status
-
-    volume = objects.Volume(ctxt, **vol)
-    volume.create()
+    if id:
+        with mock.patch('cinder.objects.Volume.obj_attr_is_set',
+                        obj_attr_is_set(objects.Volume)):
+            volume = objects.Volume(ctxt, id=id, **vol)
+            volume.create()
+    else:
+        volume = objects.Volume(ctxt, **vol)
+        volume.create()
 
     # If we get a TestCase instance we add cleanup
     if testcase_instance:
@@ -118,6 +126,7 @@ def create_snapshot(ctxt,
                     cgsnapshot_id = None,
                     status=fields.SnapshotStatus.CREATING,
                     testcase_instance=None,
+                    id=None,
                     **kwargs):
     vol = db.volume_get(ctxt, volume_id)
     snap = objects.Snapshot(ctxt)
@@ -125,11 +134,20 @@ def create_snapshot(ctxt,
     snap.user_id = ctxt.user_id or fake.USER_ID
     snap.project_id = ctxt.project_id or fake.PROJECT_ID
     snap.status = status
+    snap.metadata = {}
     snap.volume_size = vol['size']
     snap.display_name = display_name
     snap.display_description = display_description
     snap.cgsnapshot_id = cgsnapshot_id
-    snap.create()
+
+    if id:
+        with mock.patch('cinder.objects.Snapshot.obj_attr_is_set',
+                        obj_attr_is_set(objects.Snapshot)):
+            snap.id = id
+            snap.create()
+    else:
+        snap.create()
+
     # We do the update after creating the snapshot in case we want to set
     # deleted field
     snap.update(kwargs)
@@ -306,6 +324,11 @@ def create_backup(ctxt,
                   temp_snapshot_id=None,
                   snapshot_id=None,
                   data_timestamp=None,
+                  size=None,
+                  container=None,
+                  availability_zone=None,
+                  host=None,
+                  metadata=None,
                   **kwargs):
     """Create a backup object."""
     values = {
@@ -315,21 +338,25 @@ def create_backup(ctxt,
         'status': status,
         'display_name': display_name,
         'display_description': display_description,
-        'container': 'fake',
-        'availability_zone': 'fake',
+        'container': container or 'fake',
+        'availability_zone': availability_zone or 'fake',
         'service': 'fake',
-        'size': 5 * 1024 * 1024,
+        'size': size or 5 * 1024 * 1024,
         'object_count': 22,
-        'host': socket.gethostname(),
+        'host': host or socket.gethostname(),
         'parent_id': parent_id,
         'temp_volume_id': temp_volume_id,
         'temp_snapshot_id': temp_snapshot_id,
         'snapshot_id': snapshot_id,
-        'data_timestamp': data_timestamp, }
+        'data_timestamp': data_timestamp,
+        'metadata': metadata or {}, }
 
     values.update(kwargs)
     backup = objects.Backup(ctxt, **values)
     backup.create()
+    if not snapshot_id:
+        backup.data_timestamp = backup.created_at
+        backup.save()
     return backup
 
 
@@ -338,7 +365,7 @@ def create_message(ctxt,
                    request_id='test_backup',
                    resource_type='This is a test backup',
                    resource_uuid='3asf434-3s433df43-434adf3-343df443',
-                   event_id=None,
+                   action=None,
                    message_level='Error'):
     """Create a message in the DB."""
     expires_at = (timeutils.utcnow() + datetime.timedelta(
@@ -347,7 +374,8 @@ def create_message(ctxt,
                       'request_id': request_id,
                       'resource_type': resource_type,
                       'resource_uuid': resource_uuid,
-                      'event_id': event_id,
+                      'action_id': action[0] if action else '',
+                      'event_id': "VOLUME_VOLUME_%s_002" % action[0],
                       'message_level': message_level,
                       'expires_at': expires_at}
     return db.message_create(ctxt, message_record)
@@ -381,9 +409,9 @@ def create_qos(ctxt, testcase_instance=None, **kwargs):
 
 
 class ZeroIntervalLoopingCall(loopingcall.FixedIntervalLoopingCall):
-    def start(self, interval, **kwargs):
-        kwargs['initial_delay'] = 0
-        return super(ZeroIntervalLoopingCall, self).start(0, **kwargs)
+    def start(self, interval, initial_delay=None, stop_on_exception=True):
+        return super(ZeroIntervalLoopingCall, self).start(
+            0, 0, stop_on_exception)
 
 
 def replace_obj_loader(testcase, obj):
@@ -455,6 +483,7 @@ def default_service_values():
         'topic': 'fake_topic',
         'report_count': 3,
         'disabled': False,
+        'availability_zone': 'nova',
     }
 
 
@@ -473,7 +502,7 @@ def create_service(ctxt, values=None):
 def default_cluster_values():
     return {
         'name': 'cluster_name',
-        'binary': 'cinder-volume',
+        'binary': constants.VOLUME_BINARY,
         'disabled': False,
         'disabled_reason': None,
         'deleted': False,

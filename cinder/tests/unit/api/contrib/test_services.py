@@ -17,7 +17,7 @@
 import datetime
 
 import ddt
-from iso8601 import iso8601
+import iso8601
 import mock
 from oslo_config import cfg
 from six.moves import http_client
@@ -25,7 +25,8 @@ import webob.exc
 
 from cinder.api.contrib import services
 from cinder.api import extensions
-from cinder.api.openstack import api_version_request as api_version
+from cinder.api import microversions as mv
+from cinder.common import constants
 from cinder import context
 from cinder import exception
 from cinder import objects
@@ -47,7 +48,8 @@ fake_services_list = [
      'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 2),
      'created_at': datetime.datetime(2012, 9, 18, 2, 46, 27),
      'disabled_reason': 'test1',
-     'modified_at': ''},
+     'modified_at': '',
+     'uuid': 'a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'},
     {'binary': 'cinder-volume',
      'host': 'host1',
      'cluster_name': None,
@@ -57,7 +59,8 @@ fake_services_list = [
      'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 5),
      'created_at': datetime.datetime(2012, 9, 18, 2, 46, 27),
      'disabled_reason': 'test2',
-     'modified_at': ''},
+     'modified_at': '',
+     'uuid': '4200b32b-0bf9-436c-86b2-0675f6ac218e'},
     {'binary': 'cinder-scheduler',
      'host': 'host2',
      'cluster_name': 'cluster1',
@@ -67,7 +70,8 @@ fake_services_list = [
      'updated_at': datetime.datetime(2012, 9, 19, 6, 55, 34),
      'created_at': datetime.datetime(2012, 9, 18, 2, 46, 28),
      'disabled_reason': '',
-     'modified_at': ''},
+     'modified_at': '',
+     'uuid': '6d91e7f5-ca17-4e3b-bf4f-19ca77166dd7'},
     {'binary': 'cinder-volume',
      'host': 'host2',
      'cluster_name': 'cluster1',
@@ -77,7 +81,8 @@ fake_services_list = [
      'updated_at': datetime.datetime(2012, 9, 18, 8, 3, 38),
      'created_at': datetime.datetime(2012, 9, 18, 2, 46, 28),
      'disabled_reason': 'test4',
-     'modified_at': ''},
+     'modified_at': '',
+     'uuid': '18417850-2ca9-43d1-9619-ae16bfb0f655'},
     {'binary': 'cinder-volume',
      'host': 'host2',
      'cluster_name': 'cluster2',
@@ -87,7 +92,8 @@ fake_services_list = [
      'updated_at': datetime.datetime(2012, 9, 18, 8, 3, 38),
      'created_at': datetime.datetime(2012, 9, 18, 2, 46, 28),
      'disabled_reason': 'test5',
-     'modified_at': datetime.datetime(2012, 10, 29, 13, 42, 5)},
+     'modified_at': datetime.datetime(2012, 10, 29, 13, 42, 5),
+     'uuid': 'f838f35c-4035-464f-9792-ce60e390c13d'},
     {'binary': 'cinder-volume',
      'host': 'host2',
      'cluster_name': 'cluster2',
@@ -97,7 +103,8 @@ fake_services_list = [
      'updated_at': datetime.datetime(2012, 9, 18, 8, 3, 38),
      'created_at': datetime.datetime(2012, 9, 18, 2, 46, 28),
      'disabled_reason': '',
-     'modified_at': datetime.datetime(2012, 9, 18, 8, 1, 38)},
+     'modified_at': datetime.datetime(2012, 9, 18, 8, 1, 38),
+     'uuid': 'f2825a00-cc2f-493d-9635-003e01db8b3d'},
     {'binary': 'cinder-scheduler',
      'host': 'host2',
      'cluster_name': None,
@@ -107,30 +114,23 @@ fake_services_list = [
      'updated_at': None,
      'created_at': datetime.datetime(2012, 9, 18, 2, 46, 28),
      'disabled_reason': '',
-     'modified_at': None},
+     'modified_at': None,
+     'uuid': '35fcf841-1974-4944-a798-1fb6d0a44972'},
 ]
 
 
 class FakeRequest(object):
     environ = {"cinder.context": context.get_admin_context()}
 
-    def __init__(self, version='3.0', **kwargs):
+    def __init__(self, version=mv.BASE_VERSION, **kwargs):
         self.GET = kwargs
-        self.headers = {'OpenStack-API-Version': 'volume ' + version}
-        self.api_version_request = api_version.APIVersionRequest(version)
-
-
-# NOTE(uni): deprecating service request key, binary takes precedence
-# Still keeping service key here for API compatibility sake.
-class FakeRequestWithService(FakeRequest):
-    def __init__(self, **kwargs):
-        kwargs.setdefault('service', 'cinder-volume')
-        super(FakeRequestWithService, self).__init__(**kwargs)
+        self.headers = mv.get_mv_header(version)
+        self.api_version_request = mv.get_api_version(version)
 
 
 class FakeRequestWithBinary(FakeRequest):
     def __init__(self, **kwargs):
-        kwargs.setdefault('binary', 'cinder-volume')
+        kwargs.setdefault('binary', constants.VOLUME_BINARY)
         super(FakeRequestWithBinary, self).__init__(**kwargs)
 
 
@@ -138,14 +138,6 @@ class FakeRequestWithHost(FakeRequest):
     def __init__(self, **kwargs):
         kwargs.setdefault('host', 'host1')
         super(FakeRequestWithHost, self).__init__(**kwargs)
-
-
-# NOTE(uni): deprecating service request key, binary takes precedence
-# Still keeping service key here for API compatibility sake.
-class FakeRequestWithHostService(FakeRequestWithService):
-    def __init__(self, **kwargs):
-        kwargs.setdefault('host', 'host1')
-        super(FakeRequestWithHostService, self).__init__(**kwargs)
 
 
 class FakeRequestWithHostBinary(FakeRequestWithBinary):
@@ -186,25 +178,32 @@ def fake_service_update(context, service_id, values):
     if service is None:
         raise exception.ServiceNotFound(service_id=service_id)
     else:
-        {'host': 'host1', 'service': 'cinder-volume',
+        {'host': 'host1', 'service': constants.VOLUME_BINARY,
          'disabled': values['disabled']}
 
 
-def fake_policy_enforce(context, action, target):
+def fake_policy_authorize(context, action, target,
+                          do_raise=True, exc=exception.PolicyNotAuthorized):
     pass
 
 
 def fake_utcnow(with_timezone=False):
-    tzinfo = iso8601.Utc() if with_timezone else None
+    tzinfo = iso8601.UTC if with_timezone else None
     return datetime.datetime(2012, 10, 29, 13, 42, 11, tzinfo=tzinfo)
 
 
+def fake_get_pools(ctxt, filters=None):
+    return [{"name": "host1", "capabilities": {"backend_state": "up"}},
+            {"name": "host2", "capabilities": {"backend_state": "down"}}]
+
+
 @ddt.ddt
+@mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.get_pools', fake_get_pools)
 @mock.patch('cinder.db.service_get_all', fake_service_get_all)
 @mock.patch('cinder.db.service_get', fake_service_get)
 @mock.patch('oslo_utils.timeutils.utcnow', fake_utcnow)
 @mock.patch('cinder.db.sqlalchemy.api.service_update', fake_service_update)
-@mock.patch('cinder.policy.enforce', fake_policy_enforce)
+@mock.patch('cinder.policy.authorize', fake_policy_authorize)
 class ServicesTest(test.TestCase):
 
     def setUp(self):
@@ -262,19 +261,19 @@ class ServicesTest(test.TestCase):
         self.assertEqual(response, res_dict)
 
     def test_failover_old_version(self):
-        req = FakeRequest(version='3.18')
+        req = FakeRequest(version=mv.BACKUP_PROJECT)
         self.assertRaises(exception.InvalidInput, self.controller.update, req,
                           'failover', {'cluster': 'cluster1'})
 
     def test_failover_no_values(self):
-        req = FakeRequest(version='3.26')
+        req = FakeRequest(version=mv.REPLICATION_CLUSTER)
         self.assertRaises(exception.InvalidInput, self.controller.update, req,
                           'failover', {'backend_id': 'replica1'})
 
     @ddt.data({'host': 'hostname'}, {'cluster': 'mycluster'})
     @mock.patch('cinder.volume.api.API.failover')
     def test_failover(self, body, failover_mock):
-        req = FakeRequest(version='3.26')
+        req = FakeRequest(version=mv.REPLICATION_CLUSTER)
         body['backend_id'] = 'replica1'
         res = self.controller.update(req, 'failover', body)
         self.assertEqual(202, res.status_code)
@@ -285,14 +284,14 @@ class ServicesTest(test.TestCase):
     @ddt.data({}, {'host': 'hostname', 'cluster': 'mycluster'})
     @mock.patch('cinder.volume.api.API.failover')
     def test_failover_invalid_input(self, body, failover_mock):
-        req = FakeRequest(version='3.26')
+        req = FakeRequest(version=mv.REPLICATION_CLUSTER)
         body['backend_id'] = 'replica1'
         self.assertRaises(exception.InvalidInput,
                           self.controller.update, req, 'failover', body)
         failover_mock.assert_not_called()
 
     def test_services_list_with_cluster_name(self):
-        req = FakeRequest(version='3.7')
+        req = FakeRequest(version=mv.CLUSTER_SUPPORT)
         res_dict = self.controller.index(req)
 
         response = {'services': [{'binary': 'cinder-scheduler',
@@ -335,6 +334,63 @@ class ServicesTest(test.TestCase):
                                   'status': 'enabled', 'state': 'down',
                                   'updated_at': datetime.datetime(
                                       2012, 9, 18, 8, 3, 38)},
+                                 {'binary': 'cinder-scheduler',
+                                  'cluster': None,
+                                  'host': 'host2',
+                                  'zone': 'cinder',
+                                  'status': 'enabled', 'state': 'down',
+                                  'updated_at': None},
+                                 ]}
+        self.assertEqual(response, res_dict)
+
+    def test_services_list_with_backend_state(self):
+        req = FakeRequest(version=mv.BACKEND_STATE_REPORT)
+        res_dict = self.controller.index(req)
+
+        response = {'services': [{'binary': 'cinder-scheduler',
+                                  'cluster': None,
+                                  'host': 'host1', 'zone': 'cinder',
+                                  'status': 'disabled', 'state': 'up',
+                                  'updated_at': datetime.datetime(
+                                      2012, 10, 29, 13, 42, 2)},
+                                 {'binary': 'cinder-volume',
+                                  'cluster': None,
+                                  'host': 'host1', 'zone': 'cinder',
+                                  'status': 'disabled', 'state': 'up',
+                                  'updated_at': datetime.datetime(
+                                      2012, 10, 29, 13, 42, 5),
+                                  'backend_state': 'up'},
+                                 {'binary': 'cinder-scheduler',
+                                  'cluster': 'cluster1',
+                                  'host': 'host2',
+                                  'zone': 'cinder',
+                                  'status': 'enabled', 'state': 'down',
+                                  'updated_at': datetime.datetime(
+                                      2012, 9, 19, 6, 55, 34)},
+                                 {'binary': 'cinder-volume',
+                                  'cluster': 'cluster1',
+                                  'host': 'host2',
+                                  'zone': 'cinder',
+                                  'status': 'disabled', 'state': 'down',
+                                  'updated_at': datetime.datetime(
+                                      2012, 9, 18, 8, 3, 38),
+                                  'backend_state': 'down'},
+                                 {'binary': 'cinder-volume',
+                                  'cluster': 'cluster2',
+                                  'host': 'host2',
+                                  'zone': 'cinder',
+                                  'status': 'disabled', 'state': 'down',
+                                  'updated_at': datetime.datetime(
+                                      2012, 10, 29, 13, 42, 5),
+                                  'backend_state': 'down'},
+                                 {'binary': 'cinder-volume',
+                                  'cluster': 'cluster2',
+                                  'host': 'host2',
+                                  'zone': 'cinder',
+                                  'status': 'enabled', 'state': 'down',
+                                  'updated_at': datetime.datetime(
+                                      2012, 9, 18, 8, 3, 38),
+                                  'backend_state': 'down'},
                                  {'binary': 'cinder-scheduler',
                                   'cluster': None,
                                   'host': 'host2',
@@ -456,94 +512,6 @@ class ServicesTest(test.TestCase):
              'disabled_reason': 'test2'}]}
         self.assertEqual(response, res_dict)
 
-    def test_services_list_with_service(self):
-        req = FakeRequestWithService()
-        res_dict = self.controller.index(req)
-
-        response = {'services': [
-            {'binary': 'cinder-volume',
-             'host': 'host1',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'up',
-             'updated_at': datetime.datetime(2012, 10, 29,
-                                             13, 42, 5)},
-            {'binary': 'cinder-volume',
-             'host': 'host2',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'down',
-             'updated_at': datetime.datetime(2012, 9, 18,
-                                             8, 3, 38)},
-            {'binary': 'cinder-volume',
-             'host': 'host2',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'down',
-             'updated_at': datetime.datetime(2012, 10, 29,
-                                             13, 42, 5)},
-            {'binary': 'cinder-volume',
-             'host': 'host2',
-             'zone': 'cinder',
-             'status': 'enabled',
-             'state': 'down',
-             'updated_at': datetime.datetime(2012, 9, 18,
-                                             8, 3, 38)}]}
-        self.assertEqual(response, res_dict)
-
-    def test_services_detail_with_service(self):
-        self.ext_mgr.extensions['os-extended-services'] = True
-        self.controller = services.ServiceController(self.ext_mgr)
-        req = FakeRequestWithService()
-        res_dict = self.controller.index(req)
-
-        response = {'services': [
-            {'binary': 'cinder-volume',
-             'replication_status': None,
-             'active_backend_id': None,
-             'frozen': False,
-             'host': 'host1',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'up',
-             'updated_at': datetime.datetime(2012, 10, 29,
-                                             13, 42, 5),
-             'disabled_reason': 'test2'},
-            {'binary': 'cinder-volume',
-             'replication_status': None,
-             'active_backend_id': None,
-             'frozen': False,
-             'host': 'host2',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'down',
-             'updated_at': datetime.datetime(2012, 9, 18,
-                                             8, 3, 38),
-             'disabled_reason': 'test4'},
-            {'binary': 'cinder-volume',
-             'replication_status': None,
-             'active_backend_id': None,
-             'frozen': False,
-             'host': 'host2',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'down',
-             'updated_at': datetime.datetime(2012, 10, 29,
-                                             13, 42, 5),
-             'disabled_reason': 'test5'},
-            {'binary': 'cinder-volume',
-             'replication_status': None,
-             'active_backend_id': None,
-             'frozen': False,
-             'host': 'host2',
-             'zone': 'cinder',
-             'status': 'enabled',
-             'state': 'down',
-             'updated_at': datetime.datetime(2012, 9, 18,
-                                             8, 3, 38),
-             'disabled_reason': ''}]}
-        self.assertEqual(response, res_dict)
-
     def test_services_list_with_binary(self):
         req = FakeRequestWithBinary()
         res_dict = self.controller.index(req)
@@ -632,40 +600,6 @@ class ServicesTest(test.TestCase):
              'disabled_reason': ''}]}
         self.assertEqual(response, res_dict)
 
-    def test_services_list_with_host_service(self):
-        req = FakeRequestWithHostService()
-        res_dict = self.controller.index(req)
-
-        response = {'services': [
-            {'binary': 'cinder-volume',
-             'host': 'host1',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'up',
-             'updated_at': datetime.datetime(2012, 10, 29,
-                                             13, 42, 5)}]}
-        self.assertEqual(response, res_dict)
-
-    def test_services_detail_with_host_service(self):
-        self.ext_mgr.extensions['os-extended-services'] = True
-        self.controller = services.ServiceController(self.ext_mgr)
-        req = FakeRequestWithHostService()
-        res_dict = self.controller.index(req)
-
-        response = {'services': [
-            {'binary': 'cinder-volume',
-             'replication_status': None,
-             'active_backend_id': None,
-             'host': 'host1',
-             'zone': 'cinder',
-             'status': 'disabled',
-             'state': 'up',
-             'updated_at': datetime.datetime(2012, 10, 29,
-                                             13, 42, 5),
-             'disabled_reason': 'test2',
-             'frozen': False}]}
-        self.assertEqual(response, res_dict)
-
     def test_services_list_with_host_binary(self):
         req = FakeRequestWithHostBinary()
         res_dict = self.controller.index(req)
@@ -701,7 +635,7 @@ class ServicesTest(test.TestCase):
         self.assertEqual(response, res_dict)
 
     def test_services_enable_with_service_key(self):
-        body = {'host': 'host1', 'service': 'cinder-volume'}
+        body = {'host': 'host1', 'service': constants.VOLUME_BINARY}
         req = fakes.HTTPRequest.blank(
             '/v2/%s/os-services/enable' % fake.PROJECT_ID)
         res_dict = self.controller.update(req, "enable", body)
@@ -709,7 +643,7 @@ class ServicesTest(test.TestCase):
         self.assertEqual('enabled', res_dict['status'])
 
     def test_services_enable_with_binary_key(self):
-        body = {'host': 'host1', 'binary': 'cinder-volume'}
+        body = {'host': 'host1', 'binary': constants.VOLUME_BINARY}
         req = fakes.HTTPRequest.blank(
             '/v2/%s/os-services/enable' % fake.PROJECT_ID)
         res_dict = self.controller.update(req, "enable", body)
@@ -719,7 +653,7 @@ class ServicesTest(test.TestCase):
     def test_services_disable_with_service_key(self):
         req = fakes.HTTPRequest.blank(
             '/v2/%s/os-services/disable' % fake.PROJECT_ID)
-        body = {'host': 'host1', 'service': 'cinder-volume'}
+        body = {'host': 'host1', 'service': constants.VOLUME_BINARY}
         res_dict = self.controller.update(req, "disable", body)
 
         self.assertEqual('disabled', res_dict['status'])
@@ -727,7 +661,7 @@ class ServicesTest(test.TestCase):
     def test_services_disable_with_binary_key(self):
         req = fakes.HTTPRequest.blank(
             '/v2/%s/os-services/disable' % fake.PROJECT_ID)
-        body = {'host': 'host1', 'binary': 'cinder-volume'}
+        body = {'host': 'host1', 'binary': constants.VOLUME_BINARY}
         res_dict = self.controller.update(req, "disable", body)
 
         self.assertEqual('disabled', res_dict['status'])
@@ -827,7 +761,7 @@ class ServicesTest(test.TestCase):
     def test_services_action_cluster_not_found(self, method, body,
                                                mock_get_all_services):
         url = '/v3/%s/os-services/%s' % (fake.PROJECT_ID, method)
-        req = fakes.HTTPRequest.blank(url, version='3.26')
+        req = fakes.HTTPRequest.blank(url, version=mv.REPLICATION_CLUSTER)
         mock_get_all_services.return_value = []
         msg = 'No service found with cluster=%s' % mock.sentinel.cluster
         result = self.assertRaises(exception.InvalidInput,
@@ -867,7 +801,7 @@ class ServicesTest(test.TestCase):
     @mock.patch('cinder.api.contrib.services.ServiceController._set_log')
     def test_set_log(self, set_log_mock):
         set_log_mock.return_value = None
-        req = FakeRequest(version='3.32')
+        req = FakeRequest(version=mv.LOG_LEVEL)
         body = mock.sentinel.body
         res = self.controller.update(req, 'set-log', body)
         self.assertEqual(set_log_mock.return_value, res)
@@ -876,7 +810,7 @@ class ServicesTest(test.TestCase):
     @mock.patch('cinder.api.contrib.services.ServiceController._get_log')
     def test_get_log(self, get_log_mock):
         get_log_mock.return_value = None
-        req = FakeRequest(version='3.32')
+        req = FakeRequest(version=mv.LOG_LEVEL)
         body = mock.sentinel.body
         res = self.controller.update(req, 'get-log', body)
         self.assertEqual(get_log_mock.return_value, res)
@@ -909,7 +843,7 @@ class ServicesTest(test.TestCase):
             mock.sentinel.context, body)
         self.assertEqual([binary], binaries)
 
-        if binary == 'cinder-api':
+        if binary == constants.API_BINARY:
             self.assertEqual([], services)
             service_list_mock.assert_not_called()
         else:
@@ -934,9 +868,9 @@ class ServicesTest(test.TestCase):
     def test__set_log(self, backup_rpc_mock, vol_rpc_mock, sch_rpc_mock,
                       set_log_mock, get_all_mock, get_log_mock):
         services = [
-            objects.Service(self.context, binary='cinder-scheduler'),
-            objects.Service(self.context, binary='cinder-volume'),
-            objects.Service(self.context, binary='cinder-backup'),
+            objects.Service(self.context, binary=constants.SCHEDULER_BINARY),
+            objects.Service(self.context, binary=constants.VOLUME_BINARY),
+            objects.Service(self.context, binary=constants.BACKUP_BINARY),
         ]
         get_all_mock.return_value = services
         body = {'binary': '*', 'prefix': 'eventlet.', 'level': 'debug'}
@@ -982,11 +916,12 @@ class ServicesTest(test.TestCase):
         ]
 
         services = [
-            objects.Service(self.context, binary='cinder-scheduler',
+            objects.Service(self.context, binary=constants.SCHEDULER_BINARY,
                             host='host'),
-            objects.Service(self.context, binary='cinder-volume',
+            objects.Service(self.context, binary=constants.VOLUME_BINARY,
                             host='host@backend#pool'),
-            objects.Service(self.context, binary='cinder-backup', host='host'),
+            objects.Service(self.context, binary=constants.BACKUP_BINARY,
+                            host='host'),
         ]
         get_all_mock.return_value = services
         body = {'binary': '*', 'prefix': 'eventlet.'}
@@ -1004,7 +939,7 @@ class ServicesTest(test.TestCase):
              'levels': mock.sentinel.api_levels},
             {'binary': 'cinder-scheduler', 'host': 'host',
              'levels': {'p5': 'l5', 'p6': 'l6'}},
-            {'binary': 'cinder-volume',
+            {'binary': constants.VOLUME_BINARY,
              'host': 'host@backend#pool',
              'levels': {'p3': 'l3', 'p4': 'l4'}},
             {'binary': 'cinder-backup', 'host': 'host',

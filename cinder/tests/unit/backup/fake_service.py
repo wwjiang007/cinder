@@ -17,8 +17,8 @@ from cinder.backup import driver
 
 
 class FakeBackupService(driver.BackupDriver):
-    def __init__(self, context, db_driver=None):
-        super(FakeBackupService, self).__init__(context, db_driver)
+    def __init__(self, context, db=None):
+        super(FakeBackupService, self).__init__(context, db)
 
     def backup(self, backup, volume_file):
         pass
@@ -26,7 +26,7 @@ class FakeBackupService(driver.BackupDriver):
     def restore(self, backup, volume_id, volume_file):
         pass
 
-    def delete(self, backup):
+    def delete_backup(self, backup):
         # if backup has magic name of 'fail_on_delete'
         # we raise an error - useful for some tests -
         # otherwise we return without error

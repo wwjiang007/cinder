@@ -239,6 +239,7 @@ class VolumeInitHostTestCase(base.BaseVolumeTestCase):
                               service_id=self.service_id)
         include_in_cluster_mock.assert_not_called()
 
+    @mock.patch('cinder.objects.group.GroupList.include_in_cluster')
     @mock.patch('cinder.objects.snapshot.SnapshotList.get_all',
                 return_value=[])
     @mock.patch('cinder.objects.volume.VolumeList.get_all', return_value=[])
@@ -249,7 +250,7 @@ class VolumeInitHostTestCase(base.BaseVolumeTestCase):
     def test_init_host_added_to_cluster(self, image_cache_include_mock,
                                         cg_include_mock,
                                         vol_include_mock, vol_get_all_mock,
-                                        snap_get_all_mock):
+                                        snap_get_all_mock, group_include_mock):
         cluster = str(mock.sentinel.cluster)
         self.mock_object(self.volume, 'cluster', cluster)
         self.volume.init_host(added_to_cluster=True,
@@ -261,7 +262,21 @@ class VolumeInitHostTestCase(base.BaseVolumeTestCase):
                                                 host=self.volume.host)
         image_cache_include_mock.assert_called_once_with(mock.ANY, cluster,
                                                          host=self.volume.host)
+        group_include_mock.assert_called_once_with(mock.ANY, cluster,
+                                                   host=self.volume.host)
         vol_get_all_mock.assert_called_once_with(
             mock.ANY, filters={'cluster_name': cluster})
         snap_get_all_mock.assert_called_once_with(
             mock.ANY, filters={'cluster_name': cluster})
+
+    @mock.patch('cinder.keymgr.migration.migrate_fixed_key')
+    @mock.patch('cinder.volume.manager.VolumeManager._get_my_volumes')
+    @mock.patch('cinder.manager.ThreadPoolManager._add_to_threadpool')
+    def test_init_host_key_migration(self,
+                                     mock_add_threadpool,
+                                     mock_get_my_volumes,
+                                     mock_migrate_fixed_key):
+
+        self.volume.init_host(service_id=self.service_id)
+        mock_add_threadpool.assert_called_once_with(mock_migrate_fixed_key,
+                                                    mock_get_my_volumes())

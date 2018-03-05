@@ -18,41 +18,72 @@ INFINIDAT InfiniBox Volume Driver
 
 from contextlib import contextmanager
 import functools
+import platform
+import socket
 
 import mock
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import units
 
+from cinder import coordination
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
+from cinder.objects import fields
 from cinder import utils
+from cinder import version
+from cinder.volume import configuration
 from cinder.volume.drivers.san import san
 from cinder.volume import utils as vol_utils
+from cinder.volume import volume_types
 from cinder.zonemanager import utils as fczm_utils
 
 try:
-    # capacity is a dependency of infinisdk, so if infinisdk is available
-    # then capacity should be available too
+    # we check that infinisdk is installed. the other imported modules
+    # are dependencies, so if any of the dependencies are not importable
+    # we assume infinisdk is not installed
     import capacity
+    from infi.dtypes import iqn
+    from infi.dtypes import wwn
     import infinisdk
 except ImportError:
     capacity = None
     infinisdk = None
+    iqn = None
+    wwn = None
 
 
 LOG = logging.getLogger(__name__)
 
 VENDOR_NAME = 'INFINIDAT'
+BACKEND_QOS_CONSUMERS = frozenset(['back-end', 'both'])
+QOS_MAX_IOPS = 'maxIOPS'
+QOS_MAX_BWS = 'maxBWS'
 
 infinidat_opts = [
     cfg.StrOpt('infinidat_pool_name',
                help='Name of the pool from which volumes are allocated'),
+    # We can't use the existing "storage_protocol" option because its default
+    # is "iscsi", but for backward-compatibility our default must be "fc"
+    cfg.StrOpt('infinidat_storage_protocol',
+               ignore_case=True,
+               default='fc',
+               choices=['iscsi', 'fc'],
+               help='Protocol for transferring data between host and '
+                    'storage back-end.'),
+    cfg.ListOpt('infinidat_iscsi_netspaces',
+                default=[],
+                help='List of names of network spaces to use for iSCSI '
+                     'connectivity'),
+    cfg.BoolOpt('infinidat_use_compression',
+                default=False,
+                help='Specifies whether to turn on compression for newly '
+                     'created volumes.'),
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(infinidat_opts)
+CONF.register_opts(infinidat_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 def infinisdk_to_cinder_exceptions(func):
@@ -69,11 +100,26 @@ def infinisdk_to_cinder_exceptions(func):
 
 
 @interface.volumedriver
-class InfiniboxVolumeDriver(san.SanDriver):
-    VERSION = '1.1'
+class InfiniboxVolumeDriver(san.SanISCSIDriver):
+    """INFINIDAT InfiniBox Cinder driver.
+
+    Version history:
+
+    .. code-block:: none
+
+        1.0 - initial release
+        1.1 - switched to use infinisdk package
+        1.2 - added support for iSCSI protocol
+        1.3 - added generic volume groups support
+        1.4 - added support for QoS
+        1.5 - added support for volume compression
+
+    """
+
+    VERSION = '1.5'
 
     # ThirdPartySystems wiki page
-    CI_WIKI_NAME = "INFINIDAT_Cinder_CI"
+    CI_WIKI_NAME = "INFINIDAT_CI"
 
     def __init__(self, *args, **kwargs):
         super(InfiniboxVolumeDriver, self).__init__(*args, **kwargs)
@@ -88,16 +134,29 @@ class InfiniboxVolumeDriver(san.SanDriver):
             raise exception.VolumeDriverException(message=msg)
         auth = (self.configuration.san_login,
                 self.configuration.san_password)
-        management_address = self.configuration.san_ip
-        self._system = infinisdk.InfiniBox(management_address, auth=auth)
+        self.management_address = self.configuration.san_ip
+        self._system = infinisdk.InfiniBox(self.management_address, auth=auth)
         self._system.login()
         backend_name = self.configuration.safe_get('volume_backend_name')
         self._backend_name = backend_name or self.__class__.__name__
         self._volume_stats = None
+        if self.configuration.infinidat_storage_protocol.lower() == 'iscsi':
+            self._protocol = 'iSCSI'
+            if len(self.configuration.infinidat_iscsi_netspaces) == 0:
+                msg = _('No iSCSI network spaces configured')
+                raise exception.VolumeDriverException(message=msg)
+        else:
+            self._protocol = 'FC'
+        if (self.configuration.infinidat_use_compression and
+           not self._system.compat.has_compression()):
+            # InfiniBox systems support compression only from v3.0 and up
+            msg = _('InfiniBox system does not support volume compression.\n'
+                    'Compression is available on InfiniBox 3.0 onward.\n'
+                    'Please disable volume compression by setting '
+                    'infinidat_use_compression to False in the Cinder '
+                    'configuration file.')
+            raise exception.VolumeDriverException(message=msg)
         LOG.debug('setup complete')
-
-    def _cleanup_wwpn(self, wwpn):
-        return wwpn.replace(':', '')
 
     def _make_volume_name(self, cinder_volume):
         return 'openstack-vol-%s' % cinder_volume.id
@@ -105,9 +164,28 @@ class InfiniboxVolumeDriver(san.SanDriver):
     def _make_snapshot_name(self, cinder_snapshot):
         return 'openstack-snap-%s' % cinder_snapshot.id
 
-    def _make_host_name(self, wwpn):
-        wwn_for_name = self._cleanup_wwpn(wwpn)
-        return 'openstack-host-%s' % wwn_for_name
+    def _make_host_name(self, port):
+        return 'openstack-host-%s' % str(port).replace(":", ".")
+
+    def _make_cg_name(self, cinder_group):
+        return 'openstack-cg-%s' % cinder_group.id
+
+    def _make_group_snapshot_name(self, cinder_group_snap):
+        return 'openstack-group-snap-%s' % cinder_group_snap.id
+
+    def _set_cinder_object_metadata(self, infinidat_object, cinder_object):
+        data = dict(system="openstack",
+                    openstack_version=version.version_info.release_string(),
+                    cinder_id=cinder_object.id,
+                    cinder_name=cinder_object.name)
+        infinidat_object.set_metadata_from_dict(data)
+
+    def _set_host_metadata(self, infinidat_object):
+        data = dict(system="openstack",
+                    openstack_version=version.version_info.release_string(),
+                    hostname=socket.gethostname(),
+                    platform=platform.platform())
+        infinidat_object.set_metadata_from_dict(data)
 
     def _get_infinidat_volume_by_name(self, name):
         volume = self._system.volumes.safe_get(name=name)
@@ -142,12 +220,22 @@ class InfiniboxVolumeDriver(san.SanDriver):
             raise exception.VolumeDriverException(message=msg)
         return pool
 
-    def _get_or_create_host(self, wwpn):
-        host_name = self._make_host_name(wwpn)
+    def _get_infinidat_cg(self, cinder_group):
+        group_name = self._make_cg_name(cinder_group)
+        infinidat_cg = self._system.cons_groups.safe_get(name=group_name)
+        if infinidat_cg is None:
+            msg = _('Consistency group "%s" not found') % group_name
+            LOG.error(msg)
+            raise exception.InvalidGroup(message=msg)
+        return infinidat_cg
+
+    def _get_or_create_host(self, port):
+        host_name = self._make_host_name(port)
         infinidat_host = self._system.hosts.safe_get(name=host_name)
         if infinidat_host is None:
             infinidat_host = self._system.hosts.create(name=host_name)
-            infinidat_host.add_port(self._cleanup_wwpn(wwpn))
+            infinidat_host.add_port(port)
+            self._set_host_metadata(infinidat_host)
         return infinidat_host
 
     def _get_mapping(self, host, volume):
@@ -163,6 +251,48 @@ class InfiniboxVolumeDriver(san.SanDriver):
         # volume not mapped. map it
         return host.map_volume(volume)
 
+    def _get_backend_qos_specs(self, cinder_volume):
+        type_id = cinder_volume.volume_type_id
+        if type_id is None:
+            return None
+        qos_specs = volume_types.get_volume_type_qos_specs(type_id)
+        if qos_specs is None:
+            return None
+        qos_specs = qos_specs['qos_specs']
+        if qos_specs is None:
+            return None
+        consumer = qos_specs['consumer']
+        # Front end QoS specs are handled by nova. We ignore them here.
+        if consumer not in BACKEND_QOS_CONSUMERS:
+            return None
+        max_iops = qos_specs['specs'].get(QOS_MAX_IOPS)
+        max_bws = qos_specs['specs'].get(QOS_MAX_BWS)
+        if max_iops is None and max_bws is None:
+            return None
+        return {
+            'id': qos_specs['id'],
+            QOS_MAX_IOPS: max_iops,
+            QOS_MAX_BWS: max_bws,
+        }
+
+    def _get_or_create_qos_policy(self, qos_specs):
+        qos_policy = self._system.qos_policies.safe_get(name=qos_specs['id'])
+        if qos_policy is None:
+            qos_policy = self._system.qos_policies.create(
+                name=qos_specs['id'],
+                type="VOLUME",
+                max_ops=qos_specs[QOS_MAX_IOPS],
+                max_bps=qos_specs[QOS_MAX_BWS])
+        return qos_policy
+
+    def _set_qos(self, cinder_volume, infinidat_volume):
+        if (hasattr(self._system.compat, "has_qos") and
+           self._system.compat.has_qos()):
+            qos_specs = self._get_backend_qos_specs(cinder_volume)
+            if qos_specs:
+                policy = self._get_or_create_qos_policy(qos_specs)
+                policy.assign_entity(infinidat_volume)
+
     def _get_online_fc_ports(self):
         nodes = self._system.components.nodes.get_all()
         for node in nodes:
@@ -171,18 +301,15 @@ class InfiniboxVolumeDriver(san.SanDriver):
                    port.get_state() == 'OK'):
                     yield str(port.get_wwpn())
 
-    @fczm_utils.add_fc_zone
-    @infinisdk_to_cinder_exceptions
-    def initialize_connection(self, volume, connector):
-        """Map an InfiniBox volume to the host"""
+    def _initialize_connection_fc(self, volume, connector):
         volume_name = self._make_volume_name(volume)
         infinidat_volume = self._get_infinidat_volume_by_name(volume_name)
-        for wwpn in connector['wwpns']:
-            infinidat_host = self._get_or_create_host(wwpn)
+        ports = [wwn.WWN(wwpn) for wwpn in connector['wwpns']]
+        for port in ports:
+            infinidat_host = self._get_or_create_host(port)
             mapping = self._get_or_create_mapping(infinidat_host,
                                                   infinidat_volume)
             lun = mapping.get_lun()
-
         # Create initiator-target mapping.
         target_wwpns = list(self._get_online_fc_ports())
         target_wwpns, init_target_map = self._build_initiator_target_map(
@@ -193,14 +320,111 @@ class InfiniboxVolumeDriver(san.SanDriver):
                               target_lun=lun,
                               initiator_target_map=init_target_map))
 
+    def _get_iscsi_network_space(self, netspace_name):
+        netspace = self._system.network_spaces.safe_get(
+            service='ISCSI_SERVICE',
+            name=netspace_name)
+        if netspace is None:
+            msg = (_('Could not find iSCSI network space with name "%s"') %
+                   netspace_name)
+            raise exception.VolumeDriverException(message=msg)
+        return netspace
+
+    def _get_iscsi_portal(self, netspace):
+        for netpsace_interface in netspace.get_ips():
+            if netpsace_interface.enabled:
+                port = netspace.get_properties().iscsi_tcp_port
+                return "%s:%s" % (netpsace_interface.ip_address, port)
+        # if we get here it means there are no enabled ports
+        msg = (_('No available interfaces in iSCSI network space %s') %
+               netspace.get_name())
+        raise exception.VolumeDriverException(message=msg)
+
+    def _initialize_connection_iscsi(self, volume, connector):
+        volume_name = self._make_volume_name(volume)
+        infinidat_volume = self._get_infinidat_volume_by_name(volume_name)
+        port = iqn.IQN(connector['initiator'])
+        infinidat_host = self._get_or_create_host(port)
+        if self.configuration.use_chap_auth:
+            chap_username = (self.configuration.chap_username or
+                             vol_utils.generate_username())
+            chap_password = (self.configuration.chap_password or
+                             vol_utils.generate_password())
+            infinidat_host.update_fields(
+                security_method='CHAP',
+                security_chap_inbound_username=chap_username,
+                security_chap_inbound_secret=chap_password)
+        mapping = self._get_or_create_mapping(infinidat_host,
+                                              infinidat_volume)
+        lun = mapping.get_lun()
+        netspace_names = self.configuration.infinidat_iscsi_netspaces
+        target_portals = []
+        target_iqns = []
+        target_luns = []
+        for netspace_name in netspace_names:
+            netspace = self._get_iscsi_network_space(netspace_name)
+            target_portals.append(self._get_iscsi_portal(netspace))
+            target_iqns.append(netspace.get_properties().iscsi_iqn)
+            target_luns.append(lun)
+
+        result_data = dict(target_discovered=True,
+                           target_portal=target_portals[0],
+                           target_iqn=target_iqns[0],
+                           target_lun=target_luns[0],
+                           target_portals=target_portals,
+                           target_iqns=target_iqns,
+                           target_luns=target_luns)
+        if self.configuration.use_chap_auth:
+            result_data.update(dict(auth_method='CHAP',
+                                    auth_username=chap_username,
+                                    auth_password=chap_password))
+        return dict(driver_volume_type='iscsi',
+                    data=result_data)
+
+    def _get_ports_from_connector(self, infinidat_volume, connector):
+        if connector is None:
+            # If no connector was provided it is a force-detach - remove all
+            # host connections for the volume
+            if self._protocol == 'FC':
+                port_cls = wwn.WWN
+            else:
+                port_cls = iqn.IQN
+            ports = []
+            for lun_mapping in infinidat_volume.get_logical_units():
+                host_ports = lun_mapping.get_host().get_ports()
+                host_ports = [port for port in host_ports
+                              if isinstance(port, port_cls)]
+                ports.extend(host_ports)
+        elif self._protocol == 'FC':
+            ports = [wwn.WWN(wwpn) for wwpn in connector['wwpns']]
+        else:
+            ports = [iqn.IQN(connector['initiator'])]
+        return ports
+
+    @fczm_utils.add_fc_zone
+    @infinisdk_to_cinder_exceptions
+    @coordination.synchronized('infinidat-{self.management_address}-lock')
+    def initialize_connection(self, volume, connector):
+        """Map an InfiniBox volume to the host"""
+        if self._protocol == 'FC':
+            return self._initialize_connection_fc(volume, connector)
+        else:
+            return self._initialize_connection_iscsi(volume, connector)
+
     @fczm_utils.remove_fc_zone
     @infinisdk_to_cinder_exceptions
+    @coordination.synchronized('infinidat-{self.management_address}-lock')
     def terminate_connection(self, volume, connector, **kwargs):
         """Unmap an InfiniBox volume from the host"""
         infinidat_volume = self._get_infinidat_volume(volume)
+        if self._protocol == 'FC':
+            volume_type = 'fibre_channel'
+        else:
+            volume_type = 'iscsi'
         result_data = dict()
-        for wwpn in connector['wwpns']:
-            host_name = self._make_host_name(wwpn)
+        ports = self._get_ports_from_connector(infinidat_volume, connector)
+        for port in ports:
+            host_name = self._make_host_name(port)
             host = self._system.hosts.safe_get(name=host_name)
             if host is None:
                 # not found. ignore.
@@ -210,17 +434,19 @@ class InfiniboxVolumeDriver(san.SanDriver):
                 host.unmap_volume(infinidat_volume)
             except KeyError:
                 continue      # volume mapping not found
-        # check if the host now doesn't have mappings, to delete host_entry
-        # if needed
-        if len(host.get_luns()) == 0:
-            host.safe_delete()
-            # Create initiator-target mapping.
-            target_wwpns = list(self._get_online_fc_ports())
-            target_wwpns, init_target_map = self._build_initiator_target_map(
-                connector, target_wwpns)
-            result_data = dict(target_wwn=target_wwpns,
-                               initiator_target_map=init_target_map)
-        return dict(driver_volume_type='fibre_channel',
+            # check if the host now doesn't have mappings
+            if host is not None and len(host.get_luns()) == 0:
+                host.safe_delete()
+                if self._protocol == 'FC' and connector is not None:
+                    # Create initiator-target mapping to delete host entry
+                    # this is only relevant for regular (specific host) detach
+                    target_wwpns = list(self._get_online_fc_ports())
+                    target_wwpns, target_map = (
+                        self._build_initiator_target_map(connector,
+                                                         target_wwpns))
+                    result_data = dict(target_wwn=target_wwpns,
+                                       initiator_target_map=target_map)
+        return dict(driver_volume_type=volume_type,
                     data=result_data)
 
     @infinisdk_to_cinder_exceptions
@@ -233,13 +459,22 @@ class InfiniboxVolumeDriver(san.SanDriver):
                                        capacity.byte)
             free_capacity_gb = float(free_capacity_bytes) / units.Gi
             total_capacity_gb = float(physical_capacity_bytes) / units.Gi
+            qos_support = (hasattr(self._system.compat, "has_qos") and
+                           self._system.compat.has_qos())
+            max_osr = self.configuration.max_over_subscription_ratio
+            thin = self.configuration.san_thin_provision
             self._volume_stats = dict(volume_backend_name=self._backend_name,
                                       vendor_name=VENDOR_NAME,
                                       driver_version=self.VERSION,
-                                      storage_protocol='FC',
-                                      consistencygroup_support='False',
+                                      storage_protocol=self._protocol,
+                                      consistencygroup_support=False,
                                       total_capacity_gb=total_capacity_gb,
-                                      free_capacity_gb=free_capacity_gb)
+                                      free_capacity_gb=free_capacity_gb,
+                                      consistent_group_snapshot_enabled=True,
+                                      QoS_support=qos_support,
+                                      thin_provisioning_support=thin,
+                                      thick_provisioning_support=not thin,
+                                      max_over_subscription_ratio=max_osr)
         return self._volume_stats
 
     def _create_volume(self, volume):
@@ -247,10 +482,17 @@ class InfiniboxVolumeDriver(san.SanDriver):
         volume_name = self._make_volume_name(volume)
         provtype = "THIN" if self.configuration.san_thin_provision else "THICK"
         size = volume.size * capacity.GiB
-        return self._system.volumes.create(name=volume_name,
-                                           pool=pool,
-                                           provtype=provtype,
-                                           size=size)
+        create_kwargs = dict(name=volume_name,
+                             pool=pool,
+                             provtype=provtype,
+                             size=size)
+        if self._system.compat.has_compression():
+            create_kwargs["compression_enabled"] = (
+                self.configuration.infinidat_use_compression)
+        infinidat_volume = self._system.volumes.create(**create_kwargs)
+        self._set_qos(volume, infinidat_volume)
+        self._set_cinder_object_metadata(infinidat_volume, volume)
+        return infinidat_volume
 
     @infinisdk_to_cinder_exceptions
     def create_volume(self, volume):
@@ -282,16 +524,48 @@ class InfiniboxVolumeDriver(san.SanDriver):
         """Creates a snapshot."""
         volume = self._get_infinidat_volume(snapshot.volume)
         name = self._make_snapshot_name(snapshot)
-        volume.create_snapshot(name=name)
+        infinidat_snapshot = volume.create_snapshot(name=name)
+        self._set_cinder_object_metadata(infinidat_snapshot, snapshot)
+
+    @contextmanager
+    def _connection_context(self, volume):
+        use_multipath = self.configuration.use_multipath_for_image_xfer
+        enforce_multipath = self.configuration.enforce_multipath_for_image_xfer
+        connector = utils.brick_get_connector_properties(use_multipath,
+                                                         enforce_multipath)
+        connection = self.initialize_connection(volume, connector)
+        try:
+            yield connection
+        finally:
+            self.terminate_connection(volume, connector)
+
+    @contextmanager
+    def _attach_context(self, connection):
+        use_multipath = self.configuration.use_multipath_for_image_xfer
+        device_scan_attempts = self.configuration.num_volume_device_scan_tries
+        protocol = connection['driver_volume_type']
+        connector = utils.brick_get_connector(
+            protocol,
+            use_multipath=use_multipath,
+            device_scan_attempts=device_scan_attempts,
+            conn=connection)
+        attach_info = None
+        try:
+            attach_info = self._connect_device(connection)
+            yield attach_info
+        except exception.DeviceUnavailable as exc:
+            attach_info = exc.kwargs.get('attach_info', None)
+            raise
+        finally:
+            if attach_info:
+                connector.disconnect_volume(attach_info['conn']['data'],
+                                            attach_info['device'])
 
     @contextmanager
     def _device_connect_context(self, volume):
-        connector = utils.brick_get_connector_properties()
-        connection = self.initialize_connection(volume, connector)
-        try:
-            yield self._connect_device(connection)
-        finally:
-            self.terminate_connection(volume, connector)
+        with self._connection_context(volume) as connection:
+            with self._attach_context(connection) as attach_info:
+                yield attach_info
 
     @infinisdk_to_cinder_exceptions
     def create_volume_from_snapshot(self, volume, snapshot):
@@ -410,3 +684,112 @@ class InfiniboxVolumeDriver(san.SanDriver):
                 init_targ_map[initiator] = target_wwns
 
         return target_wwns, init_targ_map
+
+    @infinisdk_to_cinder_exceptions
+    def create_group(self, context, group):
+        """Creates a group."""
+        # let generic volume group support handle non-cgsnapshots
+        if not vol_utils.is_group_a_cg_snapshot_type(group):
+            raise NotImplementedError()
+        obj = self._system.cons_groups.create(name=self._make_cg_name(group),
+                                              pool=self._get_infinidat_pool())
+        self._set_cinder_object_metadata(obj, group)
+        return {'status': fields.GroupStatus.AVAILABLE}
+
+    @infinisdk_to_cinder_exceptions
+    def delete_group(self, context, group, volumes):
+        """Deletes a group."""
+        # let generic volume group support handle non-cgsnapshots
+        if not vol_utils.is_group_a_cg_snapshot_type(group):
+            raise NotImplementedError()
+        try:
+            infinidat_cg = self._get_infinidat_cg(group)
+        except exception.InvalidGroup:
+            pass      # group not found
+        else:
+            infinidat_cg.safe_delete()
+        for volume in volumes:
+            self.delete_volume(volume)
+        return None, None
+
+    @infinisdk_to_cinder_exceptions
+    def update_group(self, context, group,
+                     add_volumes=None, remove_volumes=None):
+        """Updates a group."""
+        # let generic volume group support handle non-cgsnapshots
+        if not vol_utils.is_group_a_cg_snapshot_type(group):
+            raise NotImplementedError()
+        add_volumes = add_volumes if add_volumes else []
+        remove_volumes = remove_volumes if remove_volumes else []
+        infinidat_cg = self._get_infinidat_cg(group)
+        for vol in add_volumes:
+            infinidat_volume = self._get_infinidat_volume(vol)
+            infinidat_cg.add_member(infinidat_volume)
+        for vol in remove_volumes:
+            infinidat_volume = self._get_infinidat_volume(vol)
+            infinidat_cg.remove_member(infinidat_volume)
+        return None, None, None
+
+    @infinisdk_to_cinder_exceptions
+    def create_group_from_src(self, context, group, volumes,
+                              group_snapshot=None, snapshots=None,
+                              source_group=None, source_vols=None):
+        """Creates a group from source."""
+        # The source is either group_snapshot+snapshots or
+        # source_group+source_vols. The target is group+voluems
+        # we assume the source (source_vols / snapshots) are in the same
+        # order as the target (volumes)
+
+        # let generic volume group support handle non-cgsnapshots
+        if not vol_utils.is_group_a_cg_snapshot_type(group):
+            raise NotImplementedError()
+        self.create_group(context, group)
+        new_infinidat_group = self._get_infinidat_cg(group)
+        if group_snapshot is not None and snapshots is not None:
+            for volume, snapshot in zip(volumes, snapshots):
+                self.create_volume_from_snapshot(volume, snapshot)
+                new_infinidat_volume = self._get_infinidat_volume(volume)
+                new_infinidat_group.add_member(new_infinidat_volume)
+        elif source_group is not None and source_vols is not None:
+            for volume, src_vol in zip(volumes, source_vols):
+                self.create_cloned_volume(volume, src_vol)
+                new_infinidat_volume = self._get_infinidat_volume(volume)
+                new_infinidat_group.add_member(new_infinidat_volume)
+        return None, None
+
+    @infinisdk_to_cinder_exceptions
+    def create_group_snapshot(self, context, group_snapshot, snapshots):
+        """Creates a group_snapshot."""
+        # let generic volume group support handle non-cgsnapshots
+        if not vol_utils.is_group_a_cg_snapshot_type(group_snapshot):
+            raise NotImplementedError()
+        infinidat_cg = self._get_infinidat_cg(group_snapshot.group)
+        group_snap_name = self._make_group_snapshot_name(group_snapshot)
+        new_group = infinidat_cg.create_snapshot(name=group_snap_name)
+        # update the names of the individual snapshots in the new snapgroup
+        # to match the names we use for cinder snapshots
+        for infinidat_snapshot in new_group.get_members():
+            parent_name = infinidat_snapshot.get_parent().get_name()
+            for cinder_snapshot in snapshots:
+                if cinder_snapshot.volume_id in parent_name:
+                    snapshot_name = self._make_snapshot_name(cinder_snapshot)
+                    infinidat_snapshot.update_name(snapshot_name)
+        return None, None
+
+    @infinisdk_to_cinder_exceptions
+    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+        """Deletes a group_snapshot."""
+        # let generic volume group support handle non-cgsnapshots
+        if not vol_utils.is_group_a_cg_snapshot_type(group_snapshot):
+            raise NotImplementedError()
+        cgsnap_name = self._make_group_snapshot_name(group_snapshot)
+        infinidat_cgsnap = self._system.cons_groups.safe_get(name=cgsnap_name)
+        if infinidat_cgsnap is not None:
+            if not infinidat_cgsnap.is_snapgroup():
+                msg = _('Group "%s" is not a snapshot group') % cgsnap_name
+                LOG.error(msg)
+                raise exception.InvalidGroupSnapshot(message=msg)
+            infinidat_cgsnap.safe_delete()
+        for snapshot in snapshots:
+            self.delete_snapshot(snapshot)
+        return None, None

@@ -10,9 +10,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-# cinder documentation build configuration file, created by
-# sphinx-quickstart on Sat May  1 15:17:47 2010.
-#
 # This file is execfile()d with the current directory set
 # to its containing dir.
 #
@@ -25,7 +22,6 @@
 import eventlet
 import os
 import sys
-import warnings
 
 from cinder import objects
 
@@ -60,15 +56,22 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.coverage',
               'sphinx.ext.ifconfig',
               'sphinx.ext.graphviz',
-              'oslosphinx',
+              'sphinx.ext.todo',
+              'openstackdocstheme',
               'stevedore.sphinxext',
               'oslo_config.sphinxconfiggen',
               'ext.cinder_driverlist',
+              'oslo_policy.sphinxext',
+              'oslo_policy.sphinxpolicygen',
               ]
 
 config_generator_config_file = (
-    '../../cinder/config/cinder-config-generator.conf')
+    '../../tools/config/cinder-config-generator.conf')
 sample_config_basename = '_static/cinder'
+
+policy_generator_config_file = (
+    '../../tools/config/cinder-policy-generator.conf')
+sample_policy_basename = '_static/cinder'
 
 # autodoc generation is a bit aggressive and a nuisance
 # when doing heavy text edit cycles. Execute "export SPHINX_DEBUG=1"
@@ -79,14 +82,7 @@ if not os.getenv('SPHINX_DEBUG'):
 todo_include_todos = True
 
 # Add any paths that contain templates here, relative to this directory.
-# Changing the path so that the Hudson build output contains GA code
-# and the source docs do not contain the code so local, offline sphinx builds
-# are "clean."
 templates_path = []
-if os.getenv('HUDSON_PUBLISH_DOCS'):
-    templates_path = ['_ga', '_templates']
-else:
-    templates_path = ['_templates']
 
 # The suffix of source filenames.
 source_suffix = '.rst'
@@ -98,7 +94,10 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = u'cinder'
+repository_name = 'openstack/cinder'
+bug_project = 'cinder'
+bug_tag = 'doc'
+project = u'Cinder'
 copyright = u'2010-present, OpenStack Foundation'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -167,7 +166,7 @@ man_pages = [
 # The theme to use for HTML and HTML Help pages.  Major themes that come with
 # Sphinx are currently 'default' and 'sphinxdoc'.
 # html_theme_path = ["."]
-# html_theme = '_theme'
+html_theme = 'openstackdocs'
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
@@ -200,15 +199,7 @@ html_static_path = ['_static']
 
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
 # using the given strftime format.
-# html_last_updated_fmt = '%b %d, %Y'
-git_cmd = ["git", "log", "--pretty=format:%ad, commit %h", "--date=local",
-           "-n1"]
-try:
-    import subprocess
-    html_last_updated_fmt = subprocess.check_output(git_cmd).decode('utf-8')
-except Exception:
-    warnings.warn('Cannot get last updated time from git repository. '
-                  'Not setting "html_last_updated_fmt".')
+html_last_updated_fmt = '%Y-%m-%d %H:%M'
 
 # If true, SmartyPants will be used to convert quotes and dashes to
 # typographically correct entities.

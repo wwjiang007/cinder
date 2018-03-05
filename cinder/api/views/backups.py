@@ -56,7 +56,7 @@ class ViewBuilder(common.ViewBuilder):
 
     def detail(self, request, backup):
         """Detailed view of a single backup."""
-        return {
+        backup_dict = {
             'backup': {
                 'id': backup.get('id'),
                 'status': backup.get('status'),
@@ -78,6 +78,8 @@ class ViewBuilder(common.ViewBuilder):
             }
         }
 
+        return backup_dict
+
     def _list_view(self, func, request, backups, backup_count):
         """Provide a view for a list of backups."""
         backups_list = [func(request, backup)['backup'] for backup in backups]
@@ -89,6 +91,9 @@ class ViewBuilder(common.ViewBuilder):
 
         if backups_links:
             backups_dict['backups_links'] = backups_links
+
+        if backup_count is not None:
+            backups_dict['count'] = backup_count
 
         return backups_dict
 

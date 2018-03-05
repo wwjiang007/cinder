@@ -22,17 +22,19 @@ Cinder Volume driver for Fujitsu ETERNUS DX S3 series.
 import ast
 import base64
 import hashlib
-import six
 import time
-from xml.etree.ElementTree import parse
 
-from cinder import exception
-from cinder.i18n import _
+from defusedxml import ElementTree as ET
 from oslo_concurrency import lockutils
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_service import loopingcall
 from oslo_utils import units
+import six
+
+from cinder import exception
+from cinder.i18n import _
+from cinder.volume import configuration as conf
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -134,7 +136,7 @@ RETCODE_dic = {
     '35347': 'Copy table size is not enough',
 }
 
-CONF.register_opts(FJ_ETERNUS_DX_OPT_opts)
+CONF.register_opts(FJ_ETERNUS_DX_OPT_opts, group=conf.SHARED_CONF_GROUP)
 
 
 class FJDXCommon(object):
@@ -727,7 +729,8 @@ class FJDXCommon(object):
                   {'vid': volume['id'], 'prtcl': self.protocol, 'frc': force})
 
         self.conn = self._get_eternus_connection()
-        map_exist = self._unmap_lun(volume, connector)
+        force = True if not connector else force
+        map_exist = self._unmap_lun(volume, connector, force)
 
         LOG.debug('terminate_connection, map_exist: %s.', map_exist)
         return map_exist
@@ -1097,7 +1100,7 @@ class FJDXCommon(object):
         LOG.debug("_get_drvcfg, input[%(filename)s][%(tagname)s].",
                   {'filename': filename, 'tagname': tagname})
 
-        tree = parse(filename)
+        tree = ET.parse(filename)
         elem = tree.getroot()
 
         ret = None
@@ -1283,7 +1286,7 @@ class FJDXCommon(object):
                   'parameters: %(c)s, '
                   'Return code: %(rc)s, '
                   'Error: %(errordesc)s, '
-                  'Retrun data: %(retdata)s.',
+                  'Return data: %(retdata)s.',
                   {'a': classname,
                    'b': instanceNameList,
                    'c': param_dict,
@@ -1983,7 +1986,7 @@ class FJDXCommon(object):
 
         iscsi_properties_list = []
         iscsiip_list = self._get_drvcfg('EternusISCSIIP', multiple=True)
-        iscsi_port = self.configuration.iscsi_port
+        iscsi_port = self.configuration.target_port
 
         LOG.debug('_get_eternus_iscsi_properties, iplist: %s.', iscsiip_list)
 

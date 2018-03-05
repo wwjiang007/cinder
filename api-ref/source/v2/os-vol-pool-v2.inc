@@ -10,20 +10,19 @@ to the scheduler service.
 List back-end storage pools
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/scheduler-stats/get_pools
+.. rest_method::  GET /v2/{project_id}/scheduler-stats/get_pools
 
 Lists all back-end storage pools.
 
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - detail: detail
 
 Response Parameters

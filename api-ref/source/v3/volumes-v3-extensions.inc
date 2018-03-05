@@ -15,7 +15,8 @@ Lists Block Storage API extensions.
 
 
 Normal response codes: 200
-Error response codes:300,
+
+Error response codes: 300
 
 
 Request
@@ -32,7 +33,7 @@ Response Parameters
 .. rest_parameters:: parameters.yaml
 
    - updated: updated
-   - description: description
+   - description: description_7
    - links: links
    - namespace: namespace
    - alias: alias

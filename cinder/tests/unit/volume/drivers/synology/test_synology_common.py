@@ -16,8 +16,12 @@
 """Tests for the Synology iSCSI volume driver."""
 
 import copy
+import json
 import math
 
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import rsa
 import mock
 from oslo_utils import units
 import requests
@@ -209,6 +213,115 @@ class SynoSessionTestCase(test.TestCase):
         result = self.session.query(FAKE_API)
         self.assertIsNone(result)
 
+    def test__random_AES_passphrase(self):
+        lengths_to_test = [0, 1, 10, 128, 501, 1024, 4096]
+        for test_length in lengths_to_test:
+            self.assertEqual(
+                test_length,
+                len(self.session._random_AES_passphrase(test_length))
+            )
+
+    def test__encrypt_RSA(self):
+        # Initialize a fixed 1024 bit public/private key pair
+        public_numbers = rsa.RSAPublicNumbers(
+            int('10001', 16),
+            int('c42eadf905d47388d84baeec2d5391ba7f91b35912933032c9c8a32d6358'
+                '9cef1dfe532138adfad41fd41910cd12fbc05b8876f70aa1340fccf3227d'
+                '087d1e47256c60ae49abee7c779815ec085265518791da38168a0597091d'
+                '4c6ff10c0fa6616f250b85edfb4066f655695e304c0dc40c26fc11541e4c'
+                '1be47771fcc1d257cccbb656015c5daed64aad7c8ae024f82531b7e637f4'
+                '87530b77498d1bc7247687541fbbaa01112866da06f30185dde15131e89e'
+                '27b30f07f10ddef23dd4da7bf3e216c733a4004415c9d1dd9bd5032e8b55'
+                '4eb56efa9cd5cd1b416e0e55c903536787454ca3d3aba87edb70768f630c'
+                'beab3781848ff5ee40edfaee57ac87c9', 16)
+        )
+        private_numbers = rsa.RSAPrivateNumbers(
+            int('f0aa7e45ffb23ca683e1b01a9e1d77e5affaf9afa0094fb1eb89a3c8672b'
+                '43ab9beb11e4ecdd2c8f88738db56be4149c55c28379480ac68a5727ba28'
+                '4a47565579dbf083167a2845f5f267598febde3f7b12ba10da32ad2edff8'
+                '4efd019498e0d8e03f6ddb8a5e80cdb862da9c0c921571fdb56ae7e0480a'
+                'de846e328517aa23', 16),
+            int('d0ae9ce41716c4bdac074423d57e540b6f48ee42d9b06bdac3b3421ea2ae'
+                'e21088b3ae50acfe168edefda722dc15bc456bba76a98b8035ffa4da12dc'
+                'a92bad582c935791f9a48b416f53c728fd1866c8ecf2ca00dfa667a962d3'
+                'c9818cce540c5e9d2ef8843c5adfde0938ac8b5e2c592838c422ffac43ff'
+                '4a4907c129de7723', 16),
+            int('3733cf5e58069cefefb4f4269ee67a0619695d26fe340e86ec0299efe699'
+                '83a741305421eff9fcaf7db947c8537c38fcba84debccaefeb5f5ad33b6c'
+                '255c578dbb7910875a5197cccc362e4cf9567e0dfff0c98fa8bff3acb932'
+                'd6545566886ccfd3df7fab92f874f9c3eceab6472ecf5ccff2945127f352'
+                '8532b76d8aaadb4dbcf0e5bae8c9c8597511e0771942f12e29bbee1ceef5'
+                '4a6ba97e0096354b13ae4ca22e9be1a551a1bc8db9392de6bbad99b956b5'
+                'bb4b7f5094086e6eefd432066102a228bc18012cc31a7777e2e657eb115a'
+                '9d718d413f2bd7a448a783c049afaaf127486b2c17feebb930e7ac8e6a07'
+                'd9c843beedfa8cec52e1aba98099baa5', 16),
+            int('c8ab1050e36c457ffe550f56926235d7b18d8de5af86340a413fe9edae80'
+                '77933e9599bd0cf73a318feff1c7c4e74f7c2f51d9f82566beb71906ca04'
+                'd0327d3d16379a6a633286241778004ec05f46581e11b64d58f28a4e9c77'
+                '59bd423519e7d94dd9f58ae9ebf47013ff71124eb4fbe6a94a3c928d02e4'
+                'f536ecff78d40b8b', 16),
+            int('5bb873a2d8f71bf015dd77b89c4c931a1786a19a665de179dccc3c4284d4'
+                '82ee2b7776256573a46c955c3d8ad7db01ce2d645e6574b81c83c96c4420'
+                '1286ed00b54ee98d72813ce7bccbc0dca629847bc99188f1cb5b3372c2ca'
+                '3d6620824b74c85d23d8fd1e1dff09735a22947b06d90511b63b7fceb270'
+                '51b139a45007c4ab', 16),
+            int('cfeff2a88112512b327999eb926a0564c431ebed2e1456f51d274e4e6d7d'
+                'd75d5b26339bbca2807aa71008e9a08bd9fa0e53e3960e3b6e8c6e1a46d2'
+                'b8e89b218d3b453f7ed0020504d1679374cd884ae3bb3b88b54fb429f082'
+                'fa4e9d3f296c59d5d89fe16b0931dcf062bc309cf122c722c13ffb0fa0c5'
+                '77d0abddcc655017', 16),
+            public_numbers
+        )
+        private_key = private_numbers.private_key(default_backend())
+
+        # run the _encrypt_RSA method
+        original_text = 'test _encrypt_RSA'
+        encrypted_text = self.session._encrypt_RSA(
+            public_numbers.n,
+            public_numbers.e,
+            original_text
+        )
+
+        # decrypt the output using the corresponding private key
+        decrypted_bytes = private_key.decrypt(
+            encrypted_text,
+            padding.PKCS1v15()
+        )
+        decrypted_text = decrypted_bytes.decode('ascii')
+        self.assertEqual(original_text, decrypted_text)
+
+    def test__encrypt_params(self):
+        # setup mock
+        cipherkey = 'cipherkey'
+        self.session._get_enc_info = mock.Mock(return_value={
+            'public_key': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'cipherkey': cipherkey,
+            'ciphertoken': 'ciphertoken',
+            'server_time': 1111111111,
+        })
+        self.session._encrypt_RSA = mock.Mock(
+            return_value=b'1234567890abcdef'
+        )
+        self.session._encrypt_AES = mock.Mock(
+            return_value=b'fedcba0987654321'
+        )
+
+        # call the method
+        params = {
+            'account': 'account',
+            'passwd': 'passwd',
+            'session': 'sessionid',
+            'format': 'sid'
+        }
+        encrypted_data = self.session._encrypt_params(params)
+
+        # check the format of the output
+        self.assertDictEqual(
+            json.loads(encrypted_data[cipherkey]),
+            {'rsa': 'MTIzNDU2Nzg5MGFiY2RlZg==',
+             'aes': 'ZmVkY2JhMDk4NzY1NDMyMQ=='}
+        )
+
 
 class SynoAPIRequestTestCase(test.TestCase):
     @mock.patch('requests.post')
@@ -233,9 +346,6 @@ class SynoAPIRequestTestCase(test.TestCase):
                                          self.device_id)
         self.request._APIRequest__session._sid = 'sid'
         self.request._APIRequest__session.__class__.__del__ = lambda x: x
-
-    def tearDown(self):
-        super(SynoAPIRequestTestCase, self).tearDown()
 
     @mock.patch.object(common, 'Session')
     def test_new_session(self, _mock_session):
@@ -350,14 +460,14 @@ class SynoCommonTestCase(test.TestCase):
         self.common.vendor_name = 'Synology'
         self.common.driver_type = 'iscsi'
         self.common.volume_backend_name = 'DiskStation'
-        self.common.iscsi_port = 3260
+        self.common.target_port = 3260
 
     def setup_configuration(self):
         config = mock.Mock(spec=conf.Configuration)
         config.use_chap_auth = False
-        config.iscsi_protocol = 'iscsi'
-        config.iscsi_ip_address = IP
-        config.iscsi_port = 3260
+        config.target_protocol = 'iscsi'
+        config.target_ip_address = IP
+        config.target_port = 3260
         config.synology_admin_port = 5000
         config.synology_username = 'admin'
         config.synology_password = 'admin'
@@ -365,7 +475,7 @@ class SynoCommonTestCase(test.TestCase):
         config.synology_one_time_pass = '123456'
         config.synology_pool_name = POOL_NAME
         config.volume_dd_blocksize = 1
-        config.iscsi_target_prefix = 'iqn.2000-01.com.synology:'
+        config.target_prefix = 'iqn.2000-01.com.synology:'
         config.chap_username = 'abcd'
         config.chap_password = 'qwerty'
         config.reserved_percentage = 0
@@ -379,7 +489,7 @@ class SynoCommonTestCase(test.TestCase):
     @mock.patch.object(common, 'APIRequest')
     def test___init__(self, _request, _get_node_uuid):
         self.conf.safe_get = (mock.Mock(side_effect=[
-            self.conf.iscsi_ip_address,
+            self.conf.target_ip_address,
             '',
             '']))
 
@@ -708,7 +818,7 @@ class SynoCommonTestCase(test.TestCase):
             'success': True
         }
         trg_name = self.common.TARGET_NAME_PREFIX + VOLUME['id']
-        iqn = self.conf.iscsi_target_prefix + trg_name
+        iqn = self.conf.target_prefix + trg_name
         self.conf.use_chap_auth = True
         self.common.exec_webapi = mock.Mock(return_value=out)
         self.conf.safe_get = (
@@ -716,7 +826,7 @@ class SynoCommonTestCase(test.TestCase):
                       self.conf.use_chap_auth,
                       'abcd',
                       'qwerty',
-                      self.conf.iscsi_target_prefix]))
+                      self.conf.target_prefix]))
         result = self.common._target_create(VOLUME['id'])
         (self.common.exec_webapi.
             assert_called_with('SYNO.Core.ISCSI.Target',
@@ -738,12 +848,12 @@ class SynoCommonTestCase(test.TestCase):
             'success': True
         }
         trg_name = self.common.TARGET_NAME_PREFIX + VOLUME['id']
-        iqn = self.conf.iscsi_target_prefix + trg_name
+        iqn = self.conf.target_prefix + trg_name
         self.common.exec_webapi = mock.Mock(return_value=out)
         self.conf.safe_get = (
             mock.Mock(side_effect=[
                       self.conf.use_chap_auth,
-                      self.conf.iscsi_target_prefix]))
+                      self.conf.target_prefix]))
         result = self.common._target_create(VOLUME['id'])
         (self.common.exec_webapi.
             assert_called_with('SYNO.Core.ISCSI.Target',
@@ -770,9 +880,9 @@ class SynoCommonTestCase(test.TestCase):
         self.conf.safe_get = (
             mock.Mock(side_effect=[
                       self.conf.use_chap_auth,
-                      self.conf.iscsi_target_prefix,
+                      self.conf.target_prefix,
                       self.conf.use_chap_auth,
-                      self.conf.iscsi_target_prefix]))
+                      self.conf.target_prefix]))
 
         self.assertRaises(exception.VolumeDriverException,
                           self.common._target_create,
@@ -1177,11 +1287,11 @@ class SynoCommonTestCase(test.TestCase):
 
     def test_get_ip(self):
         result = self.common.get_ip()
-        self.assertEqual(self.conf.iscsi_ip_address, result)
+        self.assertEqual(self.conf.target_ip_address, result)
 
     def test_get_provider_location(self):
         self.common.get_ip = (
-            mock.Mock(return_value=self.conf.iscsi_ip_address))
+            mock.Mock(return_value=self.conf.target_ip_address))
         self.conf.safe_get = (
             mock.Mock(return_value=['10.0.0.2', '10.0.0.3']))
         expected = ('10.0.0.1:3260;10.0.0.2:3260;10.0.0.3:3260' +
@@ -1245,7 +1355,7 @@ class SynoCommonTestCase(test.TestCase):
             'total_capacity_gb': 100,
             'provisioned_capacity_gb': 350,
             'max_over_subscription_ratio': 20,
-            'iscsi_ip_address': '10.0.0.1',
+            'target_ip_address': '10.0.0.1',
             'pool_name': 'volume1',
             'backend_info':
                 'Synology:iscsi:72003c93-2db2-4f00-a169-67c5eae86bb1'

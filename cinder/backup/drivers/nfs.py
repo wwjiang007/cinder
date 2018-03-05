@@ -16,13 +16,16 @@
 
 """Implementation of a backup service that uses NFS storage as the backend."""
 
+import os
+import stat
+
 from os_brick.remotefs import remotefs as remotefs_brick
+from oslo_concurrency import processutils as putils
 from oslo_config import cfg
 from oslo_log import log as logging
 
 from cinder.backup.drivers import posix
 from cinder import exception
-from cinder.i18n import _
 from cinder import interface
 from cinder import utils
 
@@ -49,33 +52,52 @@ CONF.register_opts(nfsbackup_service_opts)
 class NFSBackupDriver(posix.PosixBackupDriver):
     """Provides backup, restore and delete using NFS supplied repository."""
 
-    def __init__(self, context, db_driver=None):
-        self._check_configuration()
+    def __init__(self, context, db=None):
         self.backup_mount_point_base = CONF.backup_mount_point_base
         self.backup_share = CONF.backup_share
         self.mount_options = CONF.backup_mount_options
+        self._execute = putils.execute
+        self._root_helper = utils.get_root_helper()
         backup_path = self._init_backup_repo_path()
         LOG.debug("Using NFS backup repository: %s", backup_path)
         super(NFSBackupDriver, self).__init__(context,
                                               backup_path=backup_path)
 
-    @staticmethod
-    def _check_configuration():
+    def check_for_setup_error(self):
         """Raises error if any required configuration flag is missing."""
         required_flags = ['backup_share']
         for flag in required_flags:
-            if not getattr(CONF, flag, None):
-                raise exception.ConfigNotFound(_(
-                    'Required flag %s is not set') % flag)
+            val = getattr(CONF, flag, None)
+            if not val:
+                raise exception.InvalidConfigurationValue(option=flag,
+                                                          value=val)
 
     def _init_backup_repo_path(self):
         remotefsclient = remotefs_brick.RemoteFsClient(
             'nfs',
-            utils.get_root_helper(),
+            self._root_helper,
             nfs_mount_point_base=self.backup_mount_point_base,
             nfs_mount_options=self.mount_options)
         remotefsclient.mount(self.backup_share)
-        return remotefsclient.get_mount_point(self.backup_share)
+
+        # Ensure we can write to this share
+        mount_path = remotefsclient.get_mount_point(self.backup_share)
+
+        group_id = os.getegid()
+        current_group_id = utils.get_file_gid(mount_path)
+        current_mode = utils.get_file_mode(mount_path)
+
+        if group_id != current_group_id:
+            cmd = ['chgrp', group_id, mount_path]
+            self._execute(*cmd, root_helper=self._root_helper,
+                          run_as_root=True)
+
+        if not (current_mode & stat.S_IWGRP):
+            cmd = ['chmod', 'g+w', mount_path]
+            self._execute(*cmd, root_helper=self._root_helper,
+                          run_as_root=True)
+
+        return mount_path
 
 
 def get_backup_driver(context):

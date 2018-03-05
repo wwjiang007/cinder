@@ -17,13 +17,12 @@ to limit roles.
 List consistency groups
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/consistencygroups
+.. rest_method::  GET /v2/{project_id}/consistencygroups
 
 Lists consistency groups.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -31,7 +30,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
@@ -56,7 +56,7 @@ Response Example
 Create consistency group
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/consistencygroups
+.. rest_method::  POST /v2/{project_id}/consistencygroups
 
 Creates a consistency group.
 
@@ -68,11 +68,17 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - description: description_6
    - availability_zone: availability_zone
    - volume_types: volume_types_2
    - name: name_15
+
+Request Example
+---------------
+
+.. literalinclude:: ./samples/consistency-group-create-request.json
+   :language: javascript
 
 Response
 --------
@@ -87,12 +93,6 @@ Response
    - name: name_15
    - id: consistencygroup_id_1
 
-Request Example
----------------
-
-.. literalinclude:: ./samples/consistency-group-create-request.json
-   :language: javascript
-
 Response Example
 ----------------
 
@@ -102,19 +102,18 @@ Response Example
 Show consistency group details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/consistencygroups/{consistencygroup_id}
+.. rest_method::  GET /v2/{project_id}/consistencygroups/{consistencygroup_id}
 
 Shows details for a consistency group.
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - consistencygroup_id: consistencygroup_id
 
 Response Parameters
@@ -140,7 +139,7 @@ Response Example
 Create consistency group from source
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/consistencygroups/create_from_src
+.. rest_method::  POST /v2/{project_id}/consistencygroups/create_from_src
 
 Creates a consistency group from source.
 
@@ -157,9 +156,9 @@ Request
    - description: description
    - cgsnapshot_id: cgsnapshot_id
    - source_cgid: source_cgid
-   - project_id: project_id
+   - project_id: project_id_path
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id
 
 Request Example
 ---------------
@@ -171,7 +170,7 @@ Request Example
 Delete consistency group
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/consistencygroups/{consistencygroup_id}/delete
+.. rest_method::  POST /v2/{project_id}/consistencygroups/{consistencygroup_id}/delete
 
 Deletes a consistency group.
 
@@ -184,7 +183,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - force: force
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - consistencygroup_id: consistencygroup_id
 
 Request Example
@@ -197,13 +196,12 @@ Request Example
 List consistency groups with details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/consistencygroups/detail
+.. rest_method::  GET /v2/{project_id}/consistencygroups/detail
 
 Lists consistency groups with details.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -211,7 +209,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
+   - all_tenants: all-tenants
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
@@ -241,7 +240,7 @@ Response Example
 Update consistency group
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{tenant_id}/consistencygroups/{consistencygroup_id}/update
+.. rest_method::  PUT /v2/{project_id}/consistencygroups/{consistencygroup_id}/update
 
 Updates a consistency group.
 
@@ -257,7 +256,7 @@ Request
    - description: description
    - add_volumes: add_volumes
    - name: name
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - consistencygroup_id: consistencygroup_id
 
 Request Example

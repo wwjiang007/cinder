@@ -21,8 +21,7 @@ import mock
 from cinder import context
 from cinder import db
 from cinder import exception
-from cinder.message import defined_messages
-from cinder.message import resource_types
+from cinder.message import message_field
 from cinder import objects
 from cinder.objects import fields
 from cinder.tests import fake_driver
@@ -195,7 +194,10 @@ class VolumeConnectionTestCase(base.BaseVolumeTestCase):
                       'specs': {
                           'write_iops_sec_per_gb': 5,
                           'read_iops_sec_per_gb': 7700,
-                          'total_iops_sec_per_gb': 300000}
+                          'total_iops_sec_per_gb': 300000,
+                          'read_bytes_sec_per_gb': 10,
+                          'write_bytes_sec_per_gb': 40,
+                          'total_bytes_sec_per_gb': 1048576}
                       }
 
         with mock.patch.object(cinder.volume.volume_types,
@@ -207,7 +209,10 @@ class VolumeConnectionTestCase(base.BaseVolumeTestCase):
             mock_get_target.return_value = None
             qos_specs_expected = {'write_iops_sec': 15,
                                   'read_iops_sec': 23100,
-                                  'total_iops_sec': 900000}
+                                  'total_iops_sec': 900000,
+                                  'read_bytes_sec': 30,
+                                  'write_bytes_sec': 120,
+                                  'total_bytes_sec': 3145728}
             # initialize_connection() passes qos_specs that is designated to
             # be consumed by front-end or both front-end and back-end
             conn_info = self.volume.initialize_connection(
@@ -279,6 +284,12 @@ class VolumeAttachDetachTestCase(base.BaseVolumeTestCase):
                                                instance_uuid, None,
                                                mountpoint, 'ro',
                                                volume=volume_passed)
+        attachment2 = self.volume.attach_volume(self.user_context,
+                                                volume_id,
+                                                instance_uuid, None,
+                                                mountpoint, 'ro',
+                                                volume=volume_passed)
+        self.assertEqual(attachment.id, attachment2.id)
         vol = objects.Volume.get_by_id(self.context, volume_id)
         self.assertEqual("in-use", vol.status)
         self.assertEqual(fields.VolumeAttachStatus.ATTACHED,
@@ -315,6 +326,15 @@ class VolumeAttachDetachTestCase(base.BaseVolumeTestCase):
                           db.volume_get,
                           self.context,
                           volume_id)
+
+    @mock.patch('cinder.volume.manager.LOG', mock.Mock())
+    def test_initialize_connection(self):
+        volume = mock.Mock(save=mock.Mock(side_effect=Exception))
+        with mock.patch.object(self.volume, 'driver') as driver_mock:
+            self.assertRaises(exception.ExportFailure,
+                              self.volume.initialize_connection, self.context,
+                              volume, mock.Mock())
+        driver_mock.remove_export.assert_called_once_with(mock.ANY, volume)
 
     def test_run_attach_detach_2volumes_for_instance(self):
         """Make sure volume can be attached and detached from instance."""
@@ -1018,9 +1038,9 @@ class VolumeAttachDetachTestCase(base.BaseVolumeTestCase):
 
         # Assert a user message was created
         self.volume.message_api.create.assert_called_once_with(
-            self.context, defined_messages.EventIds.ATTACH_READONLY_VOLUME,
-            self.context.project_id, resource_type=resource_types.VOLUME,
-            resource_uuid=volume['id'])
+            self.context, message_field.Action.ATTACH_VOLUME,
+            resource_uuid=volume['id'],
+            exception=mock.ANY)
 
         attachment = objects.VolumeAttachmentList.get_all_by_volume_id(
             context.get_admin_context(), volume_id)[0]

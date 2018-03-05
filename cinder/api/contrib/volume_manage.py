@@ -18,19 +18,18 @@ from six.moves import http_client
 from cinder.api import common
 from cinder.api.contrib import resource_common_manage
 from cinder.api import extensions
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
 from cinder.api.v2.views import volumes as volume_views
 from cinder.api.views import manageable_volumes as list_manageable_view
 from cinder import exception
 from cinder.i18n import _
+from cinder.policies import manageable_volumes as policy
 from cinder import utils
 from cinder import volume as cinder_volume
 from cinder.volume import volume_types
 
 LOG = logging.getLogger(__name__)
-authorize_manage = extensions.extension_authorizer('volume', 'volume_manage')
-authorize_list_manageable = extensions.extension_authorizer('volume',
-                                                            'list_manageable')
 
 
 class VolumeManageController(wsgi.Controller):
@@ -62,11 +61,10 @@ class VolumeManageController(wsgi.Controller):
         .. code-block:: json
 
          {
-           'volume':
-           {
-             'host': <Cinder host on which the existing storage resides>,
-             'cluster': <Cinder cluster on which the storage resides>,
-             'ref':  <Driver-specific reference to existing storage object>,
+           "volume": {
+             "host": "<Cinder host on which the existing storage resides>",
+             "cluster": "<Cinder cluster on which the storage resides>",
+             "ref": "<Driver-specific reference to existing storage object>"
            }
          }
 
@@ -99,7 +97,7 @@ class VolumeManageController(wsgi.Controller):
 
         """
         context = req.environ['cinder.context']
-        authorize_manage(context)
+        context.authorize(policy.MANAGE_POLICY)
 
         self.assert_valid_body(body, 'volume')
 
@@ -111,7 +109,8 @@ class VolumeManageController(wsgi.Controller):
         if 'ref' not in volume:
             raise exception.MissingRequired(element='ref')
 
-        cluster_name, host = common.get_cluster_host(req, volume, '3.16')
+        cluster_name, host = common.get_cluster_host(
+            req, volume, mv.VOLUME_MIGRATE_CLUSTER)
 
         LOG.debug('Manage volume request body: %s', body)
 
@@ -143,7 +142,9 @@ class VolumeManageController(wsgi.Controller):
                                                          volume['ref'],
                                                          **kwargs)
         except exception.ServiceNotFound:
-            msg = _("Host '%s' not found") % volume['host']
+            msg = _("%(name)s '%(value)s' not found") % {
+                'name': 'Host' if host else 'Cluster',
+                'value': host or cluster_name}
             raise exception.ServiceUnavailable(message=msg)
 
         utils.add_visible_admin_metadata(new_volume)
@@ -154,7 +155,7 @@ class VolumeManageController(wsgi.Controller):
     def index(self, req):
         """Returns a summary list of volumes available to manage."""
         context = req.environ['cinder.context']
-        authorize_list_manageable(context)
+        context.authorize(policy.LIST_MANAGEABLE_POLICY)
         return resource_common_manage.get_manageable_resources(
             req, False, self.volume_api.get_manageable_volumes,
             self._list_manageable_view)
@@ -163,7 +164,7 @@ class VolumeManageController(wsgi.Controller):
     def detail(self, req):
         """Returns a detailed list of volumes available to manage."""
         context = req.environ['cinder.context']
-        authorize_list_manageable(context)
+        context.authorize(policy.LIST_MANAGEABLE_POLICY)
         return resource_common_manage.get_manageable_resources(
             req, True, self.volume_api.get_manageable_volumes,
             self._list_manageable_view)

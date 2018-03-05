@@ -16,23 +16,23 @@
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
 
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
 from cinder.api.v3.views import workers as workers_view
+from cinder.common import constants
 from cinder import db
 from cinder import exception
 from cinder.i18n import _
 from cinder import objects
 from cinder.objects import cleanable
+from cinder.policies import workers as policy
 from cinder.scheduler import rpcapi as sch_rpc
 from cinder import utils
 
 
 class WorkerController(wsgi.Controller):
     allowed_clean_keys = {'service_id', 'cluster_name', 'host', 'binary',
-                          'is_up', 'disabled', 'resource_id', 'resource_type',
-                          'until'}
-
-    policy_checker = wsgi.Controller.get_policy_checker('workers')
+                          'is_up', 'disabled', 'resource_id', 'resource_type'}
 
     def __init__(self, *args, **kwargs):
         self.sch_api = sch_rpc.SchedulerAPI()
@@ -43,7 +43,7 @@ class WorkerController(wsgi.Controller):
             msg = _('Invalid filter keys: %s') % ', '.join(invalid_keys)
             raise exception.InvalidInput(reason=msg)
 
-        if params.get('binary') not in (None, 'cinder-volume',
+        if params.get('binary') not in (None, constants.VOLUME_BINARY,
                                         'cinder-scheduler'):
             msg = _('binary must be empty or set to cinder-volume or '
                     'cinder-scheduler')
@@ -59,9 +59,11 @@ class WorkerController(wsgi.Controller):
             resource_type = resource_type.title()
             types = cleanable.CinderCleanableObject.cleanable_resource_types
             if resource_type not in types:
-                msg = (_('Resource type %s not valid, must be ') %
-                       resource_type)
-                msg = utils.build_or_str(types, msg + '%s.')
+                valid_types = utils.build_or_str(types)
+                msg = _('Resource type %(resource_type)s not valid,'
+                        ' must be %(valid_types)s')
+                msg = msg % {"resource_type": resource_type,
+                             "valid_types": valid_types}
                 raise exception.InvalidInput(reason=msg)
             params['resource_type'] = resource_type
 
@@ -98,12 +100,13 @@ class WorkerController(wsgi.Controller):
 
         return params
 
-    @wsgi.Controller.api_version('3.24')
+    @wsgi.Controller.api_version(mv.WORKERS_CLEANUP)
     @wsgi.response(202)
     def cleanup(self, req, body=None):
         """Do the cleanup on resources from a specific service/host/node."""
         # Let the wsgi middleware convert NotAuthorized exceptions
-        ctxt = self.policy_checker(req, 'cleanup')
+        ctxt = req.environ['cinder.context']
+        ctxt.authorize(policy.CLEAN_POLICY)
         body = body or {}
 
         params = self._prepare_params(ctxt, body, self.allowed_clean_keys)

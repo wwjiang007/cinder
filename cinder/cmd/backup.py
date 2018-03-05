@@ -21,14 +21,18 @@ import logging as python_logging
 import shlex
 import sys
 
+# NOTE(geguileo): Monkey patching must go before OSLO.log import, otherwise
+# OSLO.context will not use greenthread thread local and all greenthreads will
+# share the same context.
 import eventlet
+eventlet.monkey_patch()
+
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_privsep import priv_context
 from oslo_reports import guru_meditation_report as gmr
 from oslo_reports import opts as gmr_opts
 
-eventlet.monkey_patch()
 
 from cinder import i18n
 i18n.enable_lazy()
@@ -43,12 +47,21 @@ from cinder import version
 
 CONF = cfg.CONF
 
+# NOTE(mriedem): The default backup driver uses swift and performs read/write
+# operations in a thread. swiftclient will log requests and responses at DEBUG
+# level, which can cause a thread switch and break the backup operation. So we
+# set a default log level of WARN for swiftclient to try and avoid this issue.
+_EXTRA_DEFAULT_LOG_LEVELS = ['swiftclient=WARN']
+
 
 def main():
     objects.register_all()
     gmr_opts.set_defaults(CONF)
     CONF(sys.argv[1:], project='cinder',
          version=version.version_string())
+    logging.set_defaults(
+        default_log_levels=logging.get_default_log_levels() +
+        _EXTRA_DEFAULT_LOG_LEVELS)
     logging.setup(CONF, "cinder")
     python_logging.captureWarnings(True)
     priv_context.init(root_helper=shlex.split(utils.get_root_helper()))

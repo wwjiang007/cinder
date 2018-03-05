@@ -27,16 +27,17 @@ place to ensure re usability and better management of configuration options.
 from oslo_config import cfg
 from oslo_config import types
 
+from cinder.volume import configuration as conf
+
 NETAPP_SIZE_MULTIPLIER_DEFAULT = 1.2
 
 netapp_proxy_opts = [
     cfg.StrOpt('netapp_storage_family',
                default='ontap_cluster',
-               choices=['ontap_7mode', 'ontap_cluster', 'eseries'],
+               choices=['ontap_cluster', 'eseries'],
                help=('The storage family type used on the storage system; '
-                     'valid values are ontap_7mode for using Data ONTAP '
-                     'operating in 7-Mode, ontap_cluster for using '
-                     'clustered Data ONTAP, or eseries for using E-Series.')),
+                     'valid values are ontap_cluster for using clustered '
+                     'Data ONTAP, or eseries for using E-Series.')),
     cfg.StrOpt('netapp_storage_protocol',
                choices=['iscsi', 'fc', 'nfs'],
                help=('The storage protocol to be used on the data path with '
@@ -90,21 +91,6 @@ netapp_cluster_opts = [
                help=('This option specifies the virtual storage server '
                      '(Vserver) name on the storage cluster on which '
                      'provisioning of block storage volumes should occur.')), ]
-
-netapp_7mode_opts = [
-    cfg.StrOpt('netapp_vfiler',
-               help=('The vFiler unit on which provisioning of block storage '
-                     'volumes will be done. This option is only used by the '
-                     'driver when connecting to an instance with a storage '
-                     'family of Data ONTAP operating in 7-Mode. Only use this '
-                     'option when utilizing the MultiStore feature on the '
-                     'NetApp storage system.')),
-    cfg.StrOpt('netapp_partner_backend_name',
-               help=('The name of the config.conf stanza for a Data ONTAP '
-                     '(7-mode) HA partner.  This option is only used by the '
-                     'driver when connecting to an instance with a storage '
-                     'family of Data ONTAP operating in 7-Mode, and it is '
-                     'required if the storage protocol selected is FC.')), ]
 
 netapp_img_cache_opts = [
     cfg.IntOpt('thres_avl_size_perc_start',
@@ -170,7 +156,6 @@ netapp_san_opts = [
                      ' will access a LUN exported from Data ONTAP; it is'
                      ' assigned to the LUN at the time it is created.')),
     cfg.StrOpt('netapp_host_type',
-               deprecated_name='netapp_eseries_host_type',
                help=('This option defines the type of operating system for'
                      ' all initiators that can access a LUN. This information'
                      ' is used when mapping LUNs to individual hosts or'
@@ -213,15 +198,14 @@ netapp_replication_opts = [
                     'during a failover.'), ]
 
 CONF = cfg.CONF
-CONF.register_opts(netapp_proxy_opts)
-CONF.register_opts(netapp_connection_opts)
-CONF.register_opts(netapp_transport_opts)
-CONF.register_opts(netapp_basicauth_opts)
-CONF.register_opts(netapp_cluster_opts)
-CONF.register_opts(netapp_7mode_opts)
-CONF.register_opts(netapp_provisioning_opts)
-CONF.register_opts(netapp_img_cache_opts)
-CONF.register_opts(netapp_eseries_opts)
-CONF.register_opts(netapp_nfs_extra_opts)
-CONF.register_opts(netapp_san_opts)
-CONF.register_opts(netapp_replication_opts)
+CONF.register_opts(netapp_proxy_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_connection_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_transport_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_basicauth_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_cluster_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_provisioning_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_img_cache_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_eseries_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_nfs_extra_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_san_opts, group=conf.SHARED_CONF_GROUP)
+CONF.register_opts(netapp_replication_opts, group=conf.SHARED_CONF_GROUP)

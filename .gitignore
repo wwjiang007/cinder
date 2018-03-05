@@ -8,6 +8,7 @@
 !.gitignore
 !.mailmap
 !.testr.conf
+!.zuul.yaml
 .*.sw?
 AUTHORS
 Authors
@@ -30,6 +31,7 @@ tags
 # Files created by Sphinx build
 doc/build
 doc/source/_static/cinder.conf.sample
+doc/source/_static/cinder.policy.yaml.sample
 doc/source/drivers.rst
 
 #Files created for API reference
@@ -37,3 +39,4 @@ api-ref/build
 
 # Files created by releasenotes build
 releasenotes/build
+contrib/blockbox/.db_data

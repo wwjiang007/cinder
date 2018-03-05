@@ -56,7 +56,6 @@ from __future__ import print_function
 
 
 import logging as python_logging
-import os
 import prettytable
 import sys
 import time
@@ -65,7 +64,6 @@ from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_db.sqlalchemy import migration
 from oslo_log import log as logging
-import oslo_messaging as messaging
 from oslo_utils import timeutils
 
 # Need to register global_opts
@@ -75,15 +73,60 @@ from cinder import context
 from cinder import db
 from cinder.db import migration as db_migration
 from cinder.db.sqlalchemy import api as db_api
+from cinder.db.sqlalchemy import models
 from cinder import exception
 from cinder.i18n import _
 from cinder import objects
 from cinder import rpc
 from cinder import version
+from cinder.volume import rpcapi as volume_rpcapi
 from cinder.volume import utils as vutils
 
 
 CONF = cfg.CONF
+
+
+def _get_non_shared_target_hosts(ctxt):
+    hosts = []
+    numvols_needing_update = 0
+    rpc.init(CONF)
+    rpcapi = volume_rpcapi.VolumeAPI()
+
+    services = objects.ServiceList.get_all_by_topic(ctxt,
+                                                    constants.VOLUME_TOPIC)
+    for service in services:
+        capabilities = rpcapi.get_capabilities(ctxt, service.host, True)
+        if not capabilities.get('shared_targets', True):
+            hosts.append(service.host)
+            numvols_needing_update += db_api.model_query(
+                ctxt, models.Volume).filter_by(
+                    shared_targets=True,
+                    service_uuid=service.uuid).count()
+    return hosts, numvols_needing_update
+
+
+def shared_targets_online_data_migration(ctxt, max_count):
+    """Update existing volumes shared_targets flag based on capabilities."""
+    non_shared_hosts = []
+    completed = 0
+
+    non_shared_hosts, total_vols_to_update = _get_non_shared_target_hosts(ctxt)
+    for host in non_shared_hosts:
+        # We use the api call here instead of going direct to
+        # db query to take advantage of parsing out the host
+        # correctly
+        vrefs = db_api.volume_get_all_by_host(
+            ctxt, host,
+            filters={'shared_targets': True})
+        if len(vrefs) > max_count:
+            del vrefs[-(len(vrefs) - max_count):]
+        max_count -= len(vrefs)
+        for v in vrefs:
+            db.volume_update(
+                ctxt, v['id'],
+                {'shared_targets': 0})
+            completed += 1
+    return total_vols_to_update, completed
 
 
 # Decorators for actions
@@ -205,16 +248,35 @@ class HostCommands(object):
 class DbCommands(object):
     """Class for managing the database."""
 
-    online_migrations = ()
+    online_migrations = (
+        # Added in Queens
+        db.service_uuids_online_data_migration,
+        # Added in Queens
+        db.backup_service_online_migration,
+        # Added in Queens
+        db.volume_service_uuids_online_data_migration,
+        # Added in Queens
+        shared_targets_online_data_migration,
+        # Added in Queens
+        db.attachment_specs_online_data_migration
+    )
 
     def __init__(self):
         pass
 
-    @args('version', nargs='?', default=None,
+    @args('version', nargs='?', default=None, type=int,
           help='Database version')
     def sync(self, version=None):
         """Sync the database up to the most recent version."""
-        return db_migration.db_sync(version)
+        if version is not None and version > db.MAX_INT:
+            print(_('Version should be less than or equal to '
+                    '%(max_version)d.') % {'max_version': db.MAX_INT})
+            sys.exit(1)
+        try:
+            return db_migration.db_sync(version)
+        except db_exc.DBMigrationError as ex:
+            print("Error during database migration: %s" % ex)
+            sys.exit(1)
 
     def version(self):
         """Print the current database version."""
@@ -227,8 +289,8 @@ class DbCommands(object):
     def purge(self, age_in_days):
         """Purge deleted rows older than a given age from cinder tables."""
         age_in_days = int(age_in_days)
-        if age_in_days <= 0:
-            print(_("Must supply a positive, non-zero value for age"))
+        if age_in_days < 0:
+            print(_("Must supply a positive value for age"))
             sys.exit(1)
         if age_in_days >= (int(time.time()) / 86400):
             print(_("Maximum age is count of days since epoch."))
@@ -242,13 +304,13 @@ class DbCommands(object):
                     "logs for more details."))
             sys.exit(1)
 
-    def _run_migration(self, ctxt, max_count, ignore_state):
+    def _run_migration(self, ctxt, max_count):
         ran = 0
         migrations = {}
         for migration_meth in self.online_migrations:
             count = max_count - ran
             try:
-                found, done = migration_meth(ctxt, count, ignore_state)
+                found, done = migration_meth(ctxt, count)
             except Exception:
                 print(_("Error attempting to run %(method)s") %
                       {'method': migration_meth.__name__})
@@ -275,11 +337,7 @@ class DbCommands(object):
 
     @args('--max_count', metavar='<number>', dest='max_count', type=int,
           help='Maximum number of objects to consider.')
-    @args('--ignore_state', action='store_true', dest='ignore_state',
-          help='Force records to migrate even if another operation is '
-               'performed on them. This may be dangerous, please refer to '
-               'release notes for more information.')
-    def online_data_migrations(self, max_count=None, ignore_state=False):
+    def online_data_migrations(self, max_count=None):
         """Perform online data migrations for the release in batches."""
         ctxt = context.get_admin_context()
         if max_count is not None:
@@ -292,22 +350,29 @@ class DbCommands(object):
             max_count = 50
             print(_('Running batches of %i until complete.') % max_count)
 
+        # FIXME(jdg): So this is annoying and confusing,
+        # we iterate through in batches until there are no
+        # more updates, that's AWESOME!! BUT we only print
+        # out a table reporting found/done AFTER the loop
+        # here, so that means the response the user sees is
+        # always a table of "needed 0" and "completed 0".
+        # So it's an indication of "all done" but it seems like
+        # some feedback as we go would be nice to have here.
         ran = None
         migration_info = {}
         while ran is None or ran != 0:
-            migrations = self._run_migration(ctxt, max_count, ignore_state)
+            migrations = self._run_migration(ctxt, max_count)
             migration_info.update(migrations)
             ran = sum([done for found, done, remaining in migrations.values()])
             if not unlimited:
                 break
-
-        t = prettytable.PrettyTable([_('Migration'),
-                                     _('Found'),
-                                     _('Done'),
-                                     _('Remaining')])
+        headers = ["{}".format(_('Migration')),
+                   "{}".format(_('Total Needed')),
+                   "{}".format(_('Completed')), ]
+        t = prettytable.PrettyTable(headers)
         for name in sorted(migration_info.keys()):
             info = migration_info[name]
-            t.add_row([name, info[0], info[1], info[2]])
+            t.add_row([name, info[0], info[1]])
         print(t)
 
         sys.exit(1 if ran else 0)
@@ -329,19 +394,6 @@ class VersionCommands(object):
 class VolumeCommands(object):
     """Methods for dealing with a cloud in an odd state."""
 
-    def __init__(self):
-        self._client = None
-
-    def _rpc_client(self):
-        if self._client is None:
-            if not rpc.initialized():
-                rpc.init(CONF)
-                target = messaging.Target(topic=constants.VOLUME_TOPIC)
-                serializer = objects.base.CinderObjectSerializer()
-                self._client = rpc.get_client(target, serializer=serializer)
-
-        return self._client
-
     @args('volume_id',
           help='Volume ID to be deleted')
     def delete(self, volume_id):
@@ -361,8 +413,9 @@ class VolumeCommands(object):
             print(_("Detach volume from instance and then try again."))
             return
 
-        cctxt = self._rpc_client().prepare(server=host)
-        cctxt.cast(ctxt, "delete_volume", volume_id=volume.id, volume=volume)
+        rpc.init(CONF)
+        rpcapi = volume_rpcapi.VolumeAPI()
+        rpcapi.delete_volume(ctxt, volume)
 
     @args('--currenthost', required=True, help='Existing volume host name')
     @args('--newhost', required=True, help='New volume host name')
@@ -403,58 +456,6 @@ class ConfigCommands(object):
         else:
             for key, value in CONF.items():
                 print('%s = %s' % (key, value))
-
-
-class GetLogCommands(object):
-    """Get logging information."""
-
-    def errors(self):
-        """Get all of the errors from the log files."""
-        error_found = 0
-        if CONF.log_dir:
-            logs = [x for x in os.listdir(CONF.log_dir) if x.endswith('.log')]
-            for file in logs:
-                log_file = os.path.join(CONF.log_dir, file)
-                lines = [line.strip() for line in open(log_file, "r")]
-                lines.reverse()
-                print_name = 0
-                for index, line in enumerate(lines):
-                    if line.find(" ERROR ") > 0:
-                        error_found += 1
-                        if print_name == 0:
-                            print(log_file + ":-")
-                            print_name = 1
-                        print(_("Line %(dis)d : %(line)s") %
-                              {'dis': len(lines) - index, 'line': line})
-        if error_found == 0:
-            print(_("No errors in logfiles!"))
-
-    @args('num_entries', nargs='?', type=int, default=10,
-          help='Number of entries to list (default: %(default)d)')
-    def syslog(self, num_entries=10):
-        """Get <num_entries> of the cinder syslog events."""
-        entries = int(num_entries)
-        count = 0
-        log_file = ''
-        if os.path.exists('/var/log/syslog'):
-            log_file = '/var/log/syslog'
-        elif os.path.exists('/var/log/messages'):
-            log_file = '/var/log/messages'
-        else:
-            print(_("Unable to find system log file!"))
-            sys.exit(1)
-        lines = [line.strip() for line in open(log_file, "r")]
-        lines.reverse()
-        print(_("Last %s cinder syslog entries:-") % (entries))
-        for line in lines:
-            if line.find("cinder") > 0:
-                count += 1
-                print(_("%s") % (line))
-            if count == entries:
-                break
-
-        if count == 0:
-            print(_("No cinder entries in syslog!"))
 
 
 class BackupCommands(object):
@@ -543,7 +544,7 @@ class ServiceCommands(BaseCommand):
             rpc_version = svc.rpc_current_version
             object_version = svc.object_current_version
             cluster = svc.cluster_name or ''
-            print(print_format % (svc.binary, svc.host.partition('.')[0],
+            print(print_format % (svc.binary, svc.host,
                                   svc.availability_zone, status, art,
                                   updated_at, rpc_version, object_version,
                                   cluster))
@@ -695,7 +696,6 @@ CATEGORIES = {
     'cg': ConsistencyGroupCommands,
     'db': DbCommands,
     'host': HostCommands,
-    'logs': GetLogCommands,
     'service': ServiceCommands,
     'shell': ShellCommands,
     'version': VersionCommands,
@@ -717,7 +717,7 @@ def methods_of(obj):
 
 
 def add_command_parsers(subparsers):
-    for category in CATEGORIES:
+    for category in sorted(CATEGORIES):
         command_object = CATEGORIES[category]()
 
         parser = subparsers.add_parser(category)

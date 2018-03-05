@@ -34,7 +34,6 @@ import tempfile
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log as logging
-from oslo_utils import excutils
 from oslo_utils import fileutils
 from oslo_utils import imageutils
 from oslo_utils import timeutils
@@ -61,21 +60,49 @@ QEMU_IMG_LIMITS = processutils.ProcessLimits(
     cpu_time=8,
     address_space=1 * units.Gi)
 
-# NOTE(abhishekk): qemu-img convert command supports raw, qcow2, qed,
-# vdi, vmdk, vhd and vhdx disk-formats but glance doesn't support qed
-# disk-format.
-# Ref: http://docs.openstack.org/image-guide/convert-images.html
 VALID_DISK_FORMATS = ('raw', 'vmdk', 'vdi', 'qcow2',
-                      'vhd', 'vhdx', 'parallels')
+                      'vhd', 'vhdx', 'ploop')
+
+QEMU_IMG_FORMAT_MAP = {
+    # Convert formats of Glance images to how they are processed with qemu-img.
+    'iso': 'raw',
+    'vhd': 'vpc',
+    'ploop': 'parallels',
+}
+QEMU_IMG_FORMAT_MAP_INV = {v: k for k, v in QEMU_IMG_FORMAT_MAP.items()}
+
+QEMU_IMG_VERSION = None
+QEMU_IMG_MIN_FORCE_SHARE_VERSION = [2, 10, 0]
+QEMU_IMG_MIN_CONVERT_LUKS_VERSION = '2.10'
 
 
 def validate_disk_format(disk_format):
     return disk_format in VALID_DISK_FORMATS
 
 
-def qemu_img_info(path, run_as_root=True):
+def fixup_disk_format(disk_format):
+    """Return the format to be provided to qemu-img convert."""
+
+    return QEMU_IMG_FORMAT_MAP.get(disk_format, disk_format)
+
+
+def from_qemu_img_disk_format(disk_format):
+    """Return the conventional format derived from qemu-img format."""
+
+    return QEMU_IMG_FORMAT_MAP_INV.get(disk_format, disk_format)
+
+
+def qemu_img_info(path, run_as_root=True, force_share=False):
     """Return an object containing the parsed output from qemu-img info."""
-    cmd = ['env', 'LC_ALL=C', 'qemu-img', 'info', path]
+    cmd = ['env', 'LC_ALL=C', 'qemu-img', 'info']
+    if force_share:
+        if qemu_img_supports_force_share():
+            cmd.append('--force-share')
+        else:
+            msg = _("qemu-img --force-share requested, but "
+                    "qemu-img does not support this parameter")
+            LOG.warning(msg)
+    cmd.append(path)
 
     if os.name == 'nt':
         cmd = cmd[2:]
@@ -92,13 +119,68 @@ def qemu_img_info(path, run_as_root=True):
 
 
 def get_qemu_img_version():
+    """The qemu-img version will be cached until the process is restarted."""
+
+    global QEMU_IMG_VERSION
+    if QEMU_IMG_VERSION is not None:
+        return QEMU_IMG_VERSION
+
     info = utils.execute('qemu-img', '--version', check_exit_code=False)[0]
     pattern = r"qemu-img version ([0-9\.]*)"
     version = re.match(pattern, info)
     if not version:
         LOG.warning("qemu-img is not installed.")
         return None
-    return _get_version_from_string(version.groups()[0])
+    QEMU_IMG_VERSION = _get_version_from_string(version.groups()[0])
+    return QEMU_IMG_VERSION
+
+
+def qemu_img_supports_force_share():
+    return get_qemu_img_version() > [2, 10, 0]
+
+
+def _get_qemu_convert_cmd(src, dest, out_format, src_format=None,
+                          out_subformat=None, cache_mode=None,
+                          prefix=None, cipher_spec=None, passphrase_file=None):
+
+    if out_format == 'vhd':
+        # qemu-img still uses the legacy vpc name
+        out_format == 'vpc'
+
+    cmd = ['qemu-img', 'convert', '-O', out_format]
+
+    if prefix:
+        cmd = list(prefix) + cmd
+
+    if cache_mode:
+        cmd += ('-t', cache_mode)
+
+    if out_subformat:
+        cmd += ('-o', 'subformat=%s' % out_subformat)
+
+    # AMI images can be raw or qcow2 but qemu-img doesn't accept "ami" as
+    # an image format, so we use automatic detection.
+    # TODO(geguileo): This fixes unencrypted AMI image case, but we need to
+    # fix the encrypted case.
+
+    if (src_format or '').lower() not in ('', 'ami'):
+        cmd += ('-f', src_format)  # prevent detection of format
+
+    # NOTE(lyarwood): When converting to LUKS add the cipher spec if present
+    # and create a secret for the passphrase, written to a temp file
+    if out_format == 'luks':
+        check_qemu_img_version(QEMU_IMG_MIN_CONVERT_LUKS_VERSION)
+        if cipher_spec:
+            cmd += ('-o', 'cipher-alg=%s,cipher-mode=%s,ivgen-alg=%s' %
+                    (cipher_spec['cipher_alg'], cipher_spec['cipher_mode'],
+                     cipher_spec['ivgen_alg']))
+        cmd += ('--object',
+                'secret,id=luks_sec,format=raw,file=%s' % passphrase_file,
+                '-o', 'key-secret=luks_sec')
+
+    cmd += [src, dest]
+
+    return cmd
 
 
 def _get_version_from_string(version_string):
@@ -122,11 +204,10 @@ def check_qemu_img_version(minimum_version):
         raise exception.VolumeBackendAPIException(data=_msg)
 
 
-def _convert_image(prefix, source, dest, out_format, run_as_root=True):
+def _convert_image(prefix, source, dest, out_format,
+                   out_subformat=None, src_format=None,
+                   run_as_root=True, cipher_spec=None, passphrase_file=None):
     """Convert image to other format."""
-
-    cmd = prefix + ('qemu-img', 'convert',
-                    '-O', out_format, source, dest)
 
     # Check whether O_DIRECT is supported and set '-t none' if it is
     # This is needed to ensure that all data hit the device before
@@ -141,9 +222,19 @@ def _convert_image(prefix, source, dest, out_format, run_as_root=True):
             volume_utils.check_for_odirect_support(source,
                                                    dest,
                                                    'oflag=direct')):
-        cmd = prefix + ('qemu-img', 'convert',
-                        '-t', 'none',
-                        '-O', out_format, source, dest)
+        cache_mode = 'none'
+    else:
+        # use default
+        cache_mode = None
+
+    cmd = _get_qemu_convert_cmd(source, dest,
+                                out_format=out_format,
+                                src_format=src_format,
+                                out_subformat=out_subformat,
+                                cache_mode=cache_mode,
+                                prefix=prefix,
+                                cipher_spec=cipher_spec,
+                                passphrase_file=passphrase_file)
 
     start_time = timeutils.utcnow()
     utils.execute(*cmd, run_as_root=run_as_root)
@@ -177,13 +268,20 @@ def _convert_image(prefix, source, dest, out_format, run_as_root=True):
     LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
 
 
-def convert_image(source, dest, out_format, run_as_root=True, throttle=None):
+def convert_image(source, dest, out_format, out_subformat=None,
+                  src_format=None, run_as_root=True, throttle=None,
+                  cipher_spec=None, passphrase_file=None):
     if not throttle:
         throttle = throttling.Throttle.get_default()
     with throttle.subcommand(source, dest) as throttle_cmd:
         _convert_image(tuple(throttle_cmd['prefix']),
                        source, dest,
-                       out_format, run_as_root=run_as_root)
+                       out_format,
+                       out_subformat=out_subformat,
+                       src_format=src_format,
+                       run_as_root=run_as_root,
+                       cipher_spec=cipher_spec,
+                       passphrase_file=passphrase_file)
 
 
 def resize_image(source, size, run_as_root=False):
@@ -203,14 +301,15 @@ def fetch(context, image_service, image_id, path, _user_id, _project_id):
             try:
                 image_service.download(context, image_id, image_file)
             except IOError as e:
-                with excutils.save_and_reraise_exception():
-                    if e.errno == errno.ENOSPC:
-                        # TODO(eharney): Fire an async error message for this
-                        LOG.error("No space left in image_conversion_dir "
-                                  "path (%(path)s) while fetching "
-                                  "image %(image)s.",
-                                  {'path': os.path.dirname(path),
-                                   'image': image_id})
+                if e.errno == errno.ENOSPC:
+                    params = {'path': os.path.dirname(path),
+                              'image': image_id}
+                    reason = _("No space left in image_conversion_dir "
+                               "path (%(path)s) while fetching "
+                               "image %(image)s.") % params
+                    LOG.exception(reason)
+                    raise exception.ImageTooBig(image_id=image_id,
+                                                reason=reason)
 
     duration = timeutils.delta_seconds(start_time, timeutils.utcnow())
 
@@ -229,7 +328,8 @@ def fetch(context, image_service, image_id, path, _user_id, _project_id):
     LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
 
 
-def get_qemu_data(image_id, has_meta, disk_format_raw, dest, run_as_root):
+def get_qemu_data(image_id, has_meta, disk_format_raw, dest, run_as_root,
+                  force_share=False):
     # We may be on a system that doesn't have qemu-img installed.  That
     # is ok if we are working with a RAW image.  This logic checks to see
     # if qemu-img is installed.  If not we make sure the image is RAW and
@@ -238,7 +338,9 @@ def get_qemu_data(image_id, has_meta, disk_format_raw, dest, run_as_root):
     # whole function.
     try:
         # Use the empty tmp file to make sure qemu_img_info works.
-        data = qemu_img_info(dest, run_as_root=run_as_root)
+        data = qemu_img_info(dest,
+                             run_as_root=run_as_root,
+                             force_share=force_share)
     # There are a lot of cases that can cause a process execution
     # error, but until we do more work to separate out the various
     # cases we'll keep the general catch here
@@ -321,8 +423,8 @@ def fetch_to_raw(context, image_service,
 
 def fetch_to_volume_format(context, image_service,
                            image_id, dest, volume_format, blocksize,
-                           user_id=None, project_id=None, size=None,
-                           run_as_root=True):
+                           volume_subformat=None, user_id=None,
+                           project_id=None, size=None, run_as_root=True):
     qemu_img = True
     image_meta = image_service.show(context, image_id)
 
@@ -388,8 +490,8 @@ def fetch_to_volume_format(context, image_service,
                 % {'fmt': fmt, 'backing_file': backing_file, })
 
         # NOTE(e0ne): check for free space in destination directory before
-        # image convertion.
-        check_available_space(dest, virt_size, image_id)
+        # image conversion.
+        check_available_space(dest, data.virtual_size, image_id)
 
         # NOTE(jdg): I'm using qemu-img convert to write
         # to the volume regardless if it *needs* conversion or not
@@ -399,18 +501,12 @@ def fetch_to_volume_format(context, image_service,
         # image and not a different format with a backing file, which may be
         # malicious.
         LOG.debug("%s was %s, converting to %s ", image_id, fmt, volume_format)
+        disk_format = fixup_disk_format(image_meta['disk_format'])
+
         convert_image(tmp, dest, volume_format,
+                      out_subformat=volume_subformat,
+                      src_format=disk_format,
                       run_as_root=run_as_root)
-
-        data = qemu_img_info(dest, run_as_root=run_as_root)
-
-        if not _validate_file_format(data, volume_format):
-            raise exception.ImageUnacceptable(
-                image_id=image_id,
-                reason=_("Converted to %(vol_format)s, but format is "
-                         "now %(file_format)s") % {'vol_format': volume_format,
-                                                   'file_format': data.
-                                                   file_format})
 
 
 def _validate_file_format(image_data, expected_format):
@@ -454,11 +550,7 @@ def upload_volume(context, image_service, image_meta, volume_path,
                 reason=_("fmt=%(fmt)s backed by:%(backing_file)s")
                 % {'fmt': fmt, 'backing_file': backing_file})
 
-        out_format = image_meta['disk_format']
-        # qemu-img accepts 'vpc' as argument for vhd format
-        if out_format == 'vhd':
-            out_format = 'vpc'
-
+        out_format = fixup_disk_format(image_meta['disk_format'])
         convert_image(volume_path, tmp, out_format,
                       run_as_root=run_as_root)
 
@@ -498,7 +590,7 @@ def check_available_space(dest, image_size, image_id):
         msg = ('There is no space to convert image. '
                'Requested: %(image_size)s, available: %(free_space)s'
                ) % {'image_size': image_size, 'free_space': free_space}
-        raise exception.ImageUnacceptable(image_id=image_id, reason=msg)
+        raise exception.ImageTooBig(image_id=image_id, reason=msg)
 
 
 def is_xenserver_format(image_meta):
@@ -623,6 +715,21 @@ def replace_xenserver_image_with_coalesced_vhd(image_file):
         coalesced = coalesce_chain(chain)
         fileutils.delete_if_exists(image_file)
         os.rename(coalesced, image_file)
+
+
+def decode_cipher(cipher_spec, key_size):
+    """Decode a dm-crypt style cipher specification string
+
+       The assumed format being cipher[:keycount]-chainmode-ivmode[:ivopts] as
+       documented under linux/Documentation/device-mapper/dm-crypt.txt in the
+       kernel source tree.
+    """
+    cipher_alg, cipher_mode, ivgen_alg = cipher_spec.split('-')
+    cipher_alg = cipher_alg + '-' + str(key_size)
+
+    return {'cipher_alg': cipher_alg,
+            'cipher_mode': cipher_mode,
+            'ivgen_alg': ivgen_alg}
 
 
 class TemporaryImages(object):

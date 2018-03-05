@@ -26,7 +26,6 @@ import mock
 from os_brick.remotefs import remotefs as remotefs_brick
 from oslo_concurrency import processutils
 from oslo_utils import units
-import shutil
 
 from cinder import context
 from cinder import exception
@@ -672,64 +671,6 @@ class NetAppNfsDriverTestCase(test.TestCase):
                           fake.NFS_VOLUME,
                           fake.NFS_SHARE)
 
-    @ddt.data(
-        {'size': 12, 'thin': False, 'over': 1.0, 'res': 0, 'expected': True},
-        {'size': 12, 'thin': False, 'over': 1.0, 'res': 5, 'expected': False},
-        {'size': 12, 'thin': True, 'over': 1.0, 'res': 5, 'expected': False},
-        {'size': 12, 'thin': True, 'over': 1.1, 'res': 5, 'expected': True},
-        {'size': 240, 'thin': True, 'over': 20.0, 'res': 0, 'expected': True},
-        {'size': 241, 'thin': True, 'over': 20.0, 'res': 0, 'expected': False},
-    )
-    @ddt.unpack
-    def test_share_has_space_for_clone(self, size, thin, over, res, expected):
-        total_bytes = 20 * units.Gi
-        available_bytes = 12 * units.Gi
-
-        with mock.patch.object(self.driver,
-                               '_get_capacity_info',
-                               return_value=(
-                                   total_bytes, available_bytes)):
-            with mock.patch.object(self.driver,
-                                   'max_over_subscription_ratio',
-                                   over):
-                with mock.patch.object(self.driver,
-                                       'reserved_percentage',
-                                       res):
-                    result = self.driver._share_has_space_for_clone(
-                        fake.NFS_SHARE,
-                        size,
-                        thin=thin)
-        self.assertEqual(expected, result)
-
-    @ddt.data(
-        {'size': 12, 'thin': False, 'over': 1.0, 'res': 0, 'expected': True},
-        {'size': 12, 'thin': False, 'over': 1.0, 'res': 5, 'expected': False},
-        {'size': 12, 'thin': True, 'over': 1.0, 'res': 5, 'expected': False},
-        {'size': 12, 'thin': True, 'over': 1.1, 'res': 5, 'expected': True},
-        {'size': 240, 'thin': True, 'over': 20.0, 'res': 0, 'expected': True},
-        {'size': 241, 'thin': True, 'over': 20.0, 'res': 0, 'expected': False},
-    )
-    @ddt.unpack
-    @mock.patch.object(nfs_base.NetAppNfsDriver, '_get_capacity_info')
-    def test_share_has_space_for_clone2(self,
-                                        mock_get_capacity,
-                                        size, thin, over, res, expected):
-        total_bytes = 20 * units.Gi
-        available_bytes = 12 * units.Gi
-        mock_get_capacity.return_value = (total_bytes, available_bytes)
-
-        with mock.patch.object(self.driver,
-                               'max_over_subscription_ratio',
-                               over):
-            with mock.patch.object(self.driver,
-                                   'reserved_percentage',
-                                   res):
-                result = self.driver._share_has_space_for_clone(
-                    fake.NFS_SHARE,
-                    size,
-                    thin=thin)
-        self.assertEqual(expected, result)
-
     def test_get_share_mount_and_vol_from_vol_ref(self):
         self.mock_object(na_utils, 'resolve_hostname',
                          return_value='10.12.142.11')
@@ -802,7 +743,6 @@ class NetAppNfsDriverTestCase(test.TestCase):
         vol_path = "%s/%s" % (self.fake_nfs_export_1, test_file)
         vol_ref = {'source-name': vol_path}
         self.driver._check_volume_type = mock.Mock()
-        shutil.move = mock.Mock()
         self.mock_object(self.driver, '_execute')
         self.driver._ensure_shares_mounted = mock.Mock()
         self.driver._get_mount_point_for_share = mock.Mock(
@@ -835,23 +775,21 @@ class NetAppNfsDriverTestCase(test.TestCase):
         volume = fake.FAKE_MANAGE_VOLUME
         vol_path = "%s/%s" % (self.fake_nfs_export_1, test_file)
         vol_ref = {'source-name': vol_path}
-        mock_check_volume_type = self.driver._check_volume_type = mock.Mock()
+        self.driver._check_volume_type = mock.Mock()
         self.driver._ensure_shares_mounted = mock.Mock()
         self.driver._get_mount_point_for_share = mock.Mock(
             return_value=self.fake_mount_point)
         self.driver._get_share_mount_and_vol_from_vol_ref = mock.Mock(
             return_value=(self.fake_nfs_export_1, self.fake_mount_point,
                           test_file))
-        self.driver._execute = mock.Mock(side_effect=OSError)
+        self.driver._execute = mock.Mock(
+            side_effect=processutils.ProcessExecutionError)
         mock_get_specs = self.mock_object(na_utils, 'get_volume_extra_specs')
         mock_get_specs.return_value = {}
         self.mock_object(self.driver, '_do_qos_for_volume')
 
         self.assertRaises(exception.VolumeBackendAPIException,
                           self.driver.manage_existing, volume, vol_ref)
-
-        mock_check_volume_type.assert_called_once_with(
-            volume, self.fake_nfs_export_1, test_file, {})
 
     def test_unmanage(self):
         mock_log = self.mock_object(nfs_base, 'LOG')
@@ -919,11 +857,6 @@ class NetAppNfsDriverTestCase(test.TestCase):
                           volume,
                           vol_ref)
 
-    def test_create_consistency_group(self):
-        model_update = self.driver.create_consistencygroup(
-            fake.CG_CONTEXT, fake.CONSISTENCY_GROUP)
-        self.assertEqual('available', model_update['status'])
-
     @ddt.data(True, False)
     def test_delete_file(self, volume_not_present):
         mock_get_provider_location = self.mock_object(
@@ -966,160 +899,6 @@ class NetAppNfsDriverTestCase(test.TestCase):
         mock_get_volume_path.assert_not_called()
         mock_delete.assert_not_called()
 
-    def test_update_consistencygroup(self):
-        model_update, add_volumes_update, remove_volumes_update = (
-            self.driver.update_consistencygroup(fake.CG_CONTEXT, "foo"))
-        self.assertIsNone(add_volumes_update)
-        self.assertIsNone(remove_volumes_update)
-
-    @ddt.data(None,
-              {'replication_status': fields.ReplicationStatus.ENABLED})
-    def test_create_consistencygroup_from_src(self, volume_model_update):
-        volume_model_update = volume_model_update or {}
-        volume_model_update.update(
-            {'provider_location': fake.PROVIDER_LOCATION})
-        mock_create_volume_from_snapshot = self.mock_object(
-            self.driver, 'create_volume_from_snapshot',
-            return_value=volume_model_update)
-
-        model_update, volumes_model_update = (
-            self.driver.create_consistencygroup_from_src(
-                fake.CG_CONTEXT, fake.CONSISTENCY_GROUP, [fake.VOLUME],
-                cgsnapshot=fake.CG_SNAPSHOT, snapshots=[fake.SNAPSHOT]))
-
-        expected_volumes_model_updates = [{'id': fake.VOLUME['id']}]
-        expected_volumes_model_updates[0].update(volume_model_update)
-        mock_create_volume_from_snapshot.assert_called_once_with(
-            fake.VOLUME, fake.SNAPSHOT)
-        self.assertIsNone(model_update)
-        self.assertEqual(expected_volumes_model_updates, volumes_model_update)
-
-    @ddt.data(None,
-              {'replication_status': fields.ReplicationStatus.ENABLED})
-    def test_create_consistencygroup_from_src_source_vols(
-            self, volume_model_update):
-        mock_get_snapshot_flexvols = self.mock_object(
-            self.driver, '_get_flexvol_names_from_hosts')
-        mock_get_snapshot_flexvols.return_value = (set([fake.CG_POOL_NAME]))
-        mock_clone_backing_file = self.mock_object(
-            self.driver, '_clone_backing_file_for_volume')
-        fake_snapshot_name = 'snapshot-temp-' + fake.CONSISTENCY_GROUP['id']
-        mock_busy = self.mock_object(
-            self.driver.zapi_client, 'wait_for_busy_snapshot')
-        self.mock_object(self.driver, '_get_volume_model_update',
-                         return_value=volume_model_update)
-
-        model_update, volumes_model_update = (
-            self.driver.create_consistencygroup_from_src(
-                fake.CG_CONTEXT, fake.CONSISTENCY_GROUP, [fake.VOLUME],
-                source_cg=fake.CONSISTENCY_GROUP,
-                source_vols=[fake.NFS_VOLUME]))
-
-        expected_volumes_model_updates = [{
-            'id': fake.NFS_VOLUME['id'],
-            'provider_location': fake.PROVIDER_LOCATION,
-        }]
-        if volume_model_update:
-            expected_volumes_model_updates[0].update(volume_model_update)
-        mock_get_snapshot_flexvols.assert_called_once_with(
-            [fake.NFS_VOLUME['host']])
-        self.driver.zapi_client.create_cg_snapshot.assert_called_once_with(
-            set([fake.CG_POOL_NAME]), fake_snapshot_name)
-        mock_clone_backing_file.assert_called_once_with(
-            fake.NFS_VOLUME['name'], fake.VOLUME['name'],
-            fake.NFS_VOLUME['id'], source_snapshot=fake_snapshot_name)
-        mock_busy.assert_called_once_with(
-            fake.CG_POOL_NAME, fake_snapshot_name)
-        self.driver.zapi_client.delete_snapshot.assert_called_once_with(
-            fake.CG_POOL_NAME, fake_snapshot_name)
-        self.assertIsNone(model_update)
-        self.assertEqual(expected_volumes_model_updates, volumes_model_update)
-
-    def test_create_consistencygroup_from_src_invalid_parms(self):
-
-        model_update, volumes_model_update = (
-            self.driver.create_consistencygroup_from_src(
-                fake.CG_CONTEXT, fake.CONSISTENCY_GROUP, [fake.VOLUME]))
-
-        self.assertIn('error', model_update['status'])
-
-    def test_create_cgsnapshot(self):
-        snapshot = fake.CG_SNAPSHOT
-        snapshot['volume'] = fake.CG_VOLUME
-        mock_get_snapshot_flexvols = self.mock_object(
-            self.driver, '_get_flexvol_names_from_hosts')
-        mock_get_snapshot_flexvols.return_value = (set([fake.CG_POOL_NAME]))
-        mock_clone_backing_file = self.mock_object(
-            self.driver, '_clone_backing_file_for_volume')
-        mock_busy = self.mock_object(
-            self.driver.zapi_client, 'wait_for_busy_snapshot')
-
-        self.driver.create_cgsnapshot(
-            fake.CG_CONTEXT, fake.CG_SNAPSHOT, [snapshot])
-
-        mock_get_snapshot_flexvols.assert_called_once_with(
-            [snapshot['volume']['host']])
-        self.driver.zapi_client.create_cg_snapshot.assert_called_once_with(
-            set([fake.CG_POOL_NAME]), fake.CG_SNAPSHOT_ID)
-        mock_clone_backing_file.assert_called_once_with(
-            snapshot['volume']['name'], snapshot['name'],
-            snapshot['volume']['id'], source_snapshot=fake.CG_SNAPSHOT_ID)
-        mock_busy.assert_called_once_with(
-            fake.CG_POOL_NAME, fake.CG_SNAPSHOT_ID)
-        self.driver.zapi_client.delete_snapshot.assert_called_once_with(
-            fake.CG_POOL_NAME, fake.CG_SNAPSHOT_ID)
-
-    def test_create_cgsnapshot_busy_snapshot(self):
-        snapshot = fake.CG_SNAPSHOT
-        snapshot['volume'] = fake.CG_VOLUME
-        mock_get_snapshot_flexvols = self.mock_object(
-            self.driver, '_get_flexvol_names_from_hosts')
-        mock_get_snapshot_flexvols.return_value = (set([fake.CG_POOL_NAME]))
-        mock_clone_backing_file = self.mock_object(
-            self.driver, '_clone_backing_file_for_volume')
-        mock_busy = self.mock_object(
-            self.driver.zapi_client, 'wait_for_busy_snapshot')
-        mock_busy.side_effect = exception.SnapshotIsBusy(snapshot['name'])
-        mock_mark_snapshot_for_deletion = self.mock_object(
-            self.zapi_client, 'mark_snapshot_for_deletion')
-
-        self.driver.create_cgsnapshot(
-            fake.CG_CONTEXT, fake.CG_SNAPSHOT, [snapshot])
-
-        mock_get_snapshot_flexvols.assert_called_once_with(
-            [snapshot['volume']['host']])
-        self.driver.zapi_client.create_cg_snapshot.assert_called_once_with(
-            set([fake.CG_POOL_NAME]), fake.CG_SNAPSHOT_ID)
-        mock_clone_backing_file.assert_called_once_with(
-            snapshot['volume']['name'], snapshot['name'],
-            snapshot['volume']['id'], source_snapshot=fake.CG_SNAPSHOT_ID)
-        mock_busy.assert_called_once_with(
-            fake.CG_POOL_NAME, fake.CG_SNAPSHOT_ID)
-        self.driver.zapi_client.delete_snapshot.assert_not_called()
-        mock_mark_snapshot_for_deletion.assert_called_once_with(
-            fake.CG_POOL_NAME, fake.CG_SNAPSHOT_ID)
-
-    def test_delete_consistencygroup_volume_delete_failure(self):
-        self.mock_object(self.driver, '_delete_file', side_effect=Exception)
-
-        model_update, volumes = self.driver.delete_consistencygroup(
-            fake.CG_CONTEXT, fake.CONSISTENCY_GROUP, [fake.CG_VOLUME])
-
-        self.assertEqual('deleted', model_update['status'])
-        self.assertEqual('error_deleting', volumes[0]['status'])
-
-    def test_delete_consistencygroup(self):
-        mock_delete_file = self.mock_object(
-            self.driver, '_delete_file')
-
-        model_update, volumes = self.driver.delete_consistencygroup(
-            fake.CG_CONTEXT, fake.CONSISTENCY_GROUP, [fake.CG_VOLUME])
-
-        self.assertEqual('deleted', model_update['status'])
-        self.assertEqual('deleted', volumes[0]['status'])
-        mock_delete_file.assert_called_once_with(
-            fake.CG_VOLUME_ID, fake.CG_VOLUME_NAME)
-
     def test_check_for_setup_error(self):
         super_check_for_setup_error = self.mock_object(
             nfs.NfsDriver, 'check_for_setup_error')
@@ -1145,24 +924,41 @@ class NetAppNfsDriverTestCase(test.TestCase):
                       loopingcalls.ONE_MINUTE),
             mock.call(mock_call_ems_logging, loopingcalls.ONE_HOUR)])
 
-    def test_delete_snapshots_marked_for_deletion(self):
-        snapshots = [{
-            'name': fake.SNAPSHOT_NAME,
-            'volume_name': fake.VOLUME['name']
-        }]
-        mock_get_flexvol_names = self.mock_object(
-            self.driver, '_get_backing_flexvol_names')
-        mock_get_flexvol_names.return_value = [fake.VOLUME['name']]
-        mock_get_snapshots_marked = self.mock_object(
-            self.zapi_client, 'get_snapshots_marked_for_deletion')
-        mock_get_snapshots_marked.return_value = snapshots
-        mock_delete_snapshot = self.mock_object(
-            self.zapi_client, 'delete_snapshot')
+    def test__clone_from_cache(self):
+        image_id = 'fake_image_id'
+        cache_result = [
+            ('fakepool_bad1', '/fakepath/img-cache-1'),
+            ('fakepool', '/fakepath/img-cache-2'),
+            ('fakepool_bad2', '/fakepath/img-cache-3'),
+        ]
+        mock_call__is_share_clone_compatible = self.mock_object(
+            self.driver, '_is_share_clone_compatible')
+        mock_call__is_share_clone_compatible.return_value = True
+        mock_call__do_clone_rel_img_cache = self.mock_object(
+            self.driver, '_do_clone_rel_img_cache')
+        cloned = self.driver._clone_from_cache(fake.test_volume, image_id,
+                                               cache_result)
+        self.assertTrue(cloned)
+        mock_call__is_share_clone_compatible.assert_called_once_with(
+            fake.test_volume, 'fakepool')
+        mock_call__do_clone_rel_img_cache.assert_called_once_with(
+            '/fakepath/img-cache-2', 'fakename', 'fakepool',
+            '/fakepath/img-cache-2'
+        )
 
-        self.driver._delete_snapshots_marked_for_deletion()
-
-        mock_get_flexvol_names.assert_called_once_with()
-        mock_get_snapshots_marked.assert_called_once_with(
-            [fake.VOLUME['name']])
-        mock_delete_snapshot.assert_called_once_with(
-            fake.VOLUME['name'], fake.SNAPSHOT_NAME)
+    def test__clone_from_cache_not_found(self):
+        image_id = 'fake_image_id'
+        cache_result = [
+            ('fakepool_bad1', '/fakepath/img-cache-1'),
+            ('fakepool_bad2', '/fakepath/img-cache-2'),
+            ('fakepool_bad3', '/fakepath/img-cache-3'),
+        ]
+        mock_call__is_share_clone_compatible = self.mock_object(
+            self.driver, '_is_share_clone_compatible')
+        mock_call__do_clone_rel_img_cache = self.mock_object(
+            self.driver, '_do_clone_rel_img_cache')
+        cloned = self.driver._clone_from_cache(fake.test_volume, image_id,
+                                               cache_result)
+        self.assertFalse(cloned)
+        mock_call__is_share_clone_compatible.assert_not_called()
+        mock_call__do_clone_rel_img_cache.assert_not_called()

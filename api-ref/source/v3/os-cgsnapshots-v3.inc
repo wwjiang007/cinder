@@ -1,7 +1,7 @@
 .. -*- rst -*-
 
-Consistency group snapshots
-===========================
+Consistency group snapshots (DEPRECATED)
+========================================
 
 Lists all, lists all with details, shows details for, creates, and
 deletes consistency group snapshots.
@@ -23,7 +23,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
-   - cgsnapshot_id: cgsnapshot_id
+   - cgsnapshot_id: cgsnapshot_id_1
 
 
 Show consistency group snapshot detail
@@ -35,7 +35,6 @@ Shows details for a consistency group snapshot.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -44,7 +43,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
-   - cgsnapshot_id: cgsnapshot_id
+   - cgsnapshot_id: cgsnapshot_id_1
 
 
 Response Parameters
@@ -52,12 +51,13 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
+   - cgsnapshot: cgsnapshot
    - status: status
-   - description: description
+   - description: description_cg_snapshot_true
    - created_at: created_at
    - consistencygroup_id: consistencygroup_id
    - id: id
-   - name: name
+   - name: name_2
 
 Response Example
 ----------------
@@ -75,7 +75,6 @@ Lists all consistency group snapshots with details.
 
 
 Normal response codes: 200
-Error response codes:
 
 Request
 -------
@@ -83,6 +82,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
+   - all_tenants: all-tenants
 
 
 Response Parameters
@@ -90,12 +90,13 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
+   - cgsnapshots: cgsnapshots
    - status: status
-   - description: description
+   - description: description_cg_snapshot_true
    - created_at: created_at
    - consistencygroup_id: consistencygroup_id
    - id: id
-   - name: name
+   - name: name_2
 
 Response Example
 ----------------
@@ -112,7 +113,6 @@ Lists all consistency group snapshots.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -121,6 +121,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - project_id: project_id_path
+   - all_tenants: all-tenants
 
 
 Response Parameters
@@ -128,8 +129,9 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
+   - cgsnapshots: cgsnapshots
    - id: id
-   - name: name
+   - name: name_2
 
 
 
@@ -156,8 +158,11 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - name: name
    - project_id: project_id_path
+   - cgsnapshot: cgsnapshot
+   - name: name_5
+   - consistencygroup_id: consistencygroup_id
+   - description: description_cg_snapshot_false
 
 Request Example
 ---------------
@@ -171,8 +176,8 @@ Response Parameters
 .. rest_parameters:: parameters.yaml
 
    - status: status
-   - description: description
+   - description: description_cg_snapshot_true
    - created_at: created_at
    - consistencygroup_id: consistencygroup_id
    - id: id
-   - name: name
+   - name: name_2

@@ -184,36 +184,50 @@ class FilterSchedulerTestCase(test_scheduler.SchedulerTestCase):
         self.assertIsNotNone(weighed_host.obj)
         self.assertTrue(_mock_service_get_all.called)
 
+    @ddt.data(('host10@BackendA', True),
+              ('host10@BackendB#openstack_nfs_1', True),
+              ('host10', False))
+    @ddt.unpack
     @mock.patch('cinder.db.service_get_all')
-    def test_create_volume_clear_host_different_with_group(
-            self, _mock_service_get_all):
-        # Ensure we clear those hosts whose backend is not same as
-        # group's backend.
+    def test_create_volume_host_different_with_resource_backend(
+            self, resource_backend, multibackend_with_pools,
+            _mock_service_get_all):
         sched = fakes.FakeFilterScheduler()
-        sched.host_manager = fakes.FakeHostManager()
-        fakes.mock_host_manager_db_calls(_mock_service_get_all)
+        sched.host_manager = fakes.FakeHostManager(
+            multibackend_with_pools=multibackend_with_pools)
+        fakes.mock_host_manager_db_calls(
+            _mock_service_get_all, backends_with_pools=multibackend_with_pools)
         fake_context = context.RequestContext('user', 'project')
         request_spec = {'volume_properties': {'project_id': 1,
                                               'size': 1},
                         'volume_type': {'name': 'LVM_iSCSI'},
-                        'group_backend': 'host@lvmdriver'}
+                        'resource_backend': resource_backend}
         weighed_host = sched._schedule(fake_context, request_spec, {})
         self.assertIsNone(weighed_host)
 
+    @ddt.data(('host1@BackendA', True),
+              ('host1@BackendB#openstack_nfs_1', True),
+              ('host1', False))
+    @ddt.unpack
     @mock.patch('cinder.db.service_get_all')
-    def test_create_volume_host_same_as_group(self, _mock_service_get_all):
+    def test_create_volume_host_same_as_resource(self, resource_backend,
+                                                 multibackend_with_pools,
+                                                 _mock_service_get_all):
         # Ensure we don't clear the host whose backend is same as
-        # group's backend.
+        # requested backend (ex: create from source-volume/snapshot,
+        # or create within a group)
         sched = fakes.FakeFilterScheduler()
-        sched.host_manager = fakes.FakeHostManager()
-        fakes.mock_host_manager_db_calls(_mock_service_get_all)
+        sched.host_manager = fakes.FakeHostManager(
+            multibackend_with_pools=multibackend_with_pools)
+        fakes.mock_host_manager_db_calls(
+            _mock_service_get_all, backends_with_pools=multibackend_with_pools)
         fake_context = context.RequestContext('user', 'project')
         request_spec = {'volume_properties': {'project_id': 1,
                                               'size': 1},
                         'volume_type': {'name': 'LVM_iSCSI'},
-                        'group_backend': 'host1'}
+                        'resource_backend': resource_backend}
         weighed_host = sched._schedule(fake_context, request_spec, {})
-        self.assertEqual('host1#lvm1', weighed_host.obj.host)
+        self.assertIn(resource_backend, weighed_host.obj.host)
 
     def test_max_attempts(self):
         self.flags(scheduler_max_attempts=4)
@@ -297,6 +311,22 @@ class FilterSchedulerTestCase(test_scheduler.SchedulerTestCase):
                           self.context, request_spec,
                           filter_properties=filter_properties)
 
+    def test_retry_revert_consumed_capacity(self):
+        sched = fakes.FakeFilterScheduler()
+        request_spec = {'volume_type': {'name': 'LVM_iSCSI'},
+                        'volume_properties': {'project_id': 1,
+                                              'size': 2}}
+        request_spec = objects.RequestSpec.from_primitives(request_spec)
+        retry = dict(num_attempts=1, backends=['fake_backend_name'])
+        filter_properties = dict(retry=retry)
+
+        with mock.patch.object(
+                sched.host_manager,
+                'revert_volume_consumed_capacity') as mock_revert:
+            sched._schedule(self.context, request_spec,
+                            filter_properties=filter_properties)
+            mock_revert.assert_called_once_with('fake_backend_name', 2)
+
     def test_add_retry_backend(self):
         retry = dict(num_attempts=1, backends=[])
         filter_properties = dict(retry=retry)
@@ -334,15 +364,18 @@ class FilterSchedulerTestCase(test_scheduler.SchedulerTestCase):
 
         return (sched, fake_context)
 
+    @ddt.data(None, {'name': 'LVM_iSCSI'})
     @mock.patch('cinder.db.service_get_all')
-    def test_backend_passes_filters_happy_day(self, _mock_service_get_topic):
+    def test_backend_passes_filters_happy_day(self, volume_type,
+                                              _mock_service_get_topic):
         """Do a successful pass through of with backend_passes_filters()."""
         sched, ctx = self._backend_passes_filters_setup(
             _mock_service_get_topic)
         request_spec = {'volume_id': fake.VOLUME_ID,
-                        'volume_type': {'name': 'LVM_iSCSI'},
+                        'volume_type': volume_type,
                         'volume_properties': {'project_id': 1,
-                                              'size': 1}}
+                                              'size': 1,
+                                              'multiattach': True}}
         request_spec = objects.RequestSpec.from_primitives(request_spec)
         ret_host = sched.backend_passes_filters(ctx, 'host1#lvm1',
                                                 request_spec, {})

@@ -18,6 +18,8 @@ import six
 
 from cinder import test
 from cinder.tests.unit.volume.drivers.dell_emc.scaleio import mocks
+from cinder.volume import configuration as conf
+from cinder.volume.drivers.dell_emc.scaleio import driver
 
 
 class CustomResponseMode(object):
@@ -65,11 +67,13 @@ class TestScaleIODriver(test.TestCase):
         Valid='0',
         Invalid='1',
         BadStatus='2',
+        ValidVariant='3',
     ))
     __RESPONSE_MODE_NAMES = {
         '0': 'Valid',
         '1': 'Invalid',
         '2': 'BadStatus',
+        '3': 'ValidVariant',
     }
 
     BAD_STATUS_RESPONSE = mocks.MockHTTPSResponse(
@@ -105,6 +109,8 @@ class TestScaleIODriver(test.TestCase):
     PROT_DOMAIN_ID = six.text_type('1')
     PROT_DOMAIN_NAME = 'PD1'
 
+    STORAGE_POOLS = ['{}:{}'.format(PROT_DOMAIN_NAME, STORAGE_POOL_NAME)]
+
     def setUp(self):
         """Setup a test case environment.
 
@@ -113,10 +119,37 @@ class TestScaleIODriver(test.TestCase):
                   ``MockHTTPSResponse``'s instead.
         """
         super(TestScaleIODriver, self).setUp()
-        self.driver = mocks.ScaleIODriver()
+        self.configuration = conf.Configuration(driver.scaleio_opts,
+                                                conf.SHARED_CONF_GROUP)
+        self._set_overrides()
+        self.driver = mocks.ScaleIODriver(configuration=self.configuration)
 
         self.mock_object(requests, 'get', self.do_request)
         self.mock_object(requests, 'post', self.do_request)
+
+    def _set_overrides(self):
+        # Override the defaults to fake values
+        self.override_config('san_ip', override='127.0.0.1',
+                             group=conf.SHARED_CONF_GROUP)
+        self.override_config('sio_rest_server_port', override='8888',
+                             group=conf.SHARED_CONF_GROUP)
+        self.override_config('san_login', override='test',
+                             group=conf.SHARED_CONF_GROUP)
+        self.override_config('san_password', override='pass',
+                             group=conf.SHARED_CONF_GROUP)
+        self.override_config('sio_storage_pool_id',
+                             override=self.STORAGE_POOL_ID,
+                             group=conf.SHARED_CONF_GROUP)
+        self.override_config('sio_protection_domain_id',
+                             override=self.PROT_DOMAIN_ID,
+                             group=conf.SHARED_CONF_GROUP)
+        self.override_config('sio_storage_pools',
+                             override='PD1:SP1',
+                             group=conf.SHARED_CONF_GROUP)
+        self.override_config('max_over_subscription_ratio',
+                             override=5.0, group=conf.SHARED_CONF_GROUP)
+        self.override_config('sio_server_api_version',
+                             override='2.0.0', group=conf.SHARED_CONF_GROUP)
 
     def do_request(self, url, *args, **kwargs):
         """Do a fake GET/POST API request.

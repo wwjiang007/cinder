@@ -24,10 +24,10 @@ else:
     # Set storops_ex to be None for unit test
     storops_ex = None
 
+from cinder import coordination
 from cinder import exception
 from cinder.i18n import _
 from cinder.volume.drivers.dell_emc.unity import utils
-
 
 LOG = log.getLogger(__name__)
 
@@ -43,6 +43,7 @@ class UnityClient(object):
         self.username = username
         self.password = password
         self.verify_cert = verify_cert
+        self.host_cache = {}
 
     @property
     def system(self):
@@ -74,6 +75,20 @@ class UnityClient(object):
             LOG.debug("LUN %s already exists. Return the existing one.",
                       name)
             lun = self.system.get_lun(name=name)
+        return lun
+
+    def thin_clone(self, lun_or_snap, name, io_limit_policy=None,
+                   description=None, new_size_gb=None):
+        try:
+            lun = lun_or_snap.thin_clone(
+                name=name, io_limit_policy=io_limit_policy,
+                description=description)
+        except storops_ex.UnityLunNameInUseError:
+            LOG.debug("LUN(thin clone) %s already exists. "
+                      "Return the existing one.", name)
+            lun = self.system.get_lun(name=name)
+        if new_size_gb is not None and new_size_gb > lun.total_size_gb:
+            lun = self.extend_lun(lun.get_id(), new_size_gb)
         return lun
 
     def delete_lun(self, lun_id):
@@ -171,28 +186,40 @@ class UnityClient(object):
                         {'name': name, 'err': err})
         return None
 
-    def create_host(self, name, uids):
-        """Creates a host on Unity.
+    @coordination.synchronized('{self.host}-{name}')
+    def create_host(self, name):
+        """Provides existing host if exists else create one."""
+        if name not in self.host_cache:
+            try:
+                host = self.system.get_host(name=name)
+            except storops_ex.UnityResourceNotFoundError:
+                LOG.debug('Host %s not found.  Create a new one.',
+                          name)
+                host = self.system.create_host(name=name)
 
-        Creates a host on Unity which has the uids associated.
+            self.host_cache[name] = host
+        else:
+            host = self.host_cache[name]
+        return host
 
-        :param name: name of the host
-        :param uids: iqns or wwns list
-        :return: UnitHost object
-        """
-
-        try:
-            host = self.system.get_host(name=name)
-        except storops_ex.UnityResourceNotFoundError:
-            LOG.debug('Existing host %s not found.  Create a new one.', name)
-            host = self.system.create_host(name=name)
-
+    def update_host_initiators(self, host, uids):
+        """Updates host with the supplied uids."""
         host_initiators_ids = self.get_host_initiator_ids(host)
         un_registered = [h for h in uids if h not in host_initiators_ids]
-        for uid in un_registered:
-            host.add_initiator(uid, force_create=True)
+        if un_registered:
+            for uid in un_registered:
+                try:
+                    host.add_initiator(uid, force_create=True)
+                except storops_ex.UnityHostInitiatorExistedError:
+                    # This make concurrent modification of
+                    # host initiators safe
+                    LOG.debug(
+                        'The uid(%s) was already in '
+                        '%s.', uid, host.name)
+            host.update()
+            # Update host cached with new initiators.
+            self.host_cache[host.name] = host
 
-        host.update()
         return host
 
     @staticmethod
@@ -226,8 +253,14 @@ class UnityClient(object):
         lun_or_snap.update()
         host.detach(lun_or_snap)
 
-    def get_host(self, name):
-        return self.system.get_host(name=name)
+    @staticmethod
+    def detach_all(lun):
+        """Detaches a `UnityLun` from all hosts.
+
+        :param lun: `UnityLun` object
+        """
+        lun.update()
+        lun.detach_from(host=None)
 
     def get_ethernet_ports(self):
         return self.system.get_ethernet_port()
@@ -291,3 +324,7 @@ class UnityClient(object):
     def get_pool_name(self, lun_name):
         lun = self.system.get_lun(name=lun_name)
         return lun.pool_name
+
+    def restore_snapshot(self, snap_name):
+        snap = self.get_snap(snap_name)
+        return snap.restore(delete_backup=True)

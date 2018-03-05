@@ -22,6 +22,7 @@ import six
 from cinder import exception
 from cinder.i18n import _
 from cinder.objects import fields
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.dell_emc.sc import storagecenter_api
 from cinder.volume.drivers.san.san import san_opts
@@ -70,7 +71,7 @@ common_opts = [
 LOG = logging.getLogger(__name__)
 
 CONF = cfg.CONF
-CONF.register_opts(common_opts)
+CONF.register_opts(common_opts, group=configuration.SHARED_CONF_GROUP)
 
 
 class SCCommonDriver(driver.ManageableVD,
@@ -875,8 +876,9 @@ class SCCommonDriver(driver.ManageableVD,
         for volume in volumes:
             status = fields.GroupStatus.ERROR
             try:
-                if self.delete_volume(volume):
-                    status = fields.GroupStatus.DELETED
+                self.delete_volume(volume)
+                # We throw if that fails.
+                status = fields.GroupStatus.DELETED
             except (exception.VolumeBackendAPIException,
                     exception.VolumeIsBusy):
                 LOG.error('delete_group: error deleting volume %s',
@@ -1783,7 +1785,7 @@ class SCCommonDriver(driver.ManageableVD,
         # Error and leave.
         return model_update
 
-    def failover_host(self, context, volumes, secondary_id=None):
+    def failover_host(self, context, volumes, secondary_id=None, groups=None):
         """Failover to secondary.
 
         :param context: security context
@@ -1807,7 +1809,7 @@ class SCCommonDriver(driver.ManageableVD,
         if self.failed_over:
             if secondary_id == 'default':
                 LOG.debug('failing back')
-                return 'default', self.failback_volumes(volumes)
+                return 'default', self.failback_volumes(volumes), []
             raise exception.InvalidReplicationTarget(
                 reason=_('Already failed over'))
 
@@ -1850,7 +1852,7 @@ class SCCommonDriver(driver.ManageableVD,
                     LOG.debug(self.failed_over)
                     LOG.debug(self.active_backend_id)
                     LOG.debug(self.replication_enabled)
-                    return destssn, volume_updates
+                    return destssn, volume_updates, []
                 else:
                     raise exception.InvalidReplicationTarget(reason=(
                         _('replication_failover failed. %s not found.') %

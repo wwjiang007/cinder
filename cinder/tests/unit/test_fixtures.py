@@ -14,6 +14,8 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import logging as pylogging
+
 import fixtures as fx
 from oslo_log import log as logging
 import testtools
@@ -25,6 +27,7 @@ class TestLogging(testtools.TestCase):
     def test_default_logging(self):
         stdlog = self.useFixture(fixtures.StandardLogging())
         root = logging.getLogger()
+        root.logger.setLevel(pylogging.INFO)
         # there should be a null handler as well at DEBUG
         self.assertEqual(2, len(root.handlers), root.handlers)
         log = logging.getLogger(__name__)
@@ -35,7 +38,8 @@ class TestLogging(testtools.TestCase):
 
         # broken debug messages should still explode, even though we
         # aren't logging them in the regular handler
-        self.assertRaises(TypeError, log.debug, "this is broken %s %s", "foo")
+        self.assertRaises(TypeError, log.warning,
+                          "this is broken %s %s", "foo")
 
         # and, ensure that one of the terrible log messages isn't
         # output at info
@@ -50,10 +54,11 @@ class TestLogging(testtools.TestCase):
 
         stdlog = self.useFixture(fixtures.StandardLogging())
         root = logging.getLogger()
+        root.logger.setLevel(pylogging.INFO)
         # there should no longer be a null handler
         self.assertEqual(1, len(root.handlers), root.handlers)
         log = logging.getLogger(__name__)
         log.info("at info")
         log.debug("at debug")
         self.assertIn("at info", stdlog.logger.output)
-        self.assertIn("at debug", stdlog.logger.output)
+        self.assertNotIn("at debug", stdlog.logger.output)

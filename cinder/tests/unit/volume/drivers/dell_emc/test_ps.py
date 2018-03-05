@@ -58,7 +58,8 @@ class PSSeriesISCSIDriverTestCase(test.TestCase):
 
         self.driver_stats_output = ['TotalCapacity: 111GB',
                                     'FreeSpace: 11GB',
-                                    'VolumeReserve: 80GB']
+                                    'VolumeReportedSpace: 80GB',
+                                    'TotalVolumes: 100']
         self.cmd = 'this is dummy command'
         self._context = context.get_admin_context()
         self.driver = ps.PSSeriesISCSIDriver(
@@ -76,7 +77,7 @@ class PSSeriesISCSIDriverTestCase(test.TestCase):
             "--- --------------- ------------- ---------- ---------- --------",
             "1   iqn.1993-08.org.debian:01:222 *.*.*.*       none        both",
             "       7dab76162"]
-
+        self.fake_access_id = '1'
         self.fake_iqn = 'iqn.2003-10.com.equallogic:group01:25366:fakev'
         self.fake_iqn_return = ['iSCSI target name is %s.' % self.fake_iqn]
         self.fake_volume_output = ["Size: 5GB",
@@ -347,6 +348,24 @@ class PSSeriesISCSIDriverTestCase(test.TestCase):
             mock_eql_execute.side_effect = my_side_effect
             self.driver.terminate_connection(volume, self.connector)
 
+    def test_get_access_record(self):
+        attrs = ('volume', 'select', self.volume['name'], 'access', 'show')
+        with mock.patch.object(self.driver,
+                               '_eql_execute') as mock_eql_execute:
+            mock_eql_execute.return_value = self.access_record_output
+            data = self.driver._get_access_record(self.volume, self.connector)
+            mock_eql_execute.assert_called_with(*attrs)
+            self.assertEqual(self.fake_access_id, data)
+
+    def test_get_access_record_negative(self):
+        attrs = ('volume', 'select', self.volume['name'], 'access', 'show')
+        with mock.patch.object(self.driver,
+                               '_eql_execute') as mock_eql_execute:
+            mock_eql_execute.return_value = []
+            data = self.driver._get_access_record(self.volume, self.connector)
+            mock_eql_execute.assert_called_with(*attrs)
+            self.assertIsNone(data)
+
     def test_do_setup(self):
         fake_group_ip = '10.1.2.3'
 
@@ -410,6 +429,7 @@ class PSSeriesISCSIDriverTestCase(test.TestCase):
             thin_enabled = self.configuration.san_thin_provision
             self.assertEqual(float('111.0'), stats['total_capacity_gb'])
             self.assertEqual(float('11.0'), stats['free_capacity_gb'])
+            self.assertEqual(100, stats['total_volumes'])
 
             if thin_enabled:
                 self.assertEqual(80.0, stats['provisioned_capacity_gb'])

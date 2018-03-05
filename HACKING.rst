@@ -2,13 +2,12 @@ Cinder Style Commandments
 =========================
 
 - Step 1: Read the OpenStack Style Commandments
-  http://docs.openstack.org/developer/hacking/
+  https://docs.openstack.org/hacking/latest/
 - Step 2: Read on
 
 Cinder Specific Commandments
 ----------------------------
 - [N314] Check for vi editor configuration in source files.
-- [N319] Validate that debug level logs are not translated.
 - [N322] Ensure default arguments are not mutable.
 - [N323] Add check for explicit import of _() to ensure proper translation.
 - [N325] str() and unicode() cannot be used on an exception. Remove or use six.text_type().
@@ -24,7 +23,7 @@ Cinder Specific Commandments
 - [C309] Unit tests should not perform logging.
 - [C310] Check for improper use of logging format arguments.
 - [C311] Check for proper naming and usage in option registration.
-- [C312] Check that assertIsNone(value) is used and not assertEqual(None, value).
+- [C312] Validate that logs are not translated.
 - [C313] Check that assertTrue(value) is used and not assertEqual(True, value).
 
 General
@@ -54,4 +53,4 @@ use mock only.
 
 For more information on creating unit tests and utilizing the testing
 infrastructure in OpenStack Cinder, please see
-http://docs.openstack.org/developer/cinder/devref/testing.html
+https://docs.openstack.org/cinder/latest/contributor/testing.html

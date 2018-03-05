@@ -47,6 +47,7 @@ from cinder.i18n import _
 from cinder import interface
 from cinder.objects import fields
 from cinder import utils as cinder_utils
+from cinder.volume import configuration
 from cinder.volume import driver
 from cinder.volume.drivers.san import san
 from cinder.volume import utils
@@ -98,7 +99,7 @@ hpelefthand_opts = [
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(hpelefthand_opts)
+CONF.register_opts(hpelefthand_opts, group=configuration.SHARED_CONF_GROUP)
 
 MIN_API_VERSION = "1.1"
 MIN_CLIENT_VERSION = '2.1.0'
@@ -119,6 +120,12 @@ extra_specs_value_map = {
     'isAdaptiveOptimizationEnabled': {'true': True, 'false': False},
     'dataProtectionLevel': {
         'r-0': 0, 'r-5': 1, 'r-10-2': 2, 'r-10-3': 3, 'r-10-4': 4, 'r-6': 5}
+}
+
+extra_specs_default_key_value_map = {
+    'hpelh:provisioning': 'thin',
+    'hpelh:ao': 'true',
+    'hpelh:data_pl': 'r-0'
 }
 
 
@@ -162,9 +169,14 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
         2.0.10 - Add entry point tracing
         2.0.11 - Fix extend volume if larger than snapshot bug #1560654
         2.0.12 - add CG capability to generic volume groups.
+        2.0.13 - Fix cloning operation related to provisioning, bug #1688243
+        2.0.14 - Fixed bug #1710072, Volume doesn't show expected parameters
+                 after Retype
+        2.0.15 - Fixed bug #1710098, Managed volume, does not pick up the extra
+                 specs/capabilities of the selected volume type.
     """
 
-    VERSION = "2.0.12"
+    VERSION = "2.0.15"
 
     CI_WIKI_NAME = "HPE_Storage_CI"
 
@@ -864,6 +876,21 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
             if volume['size'] > src_vref['size']:
                 LOG.debug("Resize the new volume to %s.", volume['size'])
                 self.extend_volume(volume, volume['size'])
+            # TODO(kushal) : we will use volume.volume_types when we re-write
+            # the design for unit tests to use objects instead of dicts.
+            # Get the extra specs of interest from this volume's volume type
+            volume_extra_specs = self._get_volume_extra_specs(src_vref)
+            extra_specs = self._get_lh_extra_specs(
+                volume_extra_specs,
+                extra_specs_key_map.keys())
+
+            # Check provisioning type of source volume. If it's full then need
+            # to change provisioning of clone volume to full as lefthand
+            # creates clone volume only with thin provisioning type.
+            if extra_specs.get('hpelh:provisioning') == 'full':
+                options = {'isThinProvisioned': False}
+                clone_volume_info = client.getVolumeByName(volume['name'])
+                client.modifyVolume(clone_volume_info['id'], options)
 
             model_update = self._update_provider(clone_info)
 
@@ -994,6 +1021,19 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
 
             # pick out the LH extra specs
             new_extra_specs = dict(new_type).get('extra_specs')
+
+            # in the absence of LH capability in diff,
+            # True should be return as retype is not needed
+            if not list(filter((lambda key: extra_specs_key_map.get(key)),
+                               diff['extra_specs'].keys())):
+                return True
+
+            # add capability of LH, which are absent in new type,
+            # so default value gets set for those capability
+            for key, value in extra_specs_default_key_value_map.items():
+                if key not in new_extra_specs.keys():
+                    new_extra_specs[key] = value
+
             lh_extra_specs = self._get_lh_extra_specs(
                 new_extra_specs,
                 extra_specs_key_map.keys())
@@ -1003,8 +1043,11 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
             # only set the ones that have changed
             changed_extra_specs = {}
             for key, value in lh_extra_specs.items():
-                (old, new) = diff['extra_specs'][key]
-                if old != new:
+                try:
+                    (old, new) = diff['extra_specs'][key]
+                    if old != new:
+                        changed_extra_specs[key] = value
+                except KeyError:
                     changed_extra_specs[key] = value
 
             # map extra specs to LeftHand options
@@ -1214,11 +1257,15 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
             LOG.info("Virtual volume %(disp)s '%(new)s' is being retyped.",
                      {'disp': display_name, 'new': new_vol_name})
 
+            # Creates a diff as it needed for retype operation.
+            diff = {}
+            diff['extra_specs'] = {key: (None, value) for key, value
+                                   in volume_type['extra_specs'].items()}
             try:
                 self.retype(None,
                             volume,
                             volume_type,
-                            volume_type['extra_specs'],
+                            diff,
                             volume['host'])
                 LOG.info("Virtual volume %(disp)s successfully retyped to "
                          "%(new_type)s.",
@@ -1491,7 +1538,7 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
 
     # v2 replication methods
     @cinder_utils.trace
-    def failover_host(self, context, volumes, secondary_id=None):
+    def failover_host(self, context, volumes, secondary_id=None, groups=None):
         """Force failover to a secondary replication target."""
         if secondary_id and secondary_id == self.FAILBACK_VALUE:
             volume_update_list = self._replication_failback(volumes)
@@ -1574,7 +1621,7 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
 
             self._active_backend_id = target_id
 
-        return target_id, volume_update_list
+        return target_id, volume_update_list, []
 
     def _do_replication_setup(self):
         default_san_ssh_port = self.configuration.hpelefthand_ssh_port
@@ -1730,7 +1777,7 @@ class HPELeftHandISCSIDriver(driver.ISCSIDriver):
                     schedule = ''.join(schedule)
                     # We need to check the status of the schedule to make sure
                     # it is not paused.
-                    result = re.search(".*paused\s+(\w+)", schedule)
+                    result = re.search(r".*paused\s+(\w+)", schedule)
                     is_schedule_active = result.group(1) == 'false'
 
                     volume_info = cl.getVolumeByName(volume['name'])

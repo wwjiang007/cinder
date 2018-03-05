@@ -24,9 +24,9 @@ class TestUtilsTestCase(test.TestCase):
 
         self.assertIsNone(ctxt.project_id)
         self.assertIsNone(ctxt.user_id)
-        self.assertIsNone(ctxt.domain)
-        self.assertIsNone(ctxt.project_domain)
-        self.assertIsNone(ctxt.user_domain)
+        self.assertIsNone(ctxt.domain_id)
+        self.assertIsNone(ctxt.project_domain_id)
+        self.assertIsNone(ctxt.user_domain_id)
         self.assertIsNone(ctxt.project_name)
         self.assertIsNone(ctxt.remote_address)
         self.assertIsNone(ctxt.auth_token)
@@ -39,5 +39,4 @@ class TestUtilsTestCase(test.TestCase):
         self.assertEqual([], ctxt.service_catalog)
         self.assertEqual('no', ctxt.read_deleted)
 
-        self.assertTrue(ctxt.read_deleted)
         self.assertTrue(ctxt.is_admin)

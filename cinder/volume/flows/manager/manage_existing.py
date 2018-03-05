@@ -117,7 +117,8 @@ def get_flow(context, db, driver, host, volume, ref):
         'context': context,
         'volume': volume,
         'manage_existing_ref': ref,
-        'optional_args': {'is_quota_committed': False},
+        'group_snapshot': None,
+        'optional_args': {'is_quota_committed': False, 'update_size': True}
     }
 
     volume_flow.add(create_mgr.NotifyVolumeActionTask(db,

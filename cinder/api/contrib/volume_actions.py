@@ -13,6 +13,7 @@
 #   under the License.
 
 
+from castellan import key_manager
 from oslo_config import cfg
 import oslo_messaging as messaging
 from oslo_utils import encodeutils
@@ -22,11 +23,12 @@ from six.moves import http_client
 import webob
 
 from cinder.api import extensions
-from cinder.api.openstack import api_version_request
+from cinder.api import microversions as mv
 from cinder.api.openstack import wsgi
 from cinder import exception
 from cinder.i18n import _
 from cinder.image import image_utils
+from cinder.policies import volume_actions as policy
 from cinder import utils
 from cinder import volume
 
@@ -34,16 +36,21 @@ from cinder import volume
 CONF = cfg.CONF
 
 
-def authorize(context, action_name):
-    action = 'volume_actions:%s' % action_name
-    extensions.extension_authorizer('volume', action)(context)
-
-
 class VolumeActionsController(wsgi.Controller):
     def __init__(self, *args, **kwargs):
         super(VolumeActionsController, self).__init__(*args, **kwargs)
+        self._key_mgr = None
         self.volume_api = volume.API()
 
+    @property
+    def _key_manager(self):
+        # Allows for lazy initialization of the key manager
+        if self._key_mgr is None:
+            self._key_mgr = key_manager.API(CONF)
+
+        return self._key_mgr
+
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-attach')
     def _attach(self, req, id, body):
         """Add attachment metadata."""
@@ -51,7 +58,7 @@ class VolumeActionsController(wsgi.Controller):
         # Not found exception will be handled at the wsgi level
         volume = self.volume_api.get(context, id)
 
-        # instance uuid is an option now
+        # instance UUID is an option now
         instance_uuid = None
         if 'instance_uuid' in body['os-attach']:
             instance_uuid = body['os-attach']['instance_uuid']
@@ -92,8 +99,7 @@ class VolumeActionsController(wsgi.Controller):
                 # to the user and in such cases it should raise 500 error.
                 raise
 
-        return webob.Response(status_int=http_client.ACCEPTED)
-
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-detach')
     def _detach(self, req, id, body):
         """Clear attachment metadata."""
@@ -119,8 +125,7 @@ class VolumeActionsController(wsgi.Controller):
                 # to the user and in such cases it should raise 500 error.
                 raise
 
-        return webob.Response(status_int=http_client.ACCEPTED)
-
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-reserve')
     def _reserve(self, req, id, body):
         """Mark volume as reserved."""
@@ -129,8 +134,8 @@ class VolumeActionsController(wsgi.Controller):
         volume = self.volume_api.get(context, id)
 
         self.volume_api.reserve_volume(context, volume)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-unreserve')
     def _unreserve(self, req, id, body):
         """Unmark volume as reserved."""
@@ -139,8 +144,8 @@ class VolumeActionsController(wsgi.Controller):
         volume = self.volume_api.get(context, id)
 
         self.volume_api.unreserve_volume(context, volume)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-begin_detaching')
     def _begin_detaching(self, req, id, body):
         """Update volume status to 'detaching'."""
@@ -149,8 +154,8 @@ class VolumeActionsController(wsgi.Controller):
         volume = self.volume_api.get(context, id)
 
         self.volume_api.begin_detaching(context, volume)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-roll_detaching')
     def _roll_detaching(self, req, id, body):
         """Roll back volume status to 'in-use'."""
@@ -159,7 +164,6 @@ class VolumeActionsController(wsgi.Controller):
         volume = self.volume_api.get(context, id)
 
         self.volume_api.roll_detaching(context, volume)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
     @wsgi.action('os-initialize_connection')
     def _initialize_connection(self, req, id, body):
@@ -178,7 +182,7 @@ class VolumeActionsController(wsgi.Controller):
                                                          connector)
         except exception.InvalidInput as err:
             raise webob.exc.HTTPBadRequest(
-                explanation=err)
+                explanation=err.msg)
         except exception.VolumeBackendAPIException:
             msg = _("Unable to fetch connection information from backend.")
             raise webob.exc.HTTPInternalServerError(explanation=msg)
@@ -189,6 +193,7 @@ class VolumeActionsController(wsgi.Controller):
 
         return {'connection_info': info}
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-terminate_connection')
     def _terminate_connection(self, req, id, body):
         """Terminate volume attachment."""
@@ -205,7 +210,6 @@ class VolumeActionsController(wsgi.Controller):
         except exception.VolumeBackendAPIException:
             msg = _("Unable to terminate volume connection from backend.")
             raise webob.exc.HTTPInternalServerError(explanation=msg)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
     @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-volume_upload_image')
@@ -229,7 +233,7 @@ class VolumeActionsController(wsgi.Controller):
         # Not found exception will be handled at the wsgi level
         volume = self.volume_api.get(context, id)
 
-        authorize(context, "upload_image")
+        context.authorize(policy.UPLOAD_IMAGE_POLICY)
         # check for valid disk-format
         disk_format = params.get("disk_format", "raw")
         if not image_utils.validate_disk_format(disk_format):
@@ -240,25 +244,35 @@ class VolumeActionsController(wsgi.Controller):
                     image_utils.VALID_DISK_FORMATS)
             }
             raise webob.exc.HTTPBadRequest(explanation=msg)
+        if disk_format == "parallels":
+            disk_format = "ploop"
 
         image_metadata = {"container_format": params.get(
             "container_format", "bare"),
             "disk_format": disk_format,
             "name": params["image_name"]}
 
-        if req_version >= api_version_request.APIVersionRequest('3.1'):
+        if volume.encryption_key_id:
+            # Clone volume encryption key: the current key cannot
+            # be reused because it will be deleted when the volume is
+            # deleted.
+            # TODO(eharney): Currently, there is no mechanism to remove
+            # these keys, because Glance will not delete the key from
+            # Barbican when the image is deleted.
+            encryption_key_id = self._key_manager.store(
+                context,
+                self._key_manager.get(context, volume.encryption_key_id))
+
+            image_metadata['cinder_encryption_key_id'] = encryption_key_id
+
+        if req_version >= mv.get_api_version(
+                mv.UPLOAD_IMAGE_PARAMS):
 
             image_metadata['visibility'] = params.get('visibility', 'private')
             image_metadata['protected'] = params.get('protected', 'False')
 
             if image_metadata['visibility'] == 'public':
-                authorize(context, 'upload_public')
-
-            if CONF.glance_api_version != 2:
-                # Replace visibility with is_public for Glance V1
-                image_metadata['is_public'] = (
-                    image_metadata['visibility'] == 'public')
-                image_metadata.pop('visibility', None)
+                context.authorize(policy.UPLOAD_PUBLIC_POLICY)
 
             image_metadata['protected'] = (
                 utils.get_bool_param('protected', image_metadata))
@@ -280,10 +294,12 @@ class VolumeActionsController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=six.text_type(error))
         return {'os-volume_upload_image': response}
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-extend')
     def _extend(self, req, id, body):
         """Extend size of volume."""
         context = req.environ['cinder.context']
+        req_version = req.api_version_request
         # Not found exception will be handled at the wsgi level
         volume = self.volume_api.get(context, id)
 
@@ -294,12 +310,15 @@ class VolumeActionsController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
         try:
-            self.volume_api.extend(context, volume, size)
+            if (req_version.matches(mv.VOLUME_EXTEND_INUSE) and
+                    volume.status in ['in-use']):
+                self.volume_api.extend_attached_volume(context, volume, size)
+            else:
+                self.volume_api.extend(context, volume, size)
         except exception.InvalidVolume as error:
             raise webob.exc.HTTPBadRequest(explanation=error.msg)
 
-        return webob.Response(status_int=http_client.ACCEPTED)
-
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-update_readonly_flag')
     def _volume_readonly_update(self, req, id, body):
         """Update volume readonly flag."""
@@ -322,8 +341,8 @@ class VolumeActionsController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
         self.volume_api.update_readonly_flag(context, volume, readonly_flag)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
+    @wsgi.response(http_client.ACCEPTED)
     @wsgi.action('os-retype')
     def _retype(self, req, id, body):
         """Change type of existing volume."""
@@ -337,8 +356,8 @@ class VolumeActionsController(wsgi.Controller):
         policy = body['os-retype'].get('migration_policy')
 
         self.volume_api.retype(context, volume, new_type, policy)
-        return webob.Response(status_int=http_client.ACCEPTED)
 
+    @wsgi.response(http_client.OK)
     @wsgi.action('os-set_bootable')
     def _set_bootable(self, req, id, body):
         """Update bootable status of a volume."""
@@ -363,7 +382,6 @@ class VolumeActionsController(wsgi.Controller):
         update_dict = {'bootable': bootable}
 
         self.volume_api.update(context, volume, update_dict)
-        return webob.Response(status_int=http_client.OK)
 
 
 class Volume_actions(extensions.ExtensionDescriptor):

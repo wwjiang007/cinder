@@ -13,11 +13,11 @@ specifications.
 Disassociate QoS specification from all associations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/qos-specs/{qos_id}/disassociate_all
+.. rest_method::  GET /v2/{project_id}/qos-specs/{qos_id}/disassociate_all
 
 Disassociates a QoS specification from all associations.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -25,20 +25,19 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
 
 
 Unset keys in QoS specification
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{tenant_id}/qos-specs/{qos_id}/delete_keys
+.. rest_method::  PUT /v2/{project_id}/qos-specs/{qos_id}/delete_keys
 
 Unsets keys in a QoS specification.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -47,7 +46,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
    - keys: keys
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
 
 Request Example
@@ -68,13 +67,12 @@ Response Example
 Get all associations for QoS specification
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/qos-specs/{qos_id}/associations
+.. rest_method::  GET /v2/{project_id}/qos-specs/{qos_id}/associations
 
 Lists all associations for a QoS specification.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -82,7 +80,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
 
 
@@ -96,11 +94,11 @@ Response Example
 Associate QoS specification with volume type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/qos-specs/{qos_id}/associate
+.. rest_method::  GET /v2/{project_id}/qos-specs/{qos_id}/associate
 
 Associates a QoS specification with a volume type.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -108,18 +106,19 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
+   - vol_type_id: vol_type_id
 
 
 Disassociate QoS specification from volume type
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/qos-specs/{qos_id}/disassociate
+.. rest_method::  GET /v2/{project_id}/qos-specs/{qos_id}/disassociate
 
 Disassociates a QoS specification from a volume type.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -127,20 +126,24 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
+   - vol_type_id: vol_type_id
 
 
 Show QoS specification details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/qos-specs/{qos_id}
+.. rest_method::  GET /v2/{project_id}/qos-specs/{qos_id}
 
 Shows details for a QoS specification.
 
 
 Normal response codes: 200
-Error response codes: 413, 405, 404, 403, 401, 400, 503,
+
+Error response codes: Request Entity Too Large(413), badMethod(405),
+itemNotFound(404), forbidden(403), unauthorized(401), badRequest(400),
+serviceUnavailable(503)
 
 
 Request
@@ -148,7 +151,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
 
 
@@ -157,9 +160,9 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - name: name
-   - links: links
-   - id: id
+   - name: name_4
+   - links: links_2
+   - id: id_3
    - qos_specs: qos_specs
    - consumer: consumer
    - specs: specs
@@ -175,13 +178,12 @@ Response Example
 Set keys in QoS specification
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  PUT /v2/{tenant_id}/qos-specs/{qos_id}
+.. rest_method::  PUT /v2/{project_id}/qos-specs/{qos_id}
 
 Sets keys in a QoS specification.
 
 
 Normal response codes: 200
-Error response codes:
 
 
 Request
@@ -191,7 +193,7 @@ Request
 
    - qos_specs: qos_specs
    - specs: specs
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
 
 Request Example
@@ -211,11 +213,11 @@ Response Example
 Delete QoS specification
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  DELETE /v2/{tenant_id}/qos-specs/{qos_id}
+.. rest_method::  DELETE /v2/{project_id}/qos-specs/{qos_id}
 
 Deletes a QoS specification.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -223,7 +225,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - qos_id: qos_id
    - force: force
 
@@ -231,13 +233,13 @@ Request
 Create QoS specification
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. rest_method::  POST /v2/{tenant_id}/qos-specs
+.. rest_method::  POST /v2/{project_id}/qos-specs
 
 Creates a QoS specification.
 
 Specify one or more key and value pairs in the request body.
 
-Normal response codes: 202,
+Normal response codes: 202
 
 
 Request
@@ -247,8 +249,8 @@ Request
 
    - qos_specs: qos_specs
    - consumer: consumer
-   - name: name
-   - tenant_id: tenant_id
+   - name: name_4
+   - project_id: project_id_path
 
 Request Example
 ---------------
@@ -263,9 +265,9 @@ Response Parameters
 
 .. rest_parameters:: parameters.yaml
 
-   - name: name
-   - links: links
-   - id: id
+   - name: name_4
+   - links: links_2
+   - id: id_3
    - qos_specs: qos_specs
    - consumer: consumer
    - specs: specs
@@ -274,12 +276,12 @@ Response Parameters
 List QoS specs
 ~~~~~~~~~~~~~~
 
-.. rest_method::  GET /v2/{tenant_id}/qos-specs
+.. rest_method::  GET /v2/{project_id}/qos-specs
 
 Lists quality of service (QoS) specifications.
 
 
-Normal response codes: 200, 300,
+Normal response codes: 200
 
 
 Request
@@ -287,7 +289,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-   - tenant_id: tenant_id
+   - project_id: project_id_path
    - sort_key: sort_key
    - sort_dir: sort_dir
    - limit: limit
@@ -302,8 +304,8 @@ Response Parameters
    - specs: specs
    - qos_specs: qos_specs
    - consumer: consumer
-   - id: id
-   - name: name
+   - id: id_3
+   - name: name_4
 
 
 Response Example

@@ -19,14 +19,19 @@ import datetime
 import ddt
 import enum
 import mock
+from mock import call
 from oslo_config import cfg
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
+import six
+from sqlalchemy.sql import operators
 
 from cinder.api import common
+from cinder.common import constants
 from cinder import context
 from cinder import db
 from cinder.db.sqlalchemy import api as sqlalchemy_api
+from cinder.db.sqlalchemy import models
 from cinder import exception
 from cinder import objects
 from cinder.objects import fields
@@ -78,9 +83,158 @@ class BaseTest(test.TestCase, test.ModelsObjectComparatorMixin):
 
 
 @ddt.ddt
+class DBCommonFilterTestCase(BaseTest):
+
+    def setUp(self):
+        super(DBCommonFilterTestCase, self).setUp()
+        self.fake_volume = db.volume_create(self.ctxt,
+                                            {'display_name': 'fake_name'})
+        self.fake_group = utils.create_group(
+            self.ctxt,
+            group_type_id=fake.GROUP_TYPE_ID,
+            volume_type_ids=[fake.VOLUME_TYPE_ID])
+
+    @mock.patch('sqlalchemy.orm.query.Query.filter')
+    def test__process_model_like_filter(self, mock_filter):
+        filters = {'display_name': 'fake_name',
+                   'display_description': 'fake_description',
+                   'host': 123,
+                   'status': []}
+        session = sqlalchemy_api.get_session()
+        query = session.query(models.Volume)
+        mock_filter.return_value = query
+        with mock.patch.object(operators.Operators, 'op') as mock_op:
+            def fake_operator(value):
+                return value
+            mock_op.return_value = fake_operator
+            sqlalchemy_api._process_model_like_filter(models.Volume,
+                                                      query, filters)
+            calls = [call('%fake_description%'),
+                     call('%fake_name%'), call('%123%')]
+            mock_filter.assert_has_calls(calls, any_order=True)
+
+    @ddt.data({'handler': [db.volume_create, db.volume_get_all],
+               'column': 'display_name',
+               'resource': 'volume'},
+              {'handler': [db.snapshot_create, db.snapshot_get_all],
+               'column': 'display_name',
+               'resource': 'snapshot'},
+              {'handler': [db.message_create, db.message_get_all],
+               'column': 'message_level',
+               'resource': 'message'},
+              {'handler': [db.backup_create, db.backup_get_all],
+               'column': 'display_name',
+               'resource': 'backup'},
+              {'handler': [db.group_create, db.group_get_all],
+               'column': 'name',
+               'resource': 'group'},
+              {'handler': [utils.create_group_snapshot,
+                           db.group_snapshot_get_all],
+               'column': 'name',
+               'resource': 'group_snapshot'})
+    @ddt.unpack
+    def test_resource_get_all_like_filter(self, handler, column, resource):
+        for index in ['001', '002']:
+            option = {column: "fake_%s_%s" % (column, index)}
+            if resource in ['snapshot', 'backup']:
+                option['volume_id'] = self.fake_volume.id
+            if resource in ['message']:
+                option['project_id'] = fake.PROJECT_ID
+                option['event_id'] = fake.UUID1
+            if resource in ['group_snapshot']:
+                handler[0](self.ctxt, self.fake_group.id,
+                           name="fake_%s_%s" % (column, index))
+            else:
+                handler[0](self.ctxt, option)
+
+        # test exact match
+        exact_filter = {column: 'fake_%s' % column}
+        resources = handler[1](self.ctxt, filters=exact_filter)
+        self.assertEqual(0, len(resources))
+
+        # test inexact match
+        inexact_filter = {"%s~" % column: 'fake_%s' % column}
+        resources = handler[1](self.ctxt, filters=inexact_filter)
+        self.assertEqual(2, len(resources))
+
+
+@ddt.ddt
 class DBAPIServiceTestCase(BaseTest):
 
     """Unit tests for cinder.db.api.service_*."""
+
+    def test_service_uuid_migrations(self):
+        # Force create one entry with no UUID
+        sqlalchemy_api.service_create(self.ctxt, {
+            'host': 'host1',
+            'binary': constants.VOLUME_BINARY,
+            'topic': 'volume', })
+
+        # Create another one with a valid UUID
+        sqlalchemy_api.service_create(self.ctxt, {
+            'host': 'host2',
+            'binary': constants.VOLUME_BINARY,
+            'topic': 'volume',
+            'uuid': 'a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'})
+
+        # Run the migration and verify that we updated 1 entry
+        total, updated = db.service_uuids_online_data_migration(
+            self.ctxt, 10)
+
+        self.assertEqual(1, total)
+        self.assertEqual(1, updated)
+
+    def test_service_uuid_migrations_with_limit(self):
+        sqlalchemy_api.service_create(self.ctxt, {
+            'host': 'host1',
+            'binary': constants.VOLUME_BINARY,
+            'topic': 'volume', })
+        sqlalchemy_api.service_create(self.ctxt, {
+            'host': 'host2',
+            'binary': constants.VOLUME_BINARY,
+            'topic': 'volume', })
+        sqlalchemy_api.service_create(self.ctxt, {
+            'host': 'host3',
+            'binary': constants.VOLUME_BINARY,
+            'topic': 'volume', })
+        # Run the migration and verify that we updated 1 entry
+        total, updated = db.service_uuids_online_data_migration(
+            self.ctxt, 2)
+
+        self.assertEqual(3, total)
+        self.assertEqual(2, updated)
+
+        # Now get the rest, intentionally setting max > what we should have
+        total, updated = db.service_uuids_online_data_migration(
+            self.ctxt, 2)
+
+        self.assertEqual(1, total)
+        self.assertEqual(1, updated)
+
+    @ddt.data({'count': 5, 'total': 3, 'updated': 3},
+              {'count': 2, 'total': 3, 'updated': 2})
+    @ddt.unpack
+    def test_backup_service_online_migration(self, count, total, updated):
+        volume = utils.create_volume(self.ctxt)
+        sqlalchemy_api.backup_create(self.ctxt, {
+            'service': 'cinder.backup.drivers.swift',
+            'volume_id': volume.id
+        })
+        sqlalchemy_api.backup_create(self.ctxt, {
+            'service': 'cinder.backup.drivers.ceph',
+            'volume_id': volume.id
+        })
+        sqlalchemy_api.backup_create(self.ctxt, {
+            'service': 'cinder.backup.drivers.glusterfs',
+            'volume_id': volume.id
+        })
+        sqlalchemy_api.backup_create(self.ctxt, {
+            'service': 'cinder.backup.drivers.fake_backup_service',
+            'volume_id': volume.id
+        })
+        t, u = db.backup_service_online_migration(self.ctxt, count)
+        self.assertEqual(total, t)
+        self.assertEqual(updated, u)
 
     def test_service_create(self):
         # Add a cluster value to the service
@@ -307,6 +461,61 @@ class DBAPIServiceTestCase(BaseTest):
         self.assertIsInstance(binary_op, sqlalchemy_api.sql.functions.Function)
         self.assertEqual('binary', binary_op.name)
 
+    def test_volume_service_uuid_migrations(self):
+        # Force create one entry with no UUID
+        sqlalchemy_api.volume_create(self.ctxt,
+                                     {'host': 'host1@lvm-driver1#lvm-driver1'})
+
+        # Create another one with a valid UUID
+        sqlalchemy_api.volume_create(
+            self.ctxt,
+            {'host': 'host1@lvm-driver1#lvm-driver1',
+             'service_uuid': 'a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'})
+
+        # Need a service to query
+        values = {
+            'host': 'host1@lvm-driver1',
+            'binary': constants.VOLUME_BINARY,
+            'topic': constants.VOLUME_TOPIC}
+        utils.create_service(self.ctxt, values)
+
+        # Run the migration and verify that we updated 1 entry
+        total, updated = db.volume_service_uuids_online_data_migration(
+            self.ctxt, 10)
+
+        self.assertEqual(1, total)
+        self.assertEqual(1, updated)
+
+    def test_volume_service_uuid_migrations_with_limit(self):
+        """Test db migrate of volumes in batches."""
+        db.volume_create(
+            self.ctxt, {'host': 'host1@lvm-driver1#lvm-driver1'})
+        db.volume_create(
+            self.ctxt, {'host': 'host1@lvm-driver1#lvm-driver1'})
+        db.volume_create(
+            self.ctxt, {'host': 'host1@lvm-driver1#lvm-driver1'})
+
+        values = {
+            'host': 'host1@lvm-driver1',
+            'binary': constants.VOLUME_BINARY,
+            'topic': constants.VOLUME_TOPIC,
+            'uuid': 'a3a593da-7f8d-4bb7-8b4c-f2bc1e0b4824'}
+        utils.create_service(self.ctxt, values)
+
+        # Run the migration and verify that we updated 2 entries
+        total, updated = db.volume_service_uuids_online_data_migration(
+            self.ctxt, 2)
+
+        self.assertEqual(3, total)
+        self.assertEqual(2, updated)
+
+        # Now get the ,last one (intentionally setting max > expected)
+        total, updated = db.volume_service_uuids_online_data_migration(
+            self.ctxt, 2)
+
+        self.assertEqual(1, total)
+        self.assertEqual(1, updated)
+
 
 @ddt.ddt
 class DBAPIVolumeTestCase(BaseTest):
@@ -420,6 +629,22 @@ class DBAPIVolumeTestCase(BaseTest):
             self.assertEqual((THREE, THREE_HUNDREDS),
                              db.volume_data_get_for_project(
                                  self.ctxt, 'p%d' % i))
+
+    def test_volume_data_get_for_project_with_host(self):
+
+        db.volume_create(self.ctxt, {'project_id': fake.PROJECT_ID,
+                                     'size': 100,
+                                     'host': 'host1'})
+        db.volume_create(self.ctxt, {'project_id': fake.PROJECT2_ID,
+                                     'size': 200,
+                                     'host': 'host1'})
+        db.volume_create(self.ctxt, {'project_id': fake.PROJECT2_ID,
+                                     'size': 300,
+                                     'host': 'host2'})
+        resp = db.volume_data_get_for_project(self.ctxt,
+                                              fake.PROJECT2_ID,
+                                              host='host2')
+        self.assertEqual((1, 300), resp)
 
     def test_volume_detached_from_instance(self):
         volume = db.volume_create(self.ctxt, {})
@@ -1467,6 +1692,41 @@ class DBAPISnapshotTestCase(BaseTest):
         actual = db.snapshot_data_get_for_project(self.ctxt, 'project1')
         self.assertEqual((1, 42), actual)
 
+    @ddt.data({'time_collection': [1, 2, 3],
+               'latest': 1},
+              {'time_collection': [4, 2, 6],
+               'latest': 2},
+              {'time_collection': [8, 2, 1],
+               'latest': 1})
+    @ddt.unpack
+    def test_snapshot_get_latest_for_volume(self, time_collection, latest):
+        def hours_ago(hour):
+            return timeutils.utcnow() - datetime.timedelta(
+                hours=hour)
+        db.volume_create(self.ctxt, {'id': 1})
+        for snapshot in time_collection:
+            db.snapshot_create(self.ctxt,
+                               {'id': snapshot, 'volume_id': 1,
+                                'display_name': 'one',
+                                'created_at': hours_ago(snapshot),
+                                'status': fields.SnapshotStatus.AVAILABLE})
+
+        snapshot = db.snapshot_get_latest_for_volume(self.ctxt, 1)
+
+        self.assertEqual(six.text_type(latest), snapshot['id'])
+
+    def test_snapshot_get_latest_for_volume_not_found(self):
+
+        db.volume_create(self.ctxt, {'id': 1})
+        for t_id in [2, 3]:
+            db.snapshot_create(self.ctxt,
+                               {'id': t_id, 'volume_id': t_id,
+                                'display_name': 'one',
+                                'status': fields.SnapshotStatus.AVAILABLE})
+
+        self.assertRaises(exception.VolumeSnapshotNotFound,
+                          db.snapshot_get_latest_for_volume, self.ctxt, 1)
+
     def test_snapshot_get_all_by_filter(self):
         db.volume_create(self.ctxt, {'id': 1})
         db.volume_create(self.ctxt, {'id': 2})
@@ -1656,6 +1916,27 @@ class DBAPISnapshotTestCase(BaseTest):
                                             'project2',
                                             {'fake_key': 'fake'}),
                                         ignored_keys='volume')
+
+    def test_snapshot_get_all_by_project_with_host(self):
+        db.volume_create(self.ctxt, {'id': 1, 'host': 'host1', 'size': 1,
+                                     'project_id': fake.PROJECT_ID})
+        db.volume_create(self.ctxt, {'id': 2, 'host': 'host1', 'size': 2,
+                                     'project_id': fake.PROJECT2_ID})
+        db.volume_create(self.ctxt, {'id': 3, 'host': 'host2', 'size': 3,
+                                     'project_id': fake.PROJECT2_ID})
+        db.snapshot_create(self.ctxt, {'id': 1, 'volume_id': 1,
+                                       'project_id': fake.PROJECT_ID,
+                                       'volume_size': 1})
+        db.snapshot_create(self.ctxt, {'id': 2, 'volume_id': 2,
+                                       'project_id': fake.PROJECT2_ID,
+                                       'volume_size': 2})
+        db.snapshot_create(self.ctxt, {'id': 3, 'volume_id': 3,
+                                       'project_id': fake.PROJECT2_ID,
+                                       'volume_size': 3})
+        resp = db.snapshot_data_get_for_project(self.ctxt,
+                                                fake.PROJECT2_ID,
+                                                host='host2')
+        self.assertEqual((1, 3), resp)
 
     def test_snapshot_metadata_get(self):
         metadata = {'a': 'b', 'c': 'd'}
@@ -2101,6 +2382,13 @@ class DBAPIReservationTestCase(BaseTest):
             'usage': {'id': 1}
         }
 
+    def test__get_reservation_resources(self):
+        reservations = _quota_reserve(self.ctxt, 'project1')
+        expected = ['gigabytes', 'volumes']
+        resources = sqlalchemy_api._get_reservation_resources(
+            sqlalchemy_api.get_session(), self.ctxt, reservations)
+        self.assertEqual(expected, sorted(resources))
+
     def test_reservation_commit(self):
         reservations = _quota_reserve(self.ctxt, 'project1')
         expected = {'project_id': 'project1',
@@ -2311,6 +2599,24 @@ class DBAPIQuotaTestCase(BaseTest):
                           'volumes': {'reserved': 1, 'in_use': 0}},
                          quota_usage)
 
+    def test__get_quota_usages(self):
+        _quota_reserve(self.ctxt, 'project1')
+        session = sqlalchemy_api.get_session()
+        quota_usage = sqlalchemy_api._get_quota_usages(
+            self.ctxt, session, 'project1')
+
+        self.assertEqual(['gigabytes', 'volumes'],
+                         sorted(quota_usage.keys()))
+
+    def test__get_quota_usages_with_resources(self):
+        _quota_reserve(self.ctxt, 'project1')
+        session = sqlalchemy_api.get_session()
+
+        quota_usage = sqlalchemy_api._get_quota_usages(
+            self.ctxt, session, 'project1', resources=['volumes'])
+
+        self.assertEqual(['volumes'], list(quota_usage.keys()))
+
     @mock.patch('oslo_utils.timeutils.utcnow', return_value=UTC_NOW)
     def test_quota_destroy(self, utcnow_mock):
         db.quota_create(self.ctxt, 'project1', 'resource1', 41)
@@ -2401,7 +2707,7 @@ class DBAPIBackupTestCase(BaseTest):
     """Tests for db.api.backup_* methods."""
 
     _ignored_keys = ['id', 'deleted', 'deleted_at', 'created_at',
-                     'updated_at', 'data_timestamp']
+                     'updated_at', 'data_timestamp', 'backup_metadata']
 
     def setUp(self):
         super(DBAPIBackupTestCase, self).setUp()
@@ -2429,6 +2735,7 @@ class DBAPIBackupTestCase(BaseTest):
             'temp_snapshot_id': 'temp_snapshot_id',
             'num_dependent_backups': 0,
             'snapshot_id': 'snapshot_id',
+            'encryption_key_id': 'encryption_key_id',
             'restore_volume_id': 'restore_volume_id'}
         if one:
             return base_values
@@ -2446,7 +2753,7 @@ class DBAPIBackupTestCase(BaseTest):
     def test_backup_create(self):
         values = self._get_values()
         for i, backup in enumerate(self.created):
-            self.assertTrue(backup['id'])
+            self.assertEqual(36, len(backup['id']))  # dynamic UUID
             self._assertEqualObjects(values[i], backup, self._ignored_keys)
 
     def test_backup_get(self):
@@ -2544,7 +2851,7 @@ class DBAPIBackupTestCase(BaseTest):
                 {'status': fields.BackupStatus.DELETED, 'deleted': True,
                  'deleted_at': UTC_NOW},
                 db.backup_destroy(self.ctxt, backup['id']))
-        self.assertFalse(db.backup_get_all(self.ctxt))
+        self.assertEqual([], db.backup_get_all(self.ctxt))
 
     def test_backup_not_found(self):
         self.assertRaises(exception.BackupNotFound, db.backup_get, self.ctxt,
@@ -2945,6 +3252,56 @@ class DBAPIGenericTestCase(BaseTest):
         self.assertTrue(res, msg="Admin cannot find the Snapshot")
 
 
+class EngineFacadeTestCase(BaseTest):
+
+    """Tests for message operations"""
+    def setUp(self):
+        super(EngineFacadeTestCase, self).setUp()
+        self.user_id = fake.USER_ID
+        self.project_id = fake.PROJECT_ID
+        self.context = context.RequestContext(self.user_id, self.project_id)
+
+    @mock.patch.object(sqlalchemy_api, 'get_session')
+    def test_use_single_context_session_writer(self, mock_get_session):
+        # Checks that session in context would not be overwritten by
+        # annotation @sqlalchemy_api.main_context_manager.writer if annotation
+        # is used twice.
+
+        @sqlalchemy_api.main_context_manager.writer
+        def fake_parent_method(context):
+            session = context.session
+            return fake_child_method(context), session
+
+        @sqlalchemy_api.main_context_manager.writer
+        def fake_child_method(context):
+            session = context.session
+            sqlalchemy_api.model_query(context, models.Volume)
+            return session
+
+        parent_session, child_session = fake_parent_method(self.context)
+        self.assertEqual(parent_session, child_session)
+
+    @mock.patch.object(sqlalchemy_api, 'get_session')
+    def test_use_single_context_session_reader(self, mock_get_session):
+        # Checks that session in context would not be overwritten by
+        # annotation @sqlalchemy_api.main_context_manager.reader if annotation
+        # is used twice.
+
+        @sqlalchemy_api.main_context_manager.reader
+        def fake_parent_method(context):
+            session = context.session
+            return fake_child_method(context), session
+
+        @sqlalchemy_api.main_context_manager.reader
+        def fake_child_method(context):
+            session = context.session
+            sqlalchemy_api.model_query(context, models.Volume)
+            return session
+
+        parent_session, child_session = fake_parent_method(self.context)
+        self.assertEqual(parent_session, child_session)
+
+
 @ddt.ddt
 class DBAPIBackendTestCase(BaseTest):
     @ddt.data((True, True), (True, False), (False, True), (False, False))
@@ -2978,3 +3335,198 @@ class DBAPIBackendTestCase(BaseTest):
             cluster += '#poolname'
         self.assertEqual(frozen,
                          db.is_backend_frozen(self.ctxt, host, cluster))
+
+
+@ddt.ddt
+class DBAPIGroupTestCase(BaseTest):
+    def test_group_get_all_by_host(self):
+        grp_type = db.group_type_create(self.ctxt, {'name': 'my_group_type'})
+        groups = []
+        backend = 'host1@lvm'
+        for i in range(3):
+            groups.append([db.group_create(
+                self.ctxt,
+                {'host': '%(b)s%(n)d' % {'b': backend, 'n': i},
+                 'group_type_id': grp_type['id']})
+                for j in range(3)])
+
+        for i in range(3):
+            host = '%(b)s%(n)d' % {'b': backend, 'n': i}
+            filters = {'host': host, 'backend_match_level': 'backend'}
+            grps = db.group_get_all(
+                self.ctxt, filters=filters)
+            self._assertEqualListsOfObjects(groups[i], grps)
+            for grp in grps:
+                db.group_destroy(self.ctxt, grp['id'])
+
+        db.group_type_destroy(self.ctxt, grp_type['id'])
+
+    def test_group_get_all_by_host_with_pools(self):
+        grp_type = db.group_type_create(self.ctxt, {'name': 'my_group_type'})
+        groups = []
+        backend = 'host1@lvm'
+        pool = '%s#pool1' % backend
+        grp_on_host_wo_pool = [db.group_create(
+            self.ctxt,
+            {'host': backend,
+             'group_type_id': grp_type['id']})
+            for j in range(3)]
+        grp_on_host_w_pool = [db.group_create(
+            self.ctxt,
+            {'host': pool,
+             'group_type_id': grp_type['id']})]
+        groups.append(grp_on_host_wo_pool + grp_on_host_w_pool)
+        # insert an additional record that doesn't belongs to the same
+        # host as 'foo' and test if it is included in the result
+        grp_foobar = db.group_create(self.ctxt,
+                                     {'host': '%sfoo' % backend,
+                                      'group_type_id': grp_type['id']})
+
+        filters = {'host': backend, 'backend_match_level': 'backend'}
+        grps = db.group_get_all(self.ctxt, filters=filters)
+        self._assertEqualListsOfObjects(groups[0], grps)
+        for grp in grps:
+            db.group_destroy(self.ctxt, grp['id'])
+
+        db.group_destroy(self.ctxt, grp_foobar['id'])
+
+        db.group_type_destroy(self.ctxt, grp_type['id'])
+
+    def _create_gs_to_test_include_in(self):
+        """Helper method for test_group_include_in_* tests."""
+        return [
+            db.group_create(
+                self.ctxt, {'host': 'host1@backend1#pool1',
+                            'cluster_name': 'cluster1@backend1#pool1'}),
+            db.group_create(
+                self.ctxt, {'host': 'host1@backend2#pool2',
+                            'cluster_name': 'cluster1@backend2#pool1'}),
+            db.group_create(
+                self.ctxt, {'host': 'host2@backend#poo1',
+                            'cluster_name': 'cluster2@backend#pool'}),
+        ]
+
+    @ddt.data('host1@backend1#pool1', 'host1@backend1')
+    def test_group_include_in_cluster_by_host(self, host):
+        group = self._create_gs_to_test_include_in()[0]
+
+        cluster_name = 'my_cluster'
+        result = db.group_include_in_cluster(self.ctxt, cluster_name,
+                                             partial_rename=False, host=host)
+        self.assertEqual(1, result)
+        db_group = db.group_get(self.ctxt, group.id)
+        self.assertEqual(cluster_name, db_group.cluster_name)
+
+    def test_group_include_in_cluster_by_host_multiple(self):
+        groups = self._create_gs_to_test_include_in()[0:2]
+
+        host = 'host1'
+        cluster_name = 'my_cluster'
+        result = db.group_include_in_cluster(self.ctxt, cluster_name,
+                                             partial_rename=True, host=host)
+        self.assertEqual(2, result)
+        db_group = [db.group_get(self.ctxt, groups[0].id),
+                    db.group_get(self.ctxt, groups[1].id)]
+        for i in range(2):
+            self.assertEqual(cluster_name + groups[i].host[len(host):],
+                             db_group[i].cluster_name)
+
+    @ddt.data('cluster1@backend1#pool1', 'cluster1@backend1')
+    def test_group_include_in_cluster_by_cluster_name(self, cluster_name):
+        group = self._create_gs_to_test_include_in()[0]
+
+        new_cluster_name = 'cluster_new@backend1#pool'
+        result = db.group_include_in_cluster(self.ctxt, new_cluster_name,
+                                             partial_rename=False,
+                                             cluster_name=cluster_name)
+
+        self.assertEqual(1, result)
+        db_group = db.group_get(self.ctxt, group.id)
+        self.assertEqual(new_cluster_name, db_group.cluster_name)
+
+    def test_group_include_in_cluster_by_cluster_multiple(self):
+        groups = self._create_gs_to_test_include_in()[0:2]
+
+        cluster_name = 'cluster1'
+        new_cluster_name = 'my_cluster'
+        result = db.group_include_in_cluster(self.ctxt, new_cluster_name,
+                                             partial_rename=True,
+                                             cluster_name=cluster_name)
+
+        self.assertEqual(2, result)
+        db_groups = [db.group_get(self.ctxt, groups[0].id),
+                     db.group_get(self.ctxt, groups[1].id)]
+        for i in range(2):
+            self.assertEqual(
+                new_cluster_name + groups[i].cluster_name[len(cluster_name):],
+                db_groups[i].cluster_name)
+
+
+class DBAPIAttachmentSpecsTestCase(BaseTest):
+    def test_attachment_specs_online_data_migration(self):
+        """Tests the online data migration initiated via cinder-manage"""
+        # Create five attachment records:
+        # 1. first attachment has specs but is deleted so it's ignored
+        # 2. second attachment is already migrated (no attachment_specs
+        #    entries) so it's ignored
+        # 3. the remaining attachments have specs so they are migrated in
+        #    in batches of 2
+
+        # Create an attachment record with specs and delete it.
+        attachment = objects.VolumeAttachment(
+            self.ctxt, attach_status='attaching', volume_id=fake.VOLUME_ID)
+        attachment.create()
+        # Create an attachment_specs entry for attachment.
+        connector = {'host': '127.0.0.1'}
+        db.attachment_specs_update_or_create(
+            self.ctxt, attachment.id, connector)
+        # Now delete the attachment which should also delete the specs.
+        attachment.destroy()
+        # Run the migration routine to see that there is nothing to migrate.
+        total, migrated = db.attachment_specs_online_data_migration(
+            self.ctxt, 50)
+        self.assertEqual(0, total)
+        self.assertEqual(0, migrated)
+
+        # Create a volume attachment with no specs (already migrated).
+        attachment = objects.VolumeAttachment(
+            self.ctxt, attach_status='attaching', volume_id=fake.VOLUME_ID,
+            connector=connector)
+        attachment.create()
+        # Run the migration routine to see that there is nothing to migrate.
+        total, migrated = db.attachment_specs_online_data_migration(
+            self.ctxt, 50)
+        self.assertEqual(0, total)
+        self.assertEqual(0, migrated)
+
+        # We have to create a real volume because of the joinedload in the
+        # DB API query to get the volume attachment.
+        volume = db.volume_create(self.ctxt, {'host': 'host1'})
+
+        # Now create three volume attachments with specs and migrate them
+        # in batches of 2 to show we are enforcing the limit.
+        for x in range(3):
+            attachment = objects.VolumeAttachment(
+                self.ctxt, attach_status='attaching', volume_id=volume['id'])
+            attachment.create()
+            # Create an attachment_specs entry for the attachment.
+            db.attachment_specs_update_or_create(
+                self.ctxt, attachment.id, connector)
+
+        # Migrate 2 at a time.
+        total, migrated = db.attachment_specs_online_data_migration(
+            self.ctxt, 2)
+        self.assertEqual(3, total)
+        self.assertEqual(2, migrated)
+
+        # This should complete the migration.
+        total, migrated = db.attachment_specs_online_data_migration(
+            self.ctxt, 2)
+        self.assertEqual(1, total)
+        self.assertEqual(1, migrated)
+
+        # Run it one more time to make sure there is nothing left.
+        total, migrated = db.attachment_specs_online_data_migration(
+            self.ctxt, 2)
+        self.assertEqual(0, total)
+        self.assertEqual(0, migrated)
